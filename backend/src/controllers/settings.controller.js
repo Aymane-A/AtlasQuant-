@@ -1,0 +1,132 @@
+/**
+ * controllers/settings.controller.js
+ */
+const bcrypt = require('bcryptjs');
+const db     = require('../config/db');
+const logger = require('../utils/logger');
+
+// ── GET /api/settings ─────────────────────────────────────
+async function getSettings(req, res) {
+  try {
+    const userId = req.user.id;
+
+    const { rows: userRows } = await db.query(
+      'SELECT name, email, plan FROM users WHERE id = $1',
+      [userId]
+    );
+
+    const { rows: settingsRows } = await db.query(
+      `SELECT theme, notifications, api_keys_enabled,
+              default_capital, default_risk_pct, default_timeframe
+       FROM user_settings WHERE user_id = $1`,
+      [userId]
+    );
+
+    const settings = settingsRows[0] || {
+      theme: 'dark',
+      notifications: { email_alerts: true, push_alerts: true, price_alerts: true },
+      api_keys_enabled: false,
+      default_capital: 100000,
+      default_risk_pct: 1,
+      default_timeframe: 'Daily',
+    };
+
+    res.json({ success: true, profile: userRows[0] || {}, settings });
+  } catch (err) {
+    logger.error(`[settings] getSettings: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+// ── POST /api/settings/update ─────────────────────────────
+async function updateSettings(req, res) {
+  try {
+    const userId = req.user.id;
+    const { section, payload } = req.body;
+
+    if (!section || !payload)
+      return res.status(400).json({ success: false, error: 'section et payload requis' });
+
+    if (section === 'profile') {
+      await db.query(
+        'UPDATE users SET name = $1, updated_at = NOW() WHERE id = $2',
+        [payload.name, userId]
+      );
+      return res.json({ success: true, message: 'Profil mis à jour' });
+    }
+
+    if (section === 'notifications') {
+      await db.query(
+        `INSERT INTO user_settings (user_id, notifications)
+         VALUES ($1, $2)
+         ON CONFLICT (user_id) DO UPDATE SET notifications = EXCLUDED.notifications, updated_at = NOW()`,
+        [userId, JSON.stringify(payload)]
+      );
+      return res.json({ success: true, message: 'Notifications mises à jour' });
+    }
+
+    if (section === 'trading') {
+      await db.query(
+        `INSERT INTO user_settings (user_id, default_capital, default_risk_pct, default_timeframe)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (user_id) DO UPDATE SET
+           default_capital    = EXCLUDED.default_capital,
+           default_risk_pct   = EXCLUDED.default_risk_pct,
+           default_timeframe  = EXCLUDED.default_timeframe,
+           updated_at         = NOW()`,
+        [userId, payload.default_capital, payload.default_risk_pct, payload.default_timeframe]
+      );
+      return res.json({ success: true, message: 'Trading mis à jour' });
+    }
+
+    if (section === 'appearance') {
+      if (!['dark', 'light'].includes(payload.theme))
+        return res.status(400).json({ success: false, error: 'theme invalide' });
+      await db.query(
+        `INSERT INTO user_settings (user_id, theme)
+         VALUES ($1, $2)
+         ON CONFLICT (user_id) DO UPDATE SET theme = EXCLUDED.theme, updated_at = NOW()`,
+        [userId, payload.theme]
+      );
+      return res.json({ success: true, message: 'Thème mis à jour' });
+    }
+
+    return res.status(400).json({ success: false, error: `Section inconnue: ${section}` });
+
+  } catch (err) {
+    logger.error(`[settings] updateSettings: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+// ── POST /api/settings/password ───────────────────────────
+async function changePassword(req, res) {
+  try {
+    const userId = req.user.id;
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword)
+      return res.status(400).json({ success: false, error: 'Mots de passe requis' });
+
+    if (newPassword.length < 8)
+      return res.status(400).json({ success: false, error: 'Min. 8 caractères' });
+
+    const { rows } = await db.query('SELECT password FROM users WHERE id = $1', [userId]);
+    if (!rows.length)
+      return res.status(404).json({ success: false, error: 'Utilisateur introuvable' });
+
+    const isMatch = await bcrypt.compare(currentPassword, rows[0].password);
+    if (!isMatch)
+      return res.status(401).json({ success: false, error: 'Mot de passe actuel incorrect' });
+
+    const hashed = await bcrypt.hash(newPassword, 10);
+    await db.query('UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2', [hashed, userId]);
+
+    res.json({ success: true, message: 'Mot de passe mis à jour' });
+  } catch (err) {
+    logger.error(`[settings] changePassword: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+module.exports = { getSettings, updateSettings, changePassword };

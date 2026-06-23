@@ -1,0 +1,123 @@
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+:root {
+  --cyan: #00f5d4;
+  --cyan-dim: #00c4aa;
+  --cyan-glow: rgba(0, 245, 212, 0.15);
+  --purple: #7b5ea7;
+  --purple-bright: #a78bfa;
+  --amber: #fbbf24;
+  --red: #f87171;
+  --green: #34d399;
+  --bg: #030712;
+  --surface: rgba(255, 255, 255, 0.03);
+  --surface-hover: rgba(255, 255, 255, 0.06);
+  --border: rgba(255, 255, 255, 0.06);
+  --border-accent: rgba(0, 245, 212, 0.25);
+  --text-primary: #f1f5f9;
+  --text-secondary: #64748b;
+  --text-muted: #334155;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  background:
+    radial-gradient(circle at 22% 18%, rgba(0, 245, 212, 0.08), transparent 28%),
+    radial-gradient(circle at 82% 78%, rgba(167, 139, 250, 0.08), transparent 30%),
+    linear-gradient(180deg, #030712 0%, #06101f 48%, #030712 100%);
+  color: var(--text-primary);
+  font-family: Syne, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  overflow: hidden;
+  transition: background 0.3s, color 0.3s;
+}
+
+/* ── Light Mode ───────────────────────────────────────────── */
+body.light {
+  --cyan: #0891b2;
+  --cyan-dim: #0e7490;
+  --cyan-glow: rgba(8, 145, 178, 0.12);
+  --purple: #6d28d9;
+  --purple-bright: #7c3aed;
+  --amber: #d97706;
+  --red: #dc2626;
+  --green: #059669;
+  --surface: rgba(0, 0, 0, 0.04);
+  --surface-hover: rgba(0, 0, 0, 0.08);
+  --border: rgba(0, 0, 0, 0.08);
+  --border-accent: rgba(8, 145, 178, 0.3);
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #94a3b8;
+  background:
+    radial-gradient(circle at 22% 18%, rgba(8, 145, 178, 0.06), transparent 28%),
+    radial-gradient(circle at 82% 78%, rgba(124, 58, 237, 0.05), transparent 30%),
+    linear-gradient(180deg, #f8fafc 0%, #f1f5f9 48%, #f8fafc 100%);
+  color: #0f172a;
+}
+
+body.light .panel,
+body.light [class*="panel"] {
+  background: rgba(255,255,255,0.8) !important;
+  border-color: rgba(0,0,0,0.08) !important;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+#cursor {
+  position: fixed;
+  width: 8px;
+  height: 8px;
+  background: var(--cyan);
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 9999;
+  transform: translate(-50%, -50%);
+  mix-blend-mode: screen;
+}
+
+#cursor-ring {
+  position: fixed;
+  width: 32px;
+  height: 32px;
+  border: 1px solid rgba(0, 245, 212, 0.4);
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 9998;
+  transform: translate(-50%, -50%);
+}
+
+@keyframes pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 0 5px rgba(52, 211, 153, 0);
+  }
+}
+
+@keyframes tickerScroll {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
