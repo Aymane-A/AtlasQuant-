@@ -18,7 +18,7 @@ const INTEL = [
 ];
 const SYS = [
   { label: 'Settings',     path: '/settings',      icon: '⬡' },
-  { label: 'API Keys',     path: '/api_keys',      icon: '◎' },
+  { label: 'Exchanges',     path: '/exchanges',      icon: '◎' },
 ];
 const TOPNAV = ['Markets', 'Analytics', 'Portfolio', 'Alerts'];
 

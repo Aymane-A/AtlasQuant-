@@ -3,8 +3,9 @@
  */
 const db     = require('../config/db');
 const logger = require('../utils/logger');
-const { scanAll }  = require('../services/signalGenerator.service');
-const { scanAllYF } = require('../services/yahooFinance.service');
+
+// NOTE: scanAll / scanAllYF required lazily inside getAllSignals()
+// to break circular dependency chain.
 
 function parseRR(val) {
     if (!val) return 0;
@@ -23,6 +24,10 @@ async function getAllSignals(req, res) {
         const { interval = '4h', refresh } = req.query;
 
         if (refresh === 'true') {
+            // Lazy require — avoids circular dep at module load time
+            const { scanAll }   = require('../services/signalGenerator.service');
+            const { scanAllYF } = require('../services/yahooFinance.service');
+
             const [cryptoResult, yfResult] = await Promise.all([
                 scanAll(interval),
                 scanAllYF(interval),
@@ -121,8 +126,8 @@ function classifyAsset(symbol) {
     const COMMO   = ['XAU','XAG','OIL','WTI','BRENT','GAS','NG','WHEAT','CORN','COPPER'];
     const INDICES = ['SPY','QQQ','DIA','IWM','SPX','NDX','VIX'];
 
-    if (FOREX.some(f  => s.includes(f) && s.includes('/') && !s.includes('USDT') && !s.includes('BTC')))  return 'Forex';
-    if (COMMO.some(c  => s.includes(c)))  return 'Commodités';
+    if (FOREX.some(f  => s.includes(f) && s.includes('/') && !s.includes('USDT') && !s.includes('BTC'))) return 'Forex';
+    if (COMMO.some(c  => s.includes(c))) return 'Commodités';
     if (INDICES.some(i => s.includes(i))) return 'Indices';
     return 'Crypto';
 }
@@ -192,11 +197,7 @@ async function getAnalyticsData(req, res) {
             { label:'Actifs',         v: uniqueSymbols.length.toString(), sub:'Crypto · Forex · Commo',             color:'var(--purple-bright)' },
         ];
 
-        // ── Real P&L per signal (in % of entry, capped at ±20%) ──
-        // Logic: BUY wins if tp hit (reward%), loses if sl hit (-risk%)
-        //        SELL wins if sl hit as price drops (reward%), loses if tp hit (-risk%)
-        //        HOLD = 0 (neutral, no directional bet)
-        // If entry/sl/tp missing → use confidence as proxy (conf>60 = small gain, else small loss)
+        // ── Real P&L per signal ──
         function calcPnlPct(s) {
             const entry  = parseFloat(s.entry)       || parseFloat(s.price) || 0;
             const sl     = parseFloat(s.stop_loss)   || 0;
@@ -204,13 +205,11 @@ async function getAnalyticsData(req, res) {
             if (entry && sl && tp) {
                 const riskPct   = Math.abs((entry - sl) / entry) * 100;
                 const rewardPct = Math.abs((tp - entry) / entry) * 100;
-                // Assume signal hits TP if confidence >= 55, else SL
                 const conf = s.confidence || 50;
                 if (s.signal === 'BUY')  return conf >= 55 ?  rewardPct : -riskPct;
                 if (s.signal === 'SELL') return conf >= 55 ?  rewardPct : -riskPct;
-                return 0; // HOLD
+                return 0;
             }
-            // Fallback: no price data → use RR + confidence
             const rr   = parseRR(s.risk_reward);
             const conf = s.confidence || 50;
             if (s.signal === 'HOLD') return 0;
@@ -218,10 +217,9 @@ async function getAnalyticsData(req, res) {
             return conf >= 55 ? 0.3 : -0.3;
         }
 
-        // ── Equity curve: cumulative P&L starting at 100 base ──
+        // ── Equity curve ──
         const sortedAscAll = signals.slice().sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
         let cumPnl = 0;
-        // Benchmark: simple 0.03% per signal (passive market drift)
         let cumBench = 0;
         const equity = sortedAscAll.map(s => {
             const pnl = calcPnlPct(s);
@@ -235,7 +233,7 @@ async function getAnalyticsData(req, res) {
             };
         });
 
-        // ── Monthly returns: real sum of P&L % per month ──
+        // ── Monthly returns ──
         const monthMap = {};
         sortedAscAll.forEach(s => {
             const d   = new Date(s.created_at);
@@ -289,7 +287,7 @@ async function getAnalyticsData(req, res) {
             };
         });
 
-        // ── NEW: P&L Attribution by asset class ──────────────
+        // ── P&L Attribution by asset class ──
         const classMap = {};
         signals.forEach(s => {
             const cls = classifyAsset(s.symbol);
@@ -324,7 +322,7 @@ async function getAnalyticsData(req, res) {
             color:   COLORS[name] || 'var(--cyan)',
         })).sort((a, b) => b.total - a.total);
 
-        // ── NEW: Performance by Day of Week ──────────────────
+        // ── Performance by Day of Week ──
         const DOW_ORDER = ['Lun','Mar','Mer','Jeu','Ven','Sam','Dim'];
         const dowMap = {};
         DOW_ORDER.forEach(d => { dowMap[d] = { buy: 0, sell: 0, hold: 0, total: 0 }; });
@@ -346,7 +344,7 @@ async function getAnalyticsData(req, res) {
             sell: dowMap[day].sell,
         }));
 
-        // ── NEW: Rolling 30-day win rate ──────────────────────
+        // ── Rolling 30-day win rate ──
         const sortedAsc = signals.slice().sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
         const WINDOW = 30;
         const rolling = [];
@@ -360,32 +358,57 @@ async function getAnalyticsData(req, res) {
                 count:   windowSlice.length,
             });
         }
-        // Deduplicate by day (keep last value per day)
         const rollingDeduped = Object.values(
             rolling.reduce((acc, r) => { acc[r.day] = r; return acc; }, {})
         );
 
-        // ── NEW: Strategy Fingerprint (radar metrics) ─────────
-        // Normalize each metric to 0-100 scale
-        const maxRR   = 3;   // cap at 1:3
-        const maxConf = 100;
-        const consistency = signals.length > 1
-            ? Math.max(0, 100 - (signals.reduce((acc, s, i, arr) => {
-                if (i === 0) return 0;
-                return acc + Math.abs((s.confidence || 0) - (arr[i-1].confidence || 0));
-              }, 0) / (signals.length - 1)))
-            : 50;
+        // ── Strategy Fingerprint ──
+        const rrScore = Math.min(100, parseFloat(avgRR) / 3 * 100);
 
-        const diversification = Math.min(100, (uniqueSymbols.length / 10) * 100);
-        const activity = Math.min(100, (total / 50) * 100);
+        const weekMap = {};
+        sortedAsc.forEach(s => {
+            const d = new Date(s.created_at);
+            const startOfYear = new Date(d.getFullYear(), 0, 1);
+            const week = Math.ceil(((d - startOfYear) / 86400000 + startOfYear.getDay() + 1) / 7);
+            const key = `${d.getFullYear()}-W${week}`;
+            if (!weekMap[key]) weekMap[key] = { buy: 0, total: 0 };
+            weekMap[key].total++;
+            if (s.signal === 'BUY') weekMap[key].buy++;
+        });
+        const weekRates = Object.values(weekMap).map(w => w.total > 0 ? (w.buy / w.total) * 100 : 0);
+        let consistencyScore = 50;
+        if (weekRates.length > 1) {
+            const mean = weekRates.reduce((a, b) => a + b, 0) / weekRates.length;
+            const variance = weekRates.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / weekRates.length;
+            const stdDev = Math.sqrt(variance);
+            consistencyScore = Math.max(0, Math.min(100, 100 - (stdDev / 30) * 100));
+        } else if (weekRates.length === 1) {
+            consistencyScore = 60;
+        }
+
+        const classCount = Object.keys(classMap).length;
+        const diversificationScore = Math.min(100, (classCount / 4) * 100);
+
+        let activityScore = 50;
+        if (signals.length > 0) {
+            const oldest = new Date(sortedAsc[0]?.created_at);
+            const newest = new Date(sortedAsc[sortedAsc.length - 1]?.created_at);
+            const daySpan = Math.max(1, (newest - oldest) / 86400000);
+            const sigPerDay = total / daySpan;
+            if (sigPerDay >= 3 && sigPerDay <= 5)      activityScore = 100;
+            else if (sigPerDay >= 1 && sigPerDay < 3)  activityScore = 60 + (sigPerDay - 1) / 2 * 40;
+            else if (sigPerDay > 5 && sigPerDay <= 10) activityScore = 100 - (sigPerDay - 5) / 5 * 30;
+            else if (sigPerDay > 10)                   activityScore = 70 - Math.min(30, (sigPerDay - 10) * 2);
+            else                                       activityScore = Math.max(10, sigPerDay * 40);
+        }
 
         const fingerprint = [
-            { metric: 'Win Rate',        value: parseFloat(winRate),                              max: 100 },
-            { metric: 'Avg Confidence',  value: parseFloat(avgConf),                              max: 100 },
-            { metric: 'Risk/Reward',     value: parseFloat(Math.min(parseFloat(avgRR) / maxRR * 100, 100).toFixed(1)), max: 100 },
-            { metric: 'Consistance',     value: parseFloat(consistency.toFixed(1)),               max: 100 },
-            { metric: 'Diversification', value: parseFloat(diversification.toFixed(1)),           max: 100 },
-            { metric: 'Activité',        value: parseFloat(activity.toFixed(1)),                  max: 100 },
+            { metric: 'Win Rate',        value: parseFloat(parseFloat(winRate).toFixed(1)),          max: 100 },
+            { metric: 'Avg Confidence',  value: parseFloat(parseFloat(avgConf).toFixed(1)),          max: 100 },
+            { metric: 'Risk/Reward',     value: parseFloat(rrScore.toFixed(1)),                      max: 100 },
+            { metric: 'Consistance',     value: parseFloat(consistencyScore.toFixed(1)),             max: 100 },
+            { metric: 'Diversification', value: parseFloat(diversificationScore.toFixed(1)),         max: 100 },
+            { metric: 'Activité',        value: parseFloat(Math.min(100, activityScore).toFixed(1)), max: 100 },
         ];
 
         res.json({ success: true, kpis, equity, monthly, trades, attribution, byDow, rolling: rollingDeduped, fingerprint });

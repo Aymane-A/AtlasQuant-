@@ -29,19 +29,19 @@ function Spark({ color }) {
   );
 }
 
-// Compact SVG radar — 200x200, fits inline
+// Compact SVG radar — larger viewBox to fit labels
 function MiniRadar({ data }) {
   if (!data?.length) return null;
-  const cx=100, cy=100, r=68, N=data.length;
+  const cx=130, cy=120, r=72, N=data.length;
   const angle = i => (i/N)*2*Math.PI - Math.PI/2;
   const pt = (i, scale) => ({
     x: cx + Math.cos(angle(i))*scale*r,
     y: cy + Math.sin(angle(i))*scale*r,
   });
   const gridPoly = scale => Array.from({length:N},(_,i)=>{const p=pt(i,scale);return`${p.x},${p.y}`;}).join(' ');
-  const valuePts = data.map((d,i) => pt(i, d.value/d.max));
+  const valuePts = data.map((d,i) => pt(i, Math.max(0.05, d.value/d.max)));
   return (
-    <svg width="200" height="200">
+    <svg width="260" height="240" viewBox="0 0 260 240">
       {[0.25,0.5,0.75,1].map(s=>(
         <polygon key={s} points={gridPoly(s)} fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="0.5"/>
       ))}
@@ -51,7 +51,7 @@ function MiniRadar({ data }) {
       })}
       <polygon
         points={valuePts.map(p=>`${p.x},${p.y}`).join(' ')}
-        fill="rgba(0,245,212,0.08)"
+        fill="rgba(0,245,212,0.09)"
         stroke="var(--cyan)"
         strokeWidth="1.5"
         strokeLinejoin="round"
@@ -60,11 +60,13 @@ function MiniRadar({ data }) {
         <circle key={i} cx={p.x} cy={p.y} r="2.5" fill="var(--cyan)" opacity="0.85"/>
       ))}
       {data.map((d,i)=>{
-        const lp = pt(i, 1.28);
+        const lp = pt(i, 1.38);
+        // shorten long labels
+        const label = d.metric === 'Diversification' ? 'Divers.' : d.metric === 'Avg Confidence' ? 'Confiance' : d.metric;
         return (
           <g key={i}>
-            <text x={lp.x} y={lp.y-3} textAnchor="middle" fontSize="8" fill="rgba(148,163,184,0.7)" fontFamily="JetBrains Mono,monospace">{d.metric}</text>
-            <text x={lp.x} y={lp.y+9} textAnchor="middle" fontSize="9" fill="var(--cyan)" fontFamily="JetBrains Mono,monospace" fontWeight="700">{d.value}%</text>
+            <text x={lp.x} y={lp.y-2} textAnchor="middle" fontSize="7.5" fill="rgba(148,163,184,0.75)" fontFamily="JetBrains Mono,monospace">{label}</text>
+            <text x={lp.x} y={lp.y+10} textAnchor="middle" fontSize="9" fill="var(--cyan)" fontFamily="JetBrains Mono,monospace" fontWeight="700">{d.value}%</text>
           </g>
         );
       })}
@@ -172,7 +174,7 @@ export default function Analytics() {
                 <div style={{fontSize:8,letterSpacing:'.12em',color:'var(--text-muted)',textTransform:'uppercase',fontFamily:'JetBrains Mono,monospace',marginBottom:7}}>{k.label}</div>
                 <div style={{fontSize:22,fontWeight:800,color:k.color,marginBottom:3,letterSpacing:'-.02em',lineHeight:1}}>{k.v}</div>
                 <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginTop:6}}>
-                  <div style={{fontSize:9,fontFamily:'JetBrains Mono,monospace',color:k.sub?.startsWith('▲')?'var(--green)':'var(--text-secondary)',maxWidth:80,lineHeight:1.3}}>{k.sub}</div>
+                  <div style={{fontSize:9,fontFamily:'JetBrains Mono,monospace',color:k.sub?.startsWith('↑')?'var(--green)':'var(--text-secondary)',maxWidth:80,lineHeight:1.3}}>{k.sub}</div>
                   <Spark color={k.color}/>
                 </div>
               </div>
@@ -253,17 +255,31 @@ export default function Analytics() {
                     })()}
                   </div>
                   {data.monthly.length === 1 ? (
-                    // Single month — show as stat card instead of chart
-                    <div style={{display:'flex',flexDirection:'column',justifyContent:'center',alignItems:'center',height:160,gap:6}}>
-                      <div style={{fontSize:9,color:'var(--text-muted)',fontFamily:'JetBrains Mono,monospace',letterSpacing:'.1em',textTransform:'uppercase'}}>{data.monthly[0].month}</div>
-                      <div style={{fontSize:36,fontWeight:800,fontFamily:'JetBrains Mono,monospace',color:data.monthly[0].ret>=0?'var(--green)':'var(--red)',lineHeight:1}}>
-                        {data.monthly[0].ret>=0?'+':''}{data.monthly[0].ret}%
+                    // Single month — compact stat row
+                    <div style={{display:'flex',alignItems:'center',justifyContent:'space-around',height:160,gap:12,padding:'0 12px'}}>
+                      <div style={{textAlign:'center'}}>
+                        <div style={{fontSize:8,letterSpacing:'.12em',color:'var(--text-muted)',textTransform:'uppercase',fontFamily:'JetBrains Mono,monospace',marginBottom:6}}>Période</div>
+                        <div style={{fontSize:13,fontWeight:700,color:'var(--text-primary)',fontFamily:'JetBrains Mono,monospace'}}>{data.monthly[0].month}</div>
                       </div>
-                      <div style={{fontSize:10,color:'var(--text-muted)',fontFamily:'JetBrains Mono,monospace'}}>
-                        {data.monthly[0].count} signaux · {data.monthly[0].winRate}% win rate
+                      <div style={{width:1,height:40,background:'var(--border)'}}/>
+                      <div style={{textAlign:'center'}}>
+                        <div style={{fontSize:8,letterSpacing:'.12em',color:'var(--text-muted)',textTransform:'uppercase',fontFamily:'JetBrains Mono,monospace',marginBottom:6}}>P&L Mois</div>
+                        <div style={{fontSize:22,fontWeight:800,fontFamily:'JetBrains Mono,monospace',color:data.monthly[0].ret>=0?'var(--green)':'var(--red)',lineHeight:1}}>
+                          {data.monthly[0].ret>=0?'+':''}{data.monthly[0].ret}%
+                        </div>
                       </div>
-                      <div style={{fontSize:9,color:'var(--text-muted)',fontFamily:'JetBrains Mono,monospace',marginTop:4,opacity:0.6}}>
-                        Données insuffisantes pour le graphique
+                      <div style={{width:1,height:40,background:'var(--border)'}}/>
+                      <div style={{textAlign:'center'}}>
+                        <div style={{fontSize:8,letterSpacing:'.12em',color:'var(--text-muted)',textTransform:'uppercase',fontFamily:'JetBrains Mono,monospace',marginBottom:6}}>Signaux</div>
+                        <div style={{fontSize:18,fontWeight:700,color:'var(--text-primary)',fontFamily:'JetBrains Mono,monospace'}}>{data.monthly[0].count}</div>
+                      </div>
+                      <div style={{width:1,height:40,background:'var(--border)'}}/>
+                      <div style={{textAlign:'center'}}>
+                        <div style={{fontSize:8,letterSpacing:'.12em',color:'var(--text-muted)',textTransform:'uppercase',fontFamily:'JetBrains Mono,monospace',marginBottom:6}}>Win Rate</div>
+                        <div style={{fontSize:18,fontWeight:700,color:'var(--amber)',fontFamily:'JetBrains Mono,monospace'}}>{data.monthly[0].winRate}%</div>
+                      </div>
+                      <div style={{fontSize:9,color:'var(--text-muted)',fontFamily:'JetBrains Mono,monospace',opacity:0.5,textAlign:'center',maxWidth:80,lineHeight:1.4}}>
+                        Graphique disponible avec 2+ mois
                       </div>
                     </div>
                   ) : (()=>{
@@ -295,59 +311,92 @@ export default function Analytics() {
             );
           })()}
 
-          {/* ── Row 3: Distribution (donut) + Journal ── */}
-          <div style={{display:'grid',gridTemplateColumns:'220px 1fr',gap:12}}>
+          {/* ── Row 3: Distribution (ring) + Journal ── */}
+          <div style={{display:'grid',gridTemplateColumns:'260px 1fr',gap:12}}>
             <div className="panel" style={{padding:18}}>
-              <div style={{fontSize:12,fontWeight:600,marginBottom:12,display:'flex',alignItems:'center',gap:7}}>
+              <div style={{fontSize:12,fontWeight:600,marginBottom:14,display:'flex',alignItems:'center',gap:7}}>
                 <div style={{width:5,height:5,borderRadius:'50%',background:'var(--purple-bright)'}}/>
                 Distribution
               </div>
-              {/* Donut SVG */}
               {(()=>{
-                const cx=88, cy=78, R=54, r=34, gap=2;
-                const colors = ['var(--green)','var(--red)','var(--amber)'];
+                const cx=130, cy=108, R=78, r=52, gap=3;
                 const hexColors = ['#34d399','#f87171','#fbbf24'];
+                const glowColors= ['rgba(52,211,153,0.25)','rgba(248,113,113,0.25)','rgba(251,191,36,0.25)'];
                 let cumAngle = -Math.PI/2;
-                const slices = distItems.map((item, idx) => {
-                  const pct = total > 0 ? item.count / total : 0;
+                const slices = distItems.map((item,idx) => {
+                  const pct   = total > 0 ? item.count / total : 0;
                   const angle = pct * 2 * Math.PI;
-                  const startA = cumAngle + gap/R;
-                  const endA   = cumAngle + angle - gap/R;
+                  const startA = cumAngle + (gap / R);
+                  const midA   = cumAngle + angle / 2;
+                  const endA   = cumAngle + angle - (gap / R);
                   cumAngle += angle;
-                  if (pct === 0) return null;
+                  if (pct < 0.01) return null;
                   const x1=cx+R*Math.cos(startA), y1=cy+R*Math.sin(startA);
                   const x2=cx+R*Math.cos(endA),   y2=cy+R*Math.sin(endA);
                   const x3=cx+r*Math.cos(endA),   y3=cy+r*Math.sin(endA);
                   const x4=cx+r*Math.cos(startA), y4=cy+r*Math.sin(startA);
                   const large = angle > Math.PI ? 1 : 0;
+                  // Label position — outside the arc
+                  const labelR = R + 18;
+                  const lx = cx + labelR * Math.cos(midA);
+                  const ly = cy + labelR * Math.sin(midA);
+                  // Line from arc midpoint to label
+                  const lineStart = { x: cx+(R+2)*Math.cos(midA), y: cy+(R+2)*Math.sin(midA) };
+                  const lineEnd   = { x: cx+(R+12)*Math.cos(midA), y: cy+(R+12)*Math.sin(midA) };
                   return (
-                    <path key={idx}
-                      d={`M${x1},${y1} A${R},${R},0,${large},1,${x2},${y2} L${x3},${y3} A${r},${r},0,${large},0,${x4},${y4} Z`}
-                      fill={hexColors[idx]}
-                      opacity={0.85}
-                    />
+                    <g key={idx}>
+                      {/* Arc */}
+                      <path
+                        d={`M${x1},${y1} A${R},${R},0,${large},1,${x2},${y2} L${x3},${y3} A${r},${r},0,${large},0,${x4},${y4} Z`}
+                        fill={hexColors[idx]}
+                        opacity={0.82}
+                      />
+                      {/* Subtle glow on arc */}
+                      <path
+                        d={`M${x1},${y1} A${R},${R},0,${large},1,${x2},${y2} L${x3},${y3} A${r},${r},0,${large},0,${x4},${y4} Z`}
+                        fill="none"
+                        stroke={hexColors[idx]}
+                        strokeWidth="1"
+                        opacity={0.4}
+                      />
+                      {/* Tick line */}
+                      {pct > 0.04 && (
+                        <line x1={lineStart.x} y1={lineStart.y} x2={lineEnd.x} y2={lineEnd.y}
+                          stroke={hexColors[idx]} strokeWidth="0.8" opacity="0.6"/>
+                      )}
+                      {/* Percentage label */}
+                      {pct > 0.04 && (
+                        <text x={lx} y={ly} textAnchor="middle" dominantBaseline="middle"
+                          fontSize="9" fontWeight="700" fill={hexColors[idx]}
+                          fontFamily="JetBrains Mono,monospace">
+                          {(pct*100).toFixed(0)}%
+                        </text>
+                      )}
+                    </g>
                   );
                 });
                 return (
-                  <div style={{display:'flex',alignItems:'center',gap:12}}>
-                    <svg width="176" height="156" style={{flexShrink:0}}>
+                  <div>
+                    <svg width="260" height="216" style={{display:'block',margin:'0 auto'}}>
+                      {/* Background ring track */}
+                      <circle cx={cx} cy={cy} r={(R+r)/2} fill="none"
+                        stroke="rgba(255,255,255,0.03)" strokeWidth={R-r}/>
                       {slices}
-                      {/* Center label */}
-                      <text x={cx} y={cy-6} textAnchor="middle" fontSize="18" fontWeight="800" fill="#e2e8f0" fontFamily="JetBrains Mono,monospace">{total}</text>
-                      <text x={cx} y={cy+10} textAnchor="middle" fontSize="8" fill="#64748b" fontFamily="JetBrains Mono,monospace" letterSpacing=".08em">SIGNALS</text>
+                      {/* Center: total + label */}
+                      <text x={cx} y={cy-10} textAnchor="middle" fontSize="22" fontWeight="800"
+                        fill="#e2e8f0" fontFamily="JetBrains Mono,monospace">{total}</text>
+                      <text x={cx} y={cy+8} textAnchor="middle" fontSize="7" fill="#475569"
+                        fontFamily="JetBrains Mono,monospace" letterSpacing=".12em">SIGNALS</text>
                     </svg>
-                    {/* Legend */}
-                    <div style={{display:'flex',flexDirection:'column',gap:8}}>
+                    {/* Legend row */}
+                    <div style={{display:'flex',justifyContent:'center',gap:20,marginTop:2}}>
                       {distItems.map((item,idx)=>(
-                        <div key={item.label}>
-                          <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:2}}>
-                            <div style={{width:8,height:8,borderRadius:2,background:hexColors[idx],flexShrink:0}}/>
-                            <span style={{fontSize:9,fontWeight:700,color:item.color,fontFamily:'JetBrains Mono,monospace'}}>{item.label}</span>
-                          </div>
-                          <div style={{fontSize:12,fontWeight:800,color:'var(--text-primary)',fontFamily:'JetBrains Mono,monospace',lineHeight:1}}>{item.count}</div>
-                          <div style={{fontSize:8,color:'var(--text-muted)',fontFamily:'JetBrains Mono,monospace'}}>
-                            {total>0?((item.count/total)*100).toFixed(0):0}%
-                          </div>
+                        <div key={item.label} style={{display:'flex',alignItems:'center',gap:5}}>
+                          <div style={{width:7,height:7,borderRadius:'50%',background:hexColors[idx],flexShrink:0}}/>
+                          <span style={{fontSize:9,fontFamily:'JetBrains Mono,monospace',color:'var(--text-secondary)'}}>
+                            <span style={{fontWeight:700,color:hexColors[idx]}}>{item.label}</span>
+                            {' '}<span style={{color:'var(--text-muted)'}}>{item.count}</span>
+                          </span>
                         </div>
                       ))}
                     </div>
@@ -399,40 +448,55 @@ export default function Analytics() {
             </div>
           </div>
 
-          {/* ── Row 4: Attribution (compact inline bars) ── */}
+          {/* ── Row 4: Attribution — compact table ── */}
           {data.attribution.length > 0 && (
             <div className="panel" style={{padding:18}}>
               <div style={{fontSize:12,fontWeight:600,marginBottom:14,display:'flex',alignItems:'center',gap:7}}>
                 <div style={{width:5,height:5,borderRadius:'50%',background:'var(--amber)'}}/>
                 Attribution P&L · Classe d'Actifs
               </div>
-              <div style={{display:'grid',gridTemplateColumns:`repeat(${Math.min(data.attribution.length, 4)}, 1fr)`,gap:10}}>
-                {data.attribution.map(a=>(
-                  <div key={a.name} style={{
-                    background:'rgba(255,255,255,0.02)',
-                    border:'1px solid var(--border)',
-                    borderLeft:`2px solid ${a.color}`,
-                    borderRadius:'0 8px 8px 0',
-                    padding:'12px 14px',
-                  }}>
-                    <div style={{display:'flex',justifyContent:'space-between',marginBottom:8}}>
-                      <span style={{fontSize:11,fontWeight:700,color:a.color,fontFamily:'JetBrains Mono,monospace'}}>{a.name}</span>
-                      <span style={{fontSize:9,color:'var(--text-muted)',fontFamily:'JetBrains Mono,monospace'}}>{a.pct}%</span>
-                    </div>
-                    <div style={{height:3,background:'rgba(255,255,255,0.05)',borderRadius:2,marginBottom:10,overflow:'hidden'}}>
-                      <div style={{height:'100%',width:`${a.pct}%`,background:a.color,borderRadius:2,opacity:0.65,transition:'width .6s'}}/>
-                    </div>
-                    <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:0}}>
-                      {[{l:'Sigs',v:a.total},{l:'Win%',v:a.winRate+'%'},{l:'R:R',v:`1:${a.avgRR}`}].map(m=>(
-                        <div key={m.l} style={{textAlign:'center',borderRight:'1px solid rgba(255,255,255,0.04)'}}>
-                          <div style={{fontSize:12,fontWeight:700,color:'var(--text-primary)',fontFamily:'JetBrains Mono,monospace',lineHeight:1.2}}>{m.v}</div>
-                          <div style={{fontSize:7,letterSpacing:'.08em',color:'var(--text-muted)',textTransform:'uppercase',marginTop:2}}>{m.l}</div>
+              <table style={{width:'100%',borderCollapse:'collapse'}}>
+                <thead>
+                  <tr>
+                    {['Classe','Allocation','Signaux','Win Rate','Avg Conf.','Avg R:R'].map(h=>(
+                      <th key={h} style={{textAlign:h==='Classe'?'left':'center',padding:'6px 10px',fontSize:8,letterSpacing:'.12em',color:'var(--text-muted)',textTransform:'uppercase',fontFamily:'JetBrains Mono,monospace',borderBottom:'1px solid var(--border)',fontWeight:400}}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.attribution.map((a,i)=>(
+                    <tr key={a.name}
+                      onMouseEnter={e=>e.currentTarget.style.background='rgba(255,255,255,0.02)'}
+                      onMouseLeave={e=>e.currentTarget.style.background='transparent'}
+                      style={{transition:'background .1s'}}
+                    >
+                      {/* Classe */}
+                      <td style={{padding:'10px',borderBottom:'1px solid rgba(255,255,255,0.03)'}}>
+                        <div style={{display:'flex',alignItems:'center',gap:8}}>
+                          <div style={{width:3,height:20,borderRadius:2,background:a.color,opacity:0.8,flexShrink:0}}/>
+                          <span style={{fontSize:11,fontWeight:700,color:a.color,fontFamily:'JetBrains Mono,monospace'}}>{a.name}</span>
                         </div>
+                      </td>
+                      {/* Allocation bar */}
+                      <td style={{padding:'10px',borderBottom:'1px solid rgba(255,255,255,0.03)',width:160}}>
+                        <div style={{display:'flex',alignItems:'center',gap:8}}>
+                          <div style={{flex:1,height:4,background:'rgba(255,255,255,0.05)',borderRadius:2,overflow:'hidden'}}>
+                            <div style={{height:'100%',width:`${a.pct}%`,background:a.color,borderRadius:2,opacity:0.7,transition:'width .6s'}}/>
+                          </div>
+                          <span style={{fontSize:10,fontWeight:600,color:'var(--text-secondary)',fontFamily:'JetBrains Mono,monospace',minWidth:32,textAlign:'right'}}>{a.pct}%</span>
+                        </div>
+                      </td>
+                      {/* Stats */}
+                      {[a.total, (Math.round(a.winRate*10)/10)+'%', (Math.round(a.avgConf))+'%', a.avgRR > 0 ? `1:${a.avgRR}` : '—'].map((v,j)=>(
+                        <td key={j} style={{padding:'10px',textAlign:'center',fontSize:11,fontWeight:600,fontFamily:'JetBrains Mono,monospace',
+                          color: j===1 ? (a.winRate>=60?'var(--green)':a.winRate>=45?'var(--amber)':'var(--red)') : 'var(--text-primary)',
+                          borderBottom:'1px solid rgba(255,255,255,0.03)'
+                        }}>{v}</td>
                       ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
 
@@ -484,25 +548,39 @@ export default function Analytics() {
                     Win Rate Glissant (30j)
                   </div>
                   <div style={{fontSize:9,color:'var(--text-muted)',fontFamily:'JetBrains Mono,monospace',marginBottom:12}}>Fenêtre mobile · Tendance de performance</div>
-                  <ResponsiveContainer width="100%" height={130}>
-                    <LineChart data={data.rolling}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.03)"/>
-                      <XAxis dataKey="day" tick={{fontSize:7,fill:'#475569',fontFamily:'JetBrains Mono,monospace'}} interval={Math.max(1,Math.floor(data.rolling.length/5))}/>
-                      <YAxis hide domain={[0,100]}/>
-                      <ReferenceLine y={50} stroke="rgba(248,113,113,0.25)" strokeDasharray="4 4" strokeWidth={1}/>
-                      <ReferenceLine y={60} stroke="rgba(52,211,153,0.2)" strokeDasharray="4 4" strokeWidth={1}/>
-                      <Tooltip {...tt} formatter={v=>[v+'%','Win Rate']}/>
-                      <Line type="monotone" dataKey="winRate" stroke="var(--green)" strokeWidth={1.5} dot={false} activeDot={{r:3,fill:'var(--green)'}}/>
-                    </LineChart>
-                  </ResponsiveContainer>
-                  <div style={{display:'flex',gap:14,marginTop:6,fontSize:8,fontFamily:'JetBrains Mono,monospace',color:'var(--text-muted)'}}>
-                    <span style={{display:'flex',alignItems:'center',gap:4}}>
-                      <span style={{width:10,height:1,background:'rgba(248,113,113,0.4)',display:'inline-block'}}/>Seuil 50%
-                    </span>
-                    <span style={{display:'flex',alignItems:'center',gap:4}}>
-                      <span style={{width:10,height:1,background:'rgba(52,211,153,0.3)',display:'inline-block'}}/>Seuil 60%
-                    </span>
-                  </div>
+                  {data.rolling.length < 3 ? (
+                    <div style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',height:130,gap:8}}>
+                      <div style={{fontSize:22,fontWeight:800,fontFamily:'JetBrains Mono,monospace',color:'var(--green)'}}>
+                        {data.rolling[data.rolling.length-1]?.winRate ?? 0}%
+                      </div>
+                      <div style={{fontSize:9,color:'var(--text-muted)',fontFamily:'JetBrains Mono,monospace',textAlign:'center',lineHeight:1.5}}>
+                        Win rate actuel<br/>
+                        <span style={{opacity:0.5}}>Graphique disponible avec plus de données</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <ResponsiveContainer width="100%" height={130}>
+                        <LineChart data={data.rolling}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.03)"/>
+                          <XAxis dataKey="day" tick={{fontSize:7,fill:'#475569',fontFamily:'JetBrains Mono,monospace'}} interval={Math.max(1,Math.floor(data.rolling.length/5))}/>
+                          <YAxis hide domain={[0,100]}/>
+                          <ReferenceLine y={50} stroke="rgba(248,113,113,0.25)" strokeDasharray="4 4" strokeWidth={1}/>
+                          <ReferenceLine y={60} stroke="rgba(52,211,153,0.2)" strokeDasharray="4 4" strokeWidth={1}/>
+                          <Tooltip {...tt} formatter={v=>[v+'%','Win Rate']}/>
+                          <Line type="monotone" dataKey="winRate" stroke="var(--green)" strokeWidth={1.5} dot={data.rolling.length < 10} activeDot={{r:3,fill:'var(--green)'}}/>
+                        </LineChart>
+                      </ResponsiveContainer>
+                      <div style={{display:'flex',gap:14,marginTop:6,fontSize:8,fontFamily:'JetBrains Mono,monospace',color:'var(--text-muted)'}}>
+                        <span style={{display:'flex',alignItems:'center',gap:4}}>
+                          <span style={{width:10,height:1,background:'rgba(248,113,113,0.4)',display:'inline-block'}}/>Seuil 50%
+                        </span>
+                        <span style={{display:'flex',alignItems:'center',gap:4}}>
+                          <span style={{width:10,height:1,background:'rgba(52,211,153,0.3)',display:'inline-block'}}/>Seuil 60%
+                        </span>
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
             </div>
@@ -516,7 +594,7 @@ export default function Analytics() {
                 Strategy Fingerprint
                 <span style={{fontSize:9,color:'var(--text-muted)',fontWeight:400,marginLeft:4}}>— ADN de ta stratégie</span>
               </div>
-              <div style={{display:'grid',gridTemplateColumns:'200px 1fr',gap:20,alignItems:'center'}}>
+              <div style={{display:'grid',gridTemplateColumns:'260px 1fr',gap:20,alignItems:'center'}}>
                 {/* Radar — fixed 200px */}
                 <div style={{flexShrink:0}}>
                   <MiniRadar data={data.fingerprint}/>

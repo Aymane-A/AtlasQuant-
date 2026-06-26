@@ -1,5 +1,4 @@
 const axios  = require("axios");
-const ccxt   = require("ccxt");
 const logger = require("../utils/logger");
 const env    = require("../config/env");
 
@@ -16,21 +15,24 @@ const cmcClient = axios.create({
 
 const blockchainClient = axios.create({ baseURL: env.BLOCKCHAIN_URL, timeout: 20000 });
 
-// ── Shared Binance exchange instance (with time sync) ──────
+// ── Shared Binance exchange instance (lazy ccxt load) ──────
+// ccxt is NOT required at the top level — it's ~50MB and crashes
+// the heap if loaded at startup. It's required lazily here instead.
 let _exchange = null;
 async function getBinanceExchange() {
   if (!_exchange) {
+    const ccxt = require("ccxt"); // ← lazy: only loaded on first actual use
     _exchange = new ccxt.binance({
       apiKey: env.BINANCE_API_KEY,
       secret: env.BINANCE_API_SECRET,
       options: {
         defaultType:             "spot",
-        adjustForTimeDifference: true,  // auto-correct timestamp diff
+        adjustForTimeDifference: true,
       },
       enableRateLimit: true,
     });
     try {
-      await _exchange.loadTimeDifference(); // sync clock with Binance
+      await _exchange.loadTimeDifference();
     } catch (e) {
       logger.warn(`[marketData] Time sync warning: ${e.message}`);
     }
@@ -51,7 +53,6 @@ const fetchOHLCV = async (symbol = "BTC/USDT", timeframe = "1h", limit = 200) =>
     return candles;
   } catch (error) {
     logger.error(`❌ Binance fetchOHLCV error: ${error.message}`);
-    // Reset exchange on error so next call re-syncs time
     _exchange = null;
     return [];
   }

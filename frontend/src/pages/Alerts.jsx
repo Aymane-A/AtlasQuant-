@@ -2,25 +2,25 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { alertsAPI } from '../services/api';
 
-
 export default function Alerts() {
   const { t } = useTranslation();
   const a = key => t(`alerts.${key}`);
 
-  const [form, setForm] = useState({ symbol:'', type:'typePrice', condition:'above', value:'', notify:'once' });
+  const [form, setForm]         = useState({ symbol:'', type:'typePrice', condition:'above', value:'', notify:'once' });
   const set = k => e => setForm(f => ({ ...f, [k]: e.target.value }));
   const [submitted, setSubmitted] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [data, setData] = useState({ stats:null, notifications:[], alerts:[] });
+  const [showForm, setShowForm]   = useState(false);   // ← NEW
+  const [loading, setLoading]     = useState(true);
+  const [error, setError]         = useState('');
+  const [data, setData]           = useState({ stats:null, notifications:[], alerts:[] });
 
   const loadAlerts = async () => {
     try {
       const res = await alertsAPI.getAll();
       setData({
-        stats: res.data.stats,
+        stats:         res.data.stats,
         notifications: res.data.notifications || [],
-        alerts: res.data.alerts || [],
+        alerts:        res.data.alerts        || [],
       });
       setError('');
     } catch (err) {
@@ -36,6 +36,25 @@ export default function Alerts() {
     return () => clearInterval(id);
   }, []);
 
+  // ── FIX: use alertsAPI.remove instead of alertsAPI.delete ──
+  const handleDelete = async (id) => {
+    try {
+      await alertsAPI.remove(id);
+      loadAlerts();
+    } catch {
+      setError('Failed to delete alert');
+    }
+  };
+
+  const handlePause = async (id) => {
+    try {
+      await alertsAPI.togglePause(id);
+      loadAlerts();
+    } catch {
+      setError('Failed to pause alert');
+    }
+  };
+
   const inp = {
     width:'100%', padding:'10px 13px', borderRadius:8,
     border:'1px solid var(--border)', background:'rgba(255,255,255,0.04)',
@@ -45,21 +64,35 @@ export default function Alerts() {
 
   const ALERT_TYPES = ['typePrice','typeRsi','typeMacd','typeVolume','typePct'];
   const NOTIFY_OPTS = [
-    { val:'once',   labelKey:'notifyOnce'  },
-    { val:'always', labelKey:'notifyAlways'},
-    { val:'daily',  labelKey:'notifyDaily' },
+    { val:'once',   labelKey:'notifyOnce'   },
+    { val:'always', labelKey:'notifyAlways' },
+    { val:'daily',  labelKey:'notifyDaily'  },
   ];
   const CHANNELS = ['channelInApp','channelEmail','channelSms','channelWebhook'];
 
   const STAT_CARDS = [
-    { labelKey:'statActive',    v:data.stats?.active ?? 0,    color:'var(--cyan)'          },
+    { labelKey:'statActive',    v:data.stats?.active    ?? 0, color:'var(--cyan)'          },
     { labelKey:'statTriggered', v:data.stats?.triggered ?? 0, color:'var(--amber)'         },
-    { labelKey:'statNear',      v:data.stats?.near ?? 0,      color:'var(--red)'           },
-    { labelKey:'statPaused',    v:data.stats?.paused ?? 0,    color:'var(--text-secondary)'},
+    { labelKey:'statNear',      v:data.stats?.near      ?? 0, color:'var(--red)'           },
+    { labelKey:'statPaused',    v:data.stats?.paused    ?? 0, color:'var(--text-secondary)'},
   ];
+
   const notifications = data.notifications || [];
-  const alertCards = data.alerts || [];
-  const unreadCount = notifications.filter(n => n.unread).length;
+  const alertCards    = data.alerts        || [];
+  const unreadCount   = notifications.filter(n => n.unread).length;
+
+  const iconBtn = (onClick, title, hoverColor = 'var(--red)') => ({
+    onClick,
+    title,
+    style: {
+      background: 'transparent', border: 'none', cursor: 'pointer',
+      color: 'var(--text-muted)', fontSize: 13, padding: '4px 6px',
+      borderRadius: 6, transition: 'color .15s',
+      fontFamily: 'JetBrains Mono,monospace',
+    },
+    onMouseEnter: e => e.currentTarget.style.color = hoverColor,
+    onMouseLeave: e => e.currentTarget.style.color = 'var(--text-muted)',
+  });
 
   return (
     <>
@@ -73,6 +106,7 @@ export default function Alerts() {
           {error}
         </div>
       )}
+
       {/* Header */}
       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
         <div>
@@ -83,7 +117,11 @@ export default function Alerts() {
             {a('pageSubtitle')}
           </div>
         </div>
-        <button style={{ padding:'10px 22px', borderRadius:8, border:'1px solid var(--cyan-dim)', background:'var(--cyan-glow)', color:'var(--cyan)', fontFamily:'Syne,sans-serif', fontSize:13, fontWeight:700, cursor:'pointer' }}>
+        {/* FIX: New Alert button — shows form o reset submitted */}
+        <button
+          onClick={() => { setShowForm(true); setSubmitted(false); }}
+          style={{ padding:'10px 22px', borderRadius:8, border:'1px solid var(--cyan-dim)', background:'var(--cyan-glow)', color:'var(--cyan)', fontFamily:'Syne,sans-serif', fontSize:13, fontWeight:700, cursor:'pointer' }}
+        >
           {a('newAlert')}
         </button>
       </div>
@@ -101,7 +139,8 @@ export default function Alerts() {
       </div>
 
       {/* Feed + Form */}
-      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 }}>
+      <div style={{ display:'grid', gridTemplateColumns: showForm ? '1fr 1fr' : '1fr', gap:16 }}>
+
         {/* Notification Feed */}
         <div className="panel" style={{ padding:22 }}>
           <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:18 }}>
@@ -114,14 +153,23 @@ export default function Alerts() {
             </span>
           </div>
           <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+            {notifications.length === 0 && (
+              <div style={{ padding:'20px 0', textAlign:'center', color:'var(--text-muted)', fontFamily:'JetBrains Mono,monospace', fontSize:11 }}>
+                No triggered alerts yet
+              </div>
+            )}
             {notifications.map((n, i) => (
               <div key={i} style={{ display:'flex', alignItems:'flex-start', gap:12, padding:'12px 14px', borderRadius:10, background: n.unread ? 'rgba(251,191,36,0.03)' : 'rgba(255,255,255,0.02)', border:`1px solid ${n.unread ? 'rgba(251,191,36,0.25)' : 'var(--border)'}` }}>
                 <div style={{ width:34, height:34, borderRadius:8, display:'flex', alignItems:'center', justifyContent:'center', fontSize:14, background:n.bg, color:n.color, flexShrink:0 }}>
                   {n.icon}
                 </div>
                 <div style={{ flex:1 }}>
-                  <div style={{ fontSize:13, fontWeight:600, marginBottom:3 }}>{n.titleKey ? t(`alerts.${n.titleKey}`) : n.title}</div>
-                  <div style={{ fontSize:11, color:'var(--text-secondary)', fontFamily:'JetBrains Mono,monospace', lineHeight:1.5 }}>{n.descKey ? t(`alerts.${n.descKey}`) : n.desc}</div>
+                  <div style={{ fontSize:13, fontWeight:600, marginBottom:3 }}>
+                    {n.titleKey ? t(`alerts.${n.titleKey}`) : n.title}
+                  </div>
+                  <div style={{ fontSize:11, color:'var(--text-secondary)', fontFamily:'JetBrains Mono,monospace', lineHeight:1.5 }}>
+                    {n.descKey ? t(`alerts.${n.descKey}`) : n.desc}
+                  </div>
                   <div style={{ fontSize:10, color:'var(--text-muted)', fontFamily:'JetBrains Mono,monospace', marginTop:4 }}>
                     {t('alerts.timeAgo', { time: n.time })}
                   </div>
@@ -132,77 +180,109 @@ export default function Alerts() {
           </div>
         </div>
 
-        {/* Create Alert */}
-        <div className="panel" style={{ padding:22 }}>
-          <div style={{ fontSize:13, fontWeight:600, marginBottom:18, display:'flex', alignItems:'center', gap:8 }}>
-            <div style={{ width:6, height:6, borderRadius:'50%', background:'var(--green)' }} />
-            {a('createTitle')}
-          </div>
-          {submitted ? (
-            <div style={{ textAlign:'center', padding:40, color:'var(--green)', fontFamily:'JetBrains Mono,monospace' }}>
-              {a('successMsg')}
-              <br />
-              <button onClick={() => setSubmitted(false)} style={{ marginTop:16, padding:'8px 20px', borderRadius:8, border:'1px solid var(--border)', background:'transparent', color:'var(--text-secondary)', fontFamily:'JetBrains Mono,monospace', fontSize:12, cursor:'pointer' }}>
-                {a('newBtn')}
+        {/* Create Alert — only when showForm */}
+        {showForm && (
+          <div className="panel" style={{ padding:22 }}>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:18 }}>
+              <div style={{ fontSize:13, fontWeight:600, display:'flex', alignItems:'center', gap:8 }}>
+                <div style={{ width:6, height:6, borderRadius:'50%', background:'var(--green)' }} />
+                {a('createTitle')}
+              </div>
+              <button
+                onClick={() => setShowForm(false)}
+                style={{ background:'transparent', border:'none', color:'var(--text-muted)', fontSize:16, cursor:'pointer', padding:'2px 6px' }}
+              >
+                ✕
               </button>
             </div>
-          ) : (
-            <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
-              <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
+            {submitted ? (
+              <div style={{ textAlign:'center', padding:40, color:'var(--green)', fontFamily:'JetBrains Mono,monospace' }}>
+                {a('successMsg')}
+                <br />
+                <button
+                  onClick={() => setSubmitted(false)}
+                  style={{ marginTop:16, padding:'8px 20px', borderRadius:8, border:'1px solid var(--border)', background:'transparent', color:'var(--text-secondary)', fontFamily:'JetBrains Mono,monospace', fontSize:12, cursor:'pointer' }}
+                >
+                  {a('newBtn')}
+                </button>
+              </div>
+            ) : (
+              <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
+                <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
+                  <input
+                    style={inp}
+                    placeholder={a('symPlaceholder')}
+                    value={form.symbol}
+                    onChange={set('symbol')}
+                  />
+                  <select style={{ ...inp, color:'var(--text-secondary)' }} value={form.type} onChange={set('type')}>
+                    {ALERT_TYPES.map(tk => (
+                      <option key={tk} value={tk}>{a(tk)}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div style={{ display:'flex', gap:4, background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:8, padding:3 }}>
+                  {['above','below','equal'].map(c => (
+                    <button
+                      key={c}
+                      onClick={() => setForm(f => ({ ...f, condition:c }))}
+                      style={{ flex:1, padding:7, borderRadius:6, border:'none', fontFamily:'JetBrains Mono,monospace', fontSize:11, cursor:'pointer', background: form.condition === c ? 'rgba(0,245,212,0.12)' : 'transparent', color: form.condition === c ? 'var(--cyan)' : 'var(--text-secondary)' }}
+                    >
+                      {c === 'above' ? a('condAbove') : c === 'below' ? a('condBelow') : a('condEqual')}
+                    </button>
+                  ))}
+                </div>
+
                 <input
                   style={inp}
-                  placeholder={a('symPlaceholder')}
-                  value={form.symbol}
-                  onChange={set('symbol')}
+                  placeholder={a('valuePlaceholder')}
+                  value={form.value}
+                  onChange={set('value')}
+                  type="number"
                 />
-                <select style={{ ...inp, color:'var(--text-secondary)' }} value={form.type} onChange={set('type')}>
-                  {ALERT_TYPES.map(tk => (
-                    <option key={tk} value={tk}>{a(tk)}</option>
+
+                <select style={{ ...inp, color:'var(--text-secondary)' }} value={form.notify} onChange={set('notify')}>
+                  {NOTIFY_OPTS.map(o => (
+                    <option key={o.val} value={o.val}>{a(o.labelKey)}</option>
                   ))}
                 </select>
+
+                <div style={{ display:'flex', gap:16, flexWrap:'wrap' }}>
+                  {CHANNELS.map((ch, idx) => (
+                    <label key={ch} style={{ display:'flex', alignItems:'center', gap:6, fontSize:12, fontFamily:'JetBrains Mono,monospace', color:'var(--text-secondary)', cursor:'pointer' }}>
+                      <input type="checkbox" defaultChecked={idx < 2} style={{ accentColor:'var(--cyan)' }} />
+                      {a(ch)}
+                    </label>
+                  ))}
+                </div>
+
+                <button
+                  onClick={async () => {
+                    if (!form.symbol || !form.value) return;
+                    try {
+                      await alertsAPI.create({
+                        symbol:    form.symbol,
+                        type:      form.type,
+                        condition: form.condition,
+                        value:     form.value,
+                        notify:    form.notify,
+                      });
+                      setSubmitted(true);
+                      setForm({ symbol:'', type:'typePrice', condition:'above', value:'', notify:'once' });
+                      loadAlerts();
+                    } catch (err) {
+                      setError(err?.response?.data?.error || 'Failed to create alert');
+                    }
+                  }}
+                  style={{ padding:12, borderRadius:8, border:'1px solid var(--cyan-dim)', background:'var(--cyan-glow)', color:'var(--cyan)', fontFamily:'Syne,sans-serif', fontSize:13, fontWeight:700, cursor:'pointer', letterSpacing:'.04em' }}
+                >
+                  {a('createBtn')}
+                </button>
               </div>
-
-              {/* Condition Toggle */}
-              <div style={{ display:'flex', gap:4, background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:8, padding:3 }}>
-                {['above','below','equal'].map(c => (
-                  <button key={c} onClick={() => setForm(f => ({ ...f, condition:c }))} style={{ flex:1, padding:7, borderRadius:6, border:'none', fontFamily:'JetBrains Mono,monospace', fontSize:11, cursor:'pointer', background: form.condition === c ? 'rgba(0,245,212,0.12)' : 'transparent', color: form.condition === c ? 'var(--cyan)' : 'var(--text-secondary)' }}>
-                    {c === 'above' ? a('condAbove') : c === 'below' ? a('condBelow') : a('condEqual')}
-                  </button>
-                ))}
-              </div>
-
-              <input
-                style={inp}
-                placeholder={a('valuePlaceholder')}
-                value={form.value}
-                onChange={set('value')}
-              />
-
-              <select style={{ ...inp, color:'var(--text-secondary)' }} value={form.notify} onChange={set('notify')}>
-                {NOTIFY_OPTS.map(o => (
-                  <option key={o.val} value={o.val}>{a(o.labelKey)}</option>
-                ))}
-              </select>
-
-              <div style={{ display:'flex', gap:16, flexWrap:'wrap' }}>
-                {CHANNELS.map((ch, idx) => (
-                  <label key={ch} style={{ display:'flex', alignItems:'center', gap:6, fontSize:12, fontFamily:'JetBrains Mono,monospace', color:'var(--text-secondary)', cursor:'pointer' }}>
-                    <input type="checkbox" defaultChecked={idx < 2} style={{ accentColor:'var(--cyan)' }} />
-                    {a(ch)}
-                  </label>
-                ))}
-              </div>
-
-              <button onClick={async () => {
-                await alertsAPI.create(form);
-                setSubmitted(true);
-                loadAlerts();
-              }} style={{ padding:12, borderRadius:8, border:'1px solid var(--cyan-dim)', background:'var(--cyan-glow)', color:'var(--cyan)', fontFamily:'Syne,sans-serif', fontSize:13, fontWeight:700, cursor:'pointer', letterSpacing:'.04em' }}>
-                {a('createBtn')}
-              </button>
-            </div>
-          )}
-        </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Alert Cards */}
@@ -210,9 +290,17 @@ export default function Alerts() {
         <div style={{ fontSize:11, letterSpacing:'.2em', color:'var(--text-muted)', textTransform:'uppercase', fontFamily:'JetBrains Mono,monospace', marginBottom:14 }}>
           {a('activeSection')}
         </div>
+
+        {alertCards.length === 0 && !loading && (
+          <div style={{ padding:'30px 0', textAlign:'center', color:'var(--text-muted)', fontFamily:'JetBrains Mono,monospace', fontSize:11 }}>
+            No active alerts — create one above
+          </div>
+        )}
+
         <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:12 }}>
-          {alertCards.map((card, i) => (
-            <div key={i} style={{ background:'var(--surface)', border:`1px solid ${card.near ? 'rgba(251,191,36,0.3)' : 'var(--border)'}`, borderRadius:12, padding:18, borderTop:`2px solid ${card.color}` }}>
+          {alertCards.map((card) => (
+            <div key={card.id} style={{ background:'var(--surface)', border:`1px solid ${card.near ? 'rgba(251,191,36,0.3)' : 'var(--border)'}`, borderRadius:12, padding:18, borderTop:`2px solid ${card.color}` }}>
+
               <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', marginBottom:10 }}>
                 <div>
                   <div style={{ fontSize:17, fontWeight:700 }}>{card.sym}</div>
@@ -224,21 +312,30 @@ export default function Alerts() {
                   {card.near ? a('near') : a('active')}
                 </span>
               </div>
+
               <div style={{ fontSize:22, fontWeight:700, fontFamily:'JetBrains Mono,monospace', color:card.color, marginBottom:8 }}>
                 {card.cur}
               </div>
+
               <div style={{ display:'flex', justifyContent:'space-between', fontSize:11, fontFamily:'JetBrains Mono,monospace', marginBottom:6 }}>
                 <span style={{ color:'var(--text-muted)' }}>{a('target')}</span>
                 <span style={{ color:'var(--text-secondary)' }}>{card.target}</span>
               </div>
+
               <div style={{ height:4, background:'rgba(255,255,255,0.05)', borderRadius:2, overflow:'hidden', marginBottom:6 }}>
                 <div style={{ height:'100%', width:`${card.pct}%`, background:card.color, borderRadius:2, transition:'width 1s ease' }} />
               </div>
-              <div style={{ display:'flex', justifyContent:'space-between', fontSize:11, fontFamily:'JetBrains Mono,monospace' }}>
+
+              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', fontSize:11, fontFamily:'JetBrains Mono,monospace' }}>
                 <span style={{ color:'var(--text-secondary)' }}>
                   {t('alerts.threshold', { pct: card.pct })}
                 </span>
+                <div style={{ display:'flex', gap:2 }}>
+                  <button {...iconBtn(() => handlePause(card.id), 'Pause alert', 'var(--amber)')}>⏸</button>
+                  <button {...iconBtn(() => handleDelete(card.id), 'Delete alert', 'var(--red)')}>🗑</button>
+                </div>
               </div>
+
             </div>
           ))}
         </div>

@@ -68,8 +68,10 @@ export const marketAPI = {
 };
 
 export const alertsAPI = {
-  getAll: () => api.get('/alerts'),
-  create: (payload) => api.post('/alerts', payload),
+  getAll:      ()         => api.get('/alerts'),
+  create:      (payload)  => api.post('/alerts', payload),
+  delete:      (id)       => api.delete(`/alerts/${id}`),
+  togglePause: (id)       => api.patch(`/alerts/${id}/pause`),
 };
 
 // ── Health ────────────────────────────────────────────────

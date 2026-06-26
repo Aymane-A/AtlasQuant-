@@ -73,13 +73,19 @@ app.use('/api/', (req, res, next) => {
     apiLimiter(req, res, next);
 });
 
+// ── 2.5. Disable API cache ────────────────────────────────
+app.use('/api/', (req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  next();
+});
+
 // ── 3. API Routes ─────────────────────────────────────────
 app.use('/api/signals',   require('./routes/signals.routes'));
 app.use('/api/market',    require('./routes/market.routes'));
 app.use('/api/alerts',    require('./routes/alerts.routes'));
 app.use('/api/auth',      require('./routes/auth.routes'));
 app.use('/api/prices',    require('./routes/prices.routes'));
-app.use('/api/apikeys',   require('./routes/apiKeys.routes'));
+app.use('/api/exchanges',   require('./routes/exchanges.routes'));
 app.use('/api/backtest',  require('./routes/backtest.routes'));
 app.use('/api/portfolio', require('./routes/portfolio.routes'));
 app.use('/api/risk',      require('./routes/risk.routes'));

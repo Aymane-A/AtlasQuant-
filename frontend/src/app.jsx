@@ -21,7 +21,7 @@ import RiskMatrix  from './pages/RiskMatrix';
 import Backtester  from './pages/Backtester';
 import AlphaEngine from './pages/AlphaEngine';
 import Settings    from './pages/Settings';
-import ApiKeys     from './pages/ApiKeys';
+import Exchanges   from './pages/Exchanges.jsx';
 
 export default function App() {
   const { user } = useAuth();
@@ -62,7 +62,7 @@ export default function App() {
           <Route path="backtester"  element={<Backtester />}  />
           <Route path="alpha_engine" element={<AlphaEngine />}/>
           <Route path="settings"    element={<Settings />}    />
-          <Route path="api_keys"    element={<ApiKeys />}     />
+          <Route path="exchanges"   element={<Exchanges />}   />
         </Route>
 
         {/* Fallback */}
