@@ -1,6 +1,6 @@
 /**
  * src/controllers/alerts.controller.js — AtlasQuant AI
- * With live prices, delete, pause/unpause, notify channels
+ * Full version: live prices, delete, pause, reset, history
  */
 
 const db     = require('../config/db');
@@ -112,18 +112,18 @@ async function getAlerts(req, res) {
       if (near) nearCount++;
       const condSymbol   = a.condition === 'above' ? '>' : a.condition === 'below' ? '<' : '=';
       return {
-        id:              a.id,
-        sym:             a.symbol,
-        typeKey:         TYPE_LABELS[a.type] || a.type,
-        cur:             currentPrice
-          ? `$${currentPrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+        id:             a.id,
+        sym:            a.symbol,
+        typeKey:        TYPE_LABELS[a.type] || a.type,
+        cur:            currentPrice
+          ? `$${currentPrice.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 })}`
           : '—',
-        target:          `${condSymbol} $${target.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+        target:         `${condSymbol} $${target.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 })}`,
         pct,
-        color:           COLORS[a.type] || 'var(--cyan)',
+        color:          COLORS[a.type] || 'var(--cyan)',
         near,
-        notifyEmail:     a.notify_email,
-        notifyTelegram:  a.notify_telegram,
+        notifyEmail:    a.notify_email,
+        notifyTelegram: a.notify_telegram,
       };
     });
 
@@ -141,6 +141,41 @@ async function getAlerts(req, res) {
   } catch (err) {
     logger.error(`[alerts.controller] Get Error: ${err.message}`);
     res.status(500).json({ success: false, error: 'Failed to fetch alerts' });
+  }
+}
+
+// ── GET /api/alerts/history ───────────────────────────────
+async function getHistory(req, res) {
+  try {
+    const userId = req.user.id;
+    const limit  = parseInt(req.query.limit, 10) || 50;
+
+    const { rows } = await db.query(`
+      SELECT id, symbol, type, condition, target, triggered_at, created_at,
+             notify_email, notify_telegram
+      FROM alerts
+      WHERE user_id = $1 AND triggered = true
+      ORDER BY triggered_at DESC
+      LIMIT $2
+    `, [userId, limit]);
+
+    const history = rows.map(r => ({
+      id:             r.id,
+      sym:            r.symbol,
+      typeKey:        TYPE_LABELS[r.type] || r.type,
+      condition:      r.condition,
+      target:         `$${parseFloat(r.target).toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 })}`,
+      triggeredAt:    r.triggered_at,
+      createdAt:      r.created_at,
+      notifyEmail:    r.notify_email,
+      notifyTelegram: r.notify_telegram,
+      color:          COLORS[r.type] || 'var(--cyan)',
+    }));
+
+    res.json({ success: true, history });
+  } catch (err) {
+    logger.error(`[alerts.controller] History Error: ${err.message}`);
+    res.status(500).json({ success: false, error: 'Failed to fetch history' });
   }
 }
 
@@ -182,11 +217,8 @@ async function deleteAlert(req, res) {
       [alertId, userId]
     );
 
-    if (rowCount === 0) {
-      return res.status(404).json({ success: false, error: 'Alert not found' });
-    }
-
-    res.json({ success: true, message: 'Alert deleted' });
+    if (rowCount === 0) return res.status(404).json({ success: false, error: 'Alert not found' });
+    res.json({ success: true });
   } catch (err) {
     logger.error(`[alerts.controller] Delete Error: ${err.message}`);
     res.status(500).json({ success: false, error: 'Failed to delete alert' });
@@ -201,14 +233,10 @@ async function togglePause(req, res) {
 
     const { rows, rowCount } = await db.query(`
       UPDATE alerts SET paused = NOT paused
-      WHERE id = $1 AND user_id = $2
-      RETURNING paused
+      WHERE id = $1 AND user_id = $2 RETURNING paused
     `, [alertId, userId]);
 
-    if (rowCount === 0) {
-      return res.status(404).json({ success: false, error: 'Alert not found' });
-    }
-
+    if (rowCount === 0) return res.status(404).json({ success: false, error: 'Alert not found' });
     res.json({ success: true, paused: rows[0].paused });
   } catch (err) {
     logger.error(`[alerts.controller] Pause Error: ${err.message}`);
@@ -216,4 +244,24 @@ async function togglePause(req, res) {
   }
 }
 
-module.exports = { getAlerts, createAlert, deleteAlert, togglePause };
+// ── PATCH /api/alerts/:id/reset ──────────────────────────
+async function resetAlert(req, res) {
+  try {
+    const userId  = req.user.id;
+    const alertId = parseInt(req.params.id, 10);
+
+    const { rowCount } = await db.query(`
+      UPDATE alerts
+      SET triggered = false, triggered_at = NULL, paused = false
+      WHERE id = $1 AND user_id = $2
+    `, [alertId, userId]);
+
+    if (rowCount === 0) return res.status(404).json({ success: false, error: 'Alert not found' });
+    res.json({ success: true });
+  } catch (err) {
+    logger.error(`[alerts.controller] Reset Error: ${err.message}`);
+    res.status(500).json({ success: false, error: 'Failed to reset alert' });
+  }
+}
+
+module.exports = { getAlerts, getHistory, createAlert, deleteAlert, togglePause, resetAlert };

@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { useAuth } from '../context/AuthContext';
 import ThreeBackground from './ThreeBackground';
 import LangSwitcher from './LangSwitcher';
+import { alertsAPI } from '../services/api';
 
 const NAV = [
   { label: 'Dashboard',    path: '/dashboard',    icon: '⬡' },
@@ -19,7 +20,7 @@ const INTEL = [
 ];
 const SYS = [
   { label: 'Settings',     path: '/settings',      icon: '⬡' },
-  { label: 'Exchanges',     path: '/exchanges',      icon: '◎' },
+  { label: 'Exchanges',    path: '/exchanges',      icon: '◎' },
 ];
 const TOPNAV = ['Markets', 'Analytics', 'Portfolio', 'Alerts'];
 
@@ -44,8 +45,10 @@ export default function Layout({ children }) {
   const { t }            = useTranslation();
   const navigate         = useNavigate();
   const location         = useLocation();
-  const [clock, setClock] = useState('');
+  const [clock, setClock]           = useState('');
+  const [alertBadge, setAlertBadge] = useState(0);
 
+  // ── Clock ─────────────────────────────────────────────
   useEffect(() => {
     const tick = () => {
       const d = new Date(), p = n => String(n).padStart(2, '0');
@@ -55,6 +58,25 @@ export default function Layout({ children }) {
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
   }, []);
+
+  // ── Alert badge — fetch triggered count every 30s ─────
+  useEffect(() => {
+    const fetchBadge = async () => {
+      try {
+        const res = await alertsAPI.getAll();
+        const count = res.data.stats?.triggered ?? 0;
+        setAlertBadge(count);
+      } catch {}
+    };
+    fetchBadge();
+    const id = setInterval(fetchBadge, 30000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Reset badge when user visits /alerts
+  useEffect(() => {
+    if (location.pathname === '/alerts') setAlertBadge(0);
+  }, [location.pathname]);
 
   const isActive   = (path)  => location.pathname === path;
   const itemStyle  = (path)  => ({ ...s.sitem,  ...(isActive(path) ? { color:'var(--cyan)', background:'var(--cyan-glow)', boxShadow:'inset 0 0 0 1px rgba(0,245,212,0.1)' } : {}) });
@@ -75,18 +97,35 @@ export default function Layout({ children }) {
           <div style={s.sep} />
           <nav style={{ display:'flex', gap:4 }}>
             {TOPNAV.map(label => (
-              <button key={label} style={pillStyle(label)} onClick={() => navigate(`/${label.toLowerCase()}`)}>
-                {t(`nav.${label.toLowerCase()}`, label)}
+              <button
+                key={label}
+                style={pillStyle(label)}
+                onClick={() => navigate(`/${label.toLowerCase()}`)}
+              >
+                <span style={{ position:'relative', display:'inline-flex', alignItems:'center', gap:6 }}>
+                  {t(`nav.${label.toLowerCase()}`, label)}
+
+                  {/* 🔔 Alert badge — only on "Alerts" pill */}
+                  {label === 'Alerts' && alertBadge > 0 && (
+                    <span style={{
+                      display:'inline-flex', alignItems:'center', justifyContent:'center',
+                      minWidth:16, height:16, borderRadius:8, padding:'0 4px',
+                      background:'var(--red)', color:'#fff',
+                      fontSize:9, fontFamily:'JetBrains Mono,monospace',
+                      fontWeight:700, lineHeight:1,
+                      animation: 'pulse 2s infinite',
+                    }}>
+                      {alertBadge > 99 ? '99+' : alertBadge}
+                    </span>
+                  )}
+                </span>
               </button>
             ))}
           </nav>
 
           <div style={{ marginLeft:'auto', display:'flex', alignItems:'center', gap:12 }}>
-            {/* ── Language switcher ── */}
             <LangSwitcher variant="app" />
-
             <div style={s.sep} />
-
             <div style={{ display:'flex', alignItems:'center', gap:8, fontSize:12, color:'var(--text-secondary)', fontFamily:'JetBrains Mono,monospace' }}>
               <div style={s.dot} /> Live · NYSE
             </div>

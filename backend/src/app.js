@@ -55,7 +55,7 @@ app.use(morgan('[:method] :url :status :response-time ms'));
 // ── 2. Rate Limiters ──────────────────────────────────────
 const apiLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max:      100,
+    max:      500,
     message:  { success: false, error: 'Too many requests, slow down!' },
 });
 
