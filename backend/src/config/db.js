@@ -244,19 +244,21 @@ async function migrate() {
     `);
   }
 
-  // ── Incremental migrations (existing tables) ──────────────
+  // ── Incremental migrations ────────────────────────────────
   await pool.query(`
-    ALTER TABLE alerts ADD COLUMN IF NOT EXISTS condition TEXT NOT NULL DEFAULT 'above';
-    ALTER TABLE alerts ADD COLUMN IF NOT EXISTS paused    BOOLEAN DEFAULT FALSE;
+    ALTER TABLE alerts ADD COLUMN IF NOT EXISTS condition        TEXT    NOT NULL DEFAULT 'above';
+    ALTER TABLE alerts ADD COLUMN IF NOT EXISTS paused          BOOLEAN DEFAULT FALSE;
+    ALTER TABLE alerts ADD COLUMN IF NOT EXISTS notify_email    BOOLEAN DEFAULT TRUE;
+    ALTER TABLE alerts ADD COLUMN IF NOT EXISTS notify_telegram BOOLEAN DEFAULT FALSE;
+    ALTER TABLE alerts ADD COLUMN IF NOT EXISTS metadata        JSONB;
   `);
 
   logger.info('[db] ✅ Tables PostgreSQL prêtes');
 }
 
-// ── Run migration — non-fatal: log error but don't crash the server ──
+// ── Run migration — non-fatal ─────────────────────────────
 migrate().catch((err) => {
   logger.error(`[db] Migration failed: ${err.message}`);
-  // NOT calling process.exit(1) — server can still run with existing tables
 });
 
 module.exports = { query, getClient, pool };

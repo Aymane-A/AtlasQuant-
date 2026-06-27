@@ -10,6 +10,7 @@ const NAV = [
   { label: 'Signals',      path: '/signals',       icon: '◈', badge: '12', badgeColor: 'green' },
   { label: 'Screener',     path: '/screener',      icon: '◫' },
   { label: 'Watchlist',    path: '/watchlist',     icon: '◉', badge: '3',  badgeColor: 'red'   },
+  { label: 'Trading',      path: '/trading',       icon: '📈'},
 ];
 const INTEL = [
   { label: 'Alpha Engine', path: '/alpha_engine',  icon: '⬙' },

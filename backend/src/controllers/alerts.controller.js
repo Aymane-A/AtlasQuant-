@@ -1,6 +1,6 @@
 /**
  * src/controllers/alerts.controller.js — AtlasQuant AI
- * With live prices, delete, pause/unpause
+ * With live prices, delete, pause/unpause, notify channels
  */
 
 const db     = require('../config/db');
@@ -30,7 +30,6 @@ const COLORS = {
   percent: 'var(--red)',
 };
 
-// ── Fetch live price ──────────────────────────────────────
 async function fetchPrice(symbol) {
   try {
     const YahooFinance = require('yahoo-finance2').default;
@@ -66,7 +65,8 @@ async function getAlerts(req, res) {
     const userId = req.user.id;
 
     const { rows: alerts } = await db.query(`
-      SELECT id, symbol, type, condition, target, triggered, paused, triggered_at, created_at
+      SELECT id, symbol, type, condition, target, triggered, paused,
+             notify_email, notify_telegram, triggered_at, created_at
       FROM alerts WHERE user_id = $1 ORDER BY created_at DESC
     `, [userId]);
 
@@ -112,16 +112,18 @@ async function getAlerts(req, res) {
       if (near) nearCount++;
       const condSymbol   = a.condition === 'above' ? '>' : a.condition === 'below' ? '<' : '=';
       return {
-        id:      a.id,
-        sym:     a.symbol,
-        typeKey: TYPE_LABELS[a.type] || a.type,
-        cur:     currentPrice
+        id:              a.id,
+        sym:             a.symbol,
+        typeKey:         TYPE_LABELS[a.type] || a.type,
+        cur:             currentPrice
           ? `$${currentPrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
           : '—',
-        target:  `${condSymbol} $${target.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+        target:          `${condSymbol} $${target.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
         pct,
-        color:   COLORS[a.type] || 'var(--cyan)',
+        color:           COLORS[a.type] || 'var(--cyan)',
         near,
+        notifyEmail:     a.notify_email,
+        notifyTelegram:  a.notify_telegram,
       };
     });
 
@@ -146,18 +148,21 @@ async function getAlerts(req, res) {
 async function createAlert(req, res) {
   try {
     const userId = req.user.id;
-    const { symbol, type, condition, value } = req.body;
+    const { symbol, type, condition, value, channels = [] } = req.body;
     const dbType = TYPE_MAP[type] || type;
 
     if (!symbol || !dbType || !value) {
       return res.status(400).json({ success: false, error: 'symbol, type, and value are required' });
     }
 
+    const notifyEmail    = channels.includes('email');
+    const notifyTelegram = channels.includes('telegram');
+
     const { rows } = await db.query(`
-      INSERT INTO alerts (user_id, symbol, type, condition, target)
-      VALUES ($1, $2, $3, $4, $5)
-      RETURNING id, symbol, type, condition, target, triggered, created_at
-    `, [userId, symbol.toUpperCase(), dbType, condition || 'above', value]);
+      INSERT INTO alerts (user_id, symbol, type, condition, target, notify_email, notify_telegram)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      RETURNING id, symbol, type, condition, target, notify_email, notify_telegram, triggered, created_at
+    `, [userId, symbol.toUpperCase(), dbType, condition || 'above', value, notifyEmail, notifyTelegram]);
 
     res.status(201).json({ success: true, alert: rows[0] });
   } catch (err) {
@@ -195,8 +200,7 @@ async function togglePause(req, res) {
     const alertId = parseInt(req.params.id, 10);
 
     const { rows, rowCount } = await db.query(`
-      UPDATE alerts
-      SET paused = NOT paused
+      UPDATE alerts SET paused = NOT paused
       WHERE id = $1 AND user_id = $2
       RETURNING paused
     `, [alertId, userId]);

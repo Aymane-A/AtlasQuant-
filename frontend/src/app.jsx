@@ -22,6 +22,7 @@ import Backtester  from './pages/Backtester';
 import AlphaEngine from './pages/AlphaEngine';
 import Settings    from './pages/Settings';
 import Exchanges   from './pages/Exchanges.jsx';
+import Trading     from './pages/Trading.jsx';
 
 export default function App() {
   const { user } = useAuth();
@@ -63,6 +64,7 @@ export default function App() {
           <Route path="alpha_engine" element={<AlphaEngine />}/>
           <Route path="settings"    element={<Settings />}    />
           <Route path="exchanges"   element={<Exchanges />}   />
+          <Route path="trading"     element={<Trading />}     />
         </Route>
 
         {/* Fallback */}

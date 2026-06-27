@@ -92,6 +92,7 @@ app.use('/api/risk',      require('./routes/risk.routes'));
 app.use('/api/settings',  require('./routes/settings.routes'));
 app.use('/api/watchlist', require('./routes/watchlist.routes'));
 app.use('/api/dashboard', require('./routes/dashboard.routes'));
+app.use('/api/trading',   require('./routes/trading.routes'));
 
 // ── 4. Health Check ───────────────────────────────────────
 app.get('/api/health', (req, res) => {

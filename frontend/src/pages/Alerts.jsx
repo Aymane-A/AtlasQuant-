@@ -6,10 +6,13 @@ export default function Alerts() {
   const { t } = useTranslation();
   const a = key => t(`alerts.${key}`);
 
-  const [form, setForm]         = useState({ symbol:'', type:'typePrice', condition:'above', value:'', notify:'once' });
+  const [form, setForm]           = useState({ symbol:'', type:'typePrice', condition:'above', value:'', notify:'once' });
+  const [channels, setChannels]   = useState({ inapp: true, email: true, telegram: false, sms: false });
   const set = k => e => setForm(f => ({ ...f, [k]: e.target.value }));
+  const toggleChannel = k => setChannels(c => ({ ...c, [k]: !c[k] }));
+
   const [submitted, setSubmitted] = useState(false);
-  const [showForm, setShowForm]   = useState(false);   // ← NEW
+  const [showForm, setShowForm]   = useState(false);
   const [loading, setLoading]     = useState(true);
   const [error, setError]         = useState('');
   const [data, setData]           = useState({ stats:null, notifications:[], alerts:[] });
@@ -36,7 +39,6 @@ export default function Alerts() {
     return () => clearInterval(id);
   }, []);
 
-  // ── FIX: use alertsAPI.remove instead of alertsAPI.delete ──
   const handleDelete = async (id) => {
     try {
       await alertsAPI.remove(id);
@@ -68,7 +70,14 @@ export default function Alerts() {
     { val:'always', labelKey:'notifyAlways' },
     { val:'daily',  labelKey:'notifyDaily'  },
   ];
-  const CHANNELS = ['channelInApp','channelEmail','channelSms','channelWebhook'];
+
+  // Channels config with icons
+  const CHANNEL_OPTS = [
+    { key:'inapp',    label:'In-App',   icon:'🔔', always: true  },
+    { key:'email',    label:'Email',    icon:'📧', always: false },
+    { key:'telegram', label:'Telegram', icon:'✈️', always: false },
+    { key:'sms',      label:'SMS',      icon:'💬', always: false, disabled: true },
+  ];
 
   const STAT_CARDS = [
     { labelKey:'statActive',    v:data.stats?.active    ?? 0, color:'var(--cyan)'          },
@@ -94,6 +103,30 @@ export default function Alerts() {
     onMouseLeave: e => e.currentTarget.style.color = 'var(--text-muted)',
   });
 
+  const handleCreate = async () => {
+    if (!form.symbol || !form.value) return;
+    try {
+      const activeChannels = Object.entries(channels)
+        .filter(([, v]) => v)
+        .map(([k]) => k);
+
+      await alertsAPI.create({
+        symbol:    form.symbol,
+        type:      form.type,
+        condition: form.condition,
+        value:     form.value,
+        notify:    form.notify,
+        channels:  activeChannels,
+      });
+      setSubmitted(true);
+      setForm({ symbol:'', type:'typePrice', condition:'above', value:'', notify:'once' });
+      setChannels({ inapp: true, email: true, telegram: false, sms: false });
+      loadAlerts();
+    } catch (err) {
+      setError(err?.response?.data?.error || 'Failed to create alert');
+    }
+  };
+
   return (
     <>
       {loading && (
@@ -117,7 +150,6 @@ export default function Alerts() {
             {a('pageSubtitle')}
           </div>
         </div>
-        {/* FIX: New Alert button — shows form o reset submitted */}
         <button
           onClick={() => { setShowForm(true); setSubmitted(false); }}
           style={{ padding:'10px 22px', borderRadius:8, border:'1px solid var(--cyan-dim)', background:'var(--cyan-glow)', color:'var(--cyan)', fontFamily:'Syne,sans-serif', fontSize:13, fontWeight:700, cursor:'pointer' }}
@@ -180,7 +212,7 @@ export default function Alerts() {
           </div>
         </div>
 
-        {/* Create Alert — only when showForm */}
+        {/* Create Alert */}
         {showForm && (
           <div className="panel" style={{ padding:22 }}>
             <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:18 }}>
@@ -195,6 +227,7 @@ export default function Alerts() {
                 ✕
               </button>
             </div>
+
             {submitted ? (
               <div style={{ textAlign:'center', padding:40, color:'var(--green)', fontFamily:'JetBrains Mono,monospace' }}>
                 {a('successMsg')}
@@ -248,33 +281,37 @@ export default function Alerts() {
                   ))}
                 </select>
 
-                <div style={{ display:'flex', gap:16, flexWrap:'wrap' }}>
-                  {CHANNELS.map((ch, idx) => (
-                    <label key={ch} style={{ display:'flex', alignItems:'center', gap:6, fontSize:12, fontFamily:'JetBrains Mono,monospace', color:'var(--text-secondary)', cursor:'pointer' }}>
-                      <input type="checkbox" defaultChecked={idx < 2} style={{ accentColor:'var(--cyan)' }} />
-                      {a(ch)}
-                    </label>
-                  ))}
+                {/* Notification Channels */}
+                <div style={{ background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:8, padding:'12px 14px' }}>
+                  <div style={{ fontSize:10, letterSpacing:'.1em', color:'var(--text-muted)', textTransform:'uppercase', fontFamily:'JetBrains Mono,monospace', marginBottom:10 }}>
+                    Notify via
+                  </div>
+                  <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+                    {CHANNEL_OPTS.map(ch => (
+                      <button
+                        key={ch.key}
+                        onClick={() => !ch.always && !ch.disabled && toggleChannel(ch.key)}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 6,
+                          padding: '7px 14px', borderRadius: 8, fontSize: 12,
+                          fontFamily: 'JetBrains Mono,monospace', cursor: ch.disabled ? 'not-allowed' : 'pointer',
+                          border: `1px solid ${channels[ch.key] ? 'var(--cyan-dim)' : 'var(--border)'}`,
+                          background: channels[ch.key] ? 'rgba(0,245,212,0.08)' : 'transparent',
+                          color: channels[ch.key] ? 'var(--cyan)' : 'var(--text-muted)',
+                          opacity: ch.disabled ? 0.4 : 1,
+                          transition: 'all .15s',
+                        }}
+                      >
+                        <span>{ch.icon}</span>
+                        <span>{ch.label}</span>
+                        {ch.disabled && <span style={{ fontSize:9, opacity:.6 }}>(soon)</span>}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 <button
-                  onClick={async () => {
-                    if (!form.symbol || !form.value) return;
-                    try {
-                      await alertsAPI.create({
-                        symbol:    form.symbol,
-                        type:      form.type,
-                        condition: form.condition,
-                        value:     form.value,
-                        notify:    form.notify,
-                      });
-                      setSubmitted(true);
-                      setForm({ symbol:'', type:'typePrice', condition:'above', value:'', notify:'once' });
-                      loadAlerts();
-                    } catch (err) {
-                      setError(err?.response?.data?.error || 'Failed to create alert');
-                    }
-                  }}
+                  onClick={handleCreate}
                   style={{ padding:12, borderRadius:8, border:'1px solid var(--cyan-dim)', background:'var(--cyan-glow)', color:'var(--cyan)', fontFamily:'Syne,sans-serif', fontSize:13, fontWeight:700, cursor:'pointer', letterSpacing:'.04em' }}
                 >
                   {a('createBtn')}
@@ -322,8 +359,22 @@ export default function Alerts() {
                 <span style={{ color:'var(--text-secondary)' }}>{card.target}</span>
               </div>
 
-              <div style={{ height:4, background:'rgba(255,255,255,0.05)', borderRadius:2, overflow:'hidden', marginBottom:6 }}>
+              <div style={{ height:4, background:'rgba(255,255,255,0.05)', borderRadius:2, overflow:'hidden', marginBottom:8 }}>
                 <div style={{ height:'100%', width:`${card.pct}%`, background:card.color, borderRadius:2, transition:'width 1s ease' }} />
+              </div>
+
+              {/* Channel badges */}
+              <div style={{ display:'flex', gap:5, marginBottom:8 }}>
+                {card.notifyEmail && (
+                  <span style={{ fontSize:9, fontFamily:'JetBrains Mono,monospace', padding:'2px 7px', borderRadius:4, background:'rgba(0,245,212,0.08)', color:'var(--cyan)', border:'1px solid var(--cyan-dim)' }}>
+                    📧 Email
+                  </span>
+                )}
+                {card.notifyTelegram && (
+                  <span style={{ fontSize:9, fontFamily:'JetBrains Mono,monospace', padding:'2px 7px', borderRadius:4, background:'rgba(99,102,241,0.08)', color:'#818cf8', border:'1px solid rgba(99,102,241,0.25)' }}>
+                    ✈️ Telegram
+                  </span>
+                )}
               </div>
 
               <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', fontSize:11, fontFamily:'JetBrains Mono,monospace' }}>
