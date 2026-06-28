@@ -1,14 +1,37 @@
 const COLOR = { BUY:'var(--green)', SELL:'var(--red)', HOLD:'var(--amber)' };
 const BG    = { BUY:'rgba(52,211,153,0.12)', SELL:'rgba(248,113,113,0.12)', HOLD:'rgba(251,191,36,0.1)' };
 
+// ── Smart price formatter — handles PEPE, SHIB, BTC, XAU ─
+const smartPrice = (p) => {
+  const n = parseFloat(p);
+  if (!n || isNaN(n)) return '—';
+  if (n >= 10000)   return '$' + n.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  if (n >= 1000)    return '$' + n.toLocaleString('en-US', { maximumFractionDigits: 2 });
+  if (n >= 1)       return '$' + n.toFixed(2);
+  if (n >= 0.01)    return '$' + n.toFixed(4);
+  if (n >= 0.0001)  return '$' + n.toFixed(6);
+  if (n >= 0.00001) return '$' + n.toFixed(8);
+  return '$' + n.toFixed(10);
+};
+
 export default function SignalCard({ signal: s }) {
   if (!s) return null;
   const color = COLOR[s.signal] || 'var(--text-secondary)';
 
+  // ── Normalize field names (backend sends snake_case) ─────
+  const price      = s.price;
+  const entry      = s.entry      || s.price;
+  const stopLoss   = s.stop_loss  ?? s.stopLoss;
+  const takeProfit = s.take_profit ?? s.takeProfit;
+  const riskReward = s.risk_reward ?? s.riskReward;
+  const timeframe  = s.interval   ?? s.timeframe ?? '4h';
+  const rsiValue   = s.indicators?.rsi?.value ?? s.indicators?.rsi;
+
   return (
     <div style={{
-      background: 'var(--surface)', border: `1px solid var(--border)`,
-      borderRadius: 12, padding: 16, transition: 'all .25s', position: 'relative', overflow: 'hidden',
+      background: 'var(--surface)', border: '1px solid var(--border)',
+      borderRadius: 12, padding: 16, transition: 'all .25s',
+      position: 'relative', overflow: 'hidden',
       borderTop: `2px solid ${color}`,
     }}>
       {/* Header */}
@@ -21,12 +44,14 @@ export default function SignalCard({ signal: s }) {
 
       {/* Price */}
       <div style={{ fontSize:24, fontWeight:700, fontFamily:'JetBrains Mono,monospace', color, marginBottom:4 }}>
-        ${s.price?.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 })}
+        {smartPrice(price)}
       </div>
 
       {/* Target / Stop */}
       <div style={{ fontSize:11, color:'var(--text-secondary)', fontFamily:'JetBrains Mono,monospace', marginBottom:12 }}>
-        Target: ${s.takeProfit?.toFixed(2)} · Stop: ${s.stopLoss?.toFixed(2)}
+        Target: {takeProfit ? smartPrice(takeProfit) : '—'}
+        {' · '}
+        Stop: {stopLoss ? smartPrice(stopLoss) : '—'}
       </div>
 
       {/* Confidence bar */}
@@ -37,10 +62,10 @@ export default function SignalCard({ signal: s }) {
       {/* Meta */}
       <div style={{ display:'flex', flexDirection:'column', gap:5 }}>
         {[
-          ['Confidence', `${s.confidence}/100`, color],
-          ['R:R Ratio',  s.riskReward,           'var(--text-secondary)'],
-          ['Timeframe',  s.timeframe,             'var(--text-secondary)'],
-          ['RSI',        s.indicators?.rsi?.value,'var(--text-secondary)'],
+          ['Confidence', `${s.confidence}/100`,                      color                    ],
+          ['R:R Ratio',  riskReward  || '—',                         'var(--text-secondary)'  ],
+          ['Timeframe',  timeframe,                                   'var(--text-secondary)'  ],
+          ['RSI',        rsiValue != null ? parseFloat(rsiValue).toFixed(2) : '—', 'var(--text-secondary)'],
         ].map(([k, v, c]) => (
           <div key={k} style={{ display:'flex', justifyContent:'space-between', fontSize:11, fontFamily:'JetBrains Mono,monospace' }}>
             <span style={{ color:'var(--text-muted)' }}>{k}</span>
@@ -50,9 +75,11 @@ export default function SignalCard({ signal: s }) {
       </div>
 
       {/* AI Reasoning */}
-      <div style={{ fontSize:11, color:'var(--text-secondary)', fontFamily:'JetBrains Mono,monospace', marginTop:10, paddingTop:10, borderTop:'1px solid var(--border)', lineHeight:1.5 }}>
-        {s.reasoning}
-      </div>
+      {s.reasoning && (
+        <div style={{ fontSize:11, color:'var(--text-secondary)', fontFamily:'JetBrains Mono,monospace', marginTop:10, paddingTop:10, borderTop:'1px solid var(--border)', lineHeight:1.5 }}>
+          {s.reasoning}
+        </div>
+      )}
     </div>
   );
 }

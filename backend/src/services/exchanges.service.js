@@ -39,15 +39,6 @@ const SUPPORTED = {
 
 const VALID_MODES = ['readonly', 'paper', 'live'];
 
-// ── Binance helper — builds signed query string ───────────
-// recvWindow=60000 fixes 400 timestamp errors on slow networks/servers
-function binanceSign(secret, params = {}) {
-  const ts  = Date.now();
-  const qs  = new URLSearchParams({ ...params, timestamp: ts, recvWindow: 60000 }).toString();
-  const sig = crypto.createHmac('sha256', secret).update(qs).digest('hex');
-  return `${qs}&signature=${sig}`;
-}
-
 function validateCredentials(exchange, credentials) {
   const cfg = SUPPORTED[exchange];
   if (!cfg) { const e = new Error(`Unsupported exchange: ${exchange}`); e.status = 400; throw e; }
@@ -56,15 +47,37 @@ function validateCredentials(exchange, credentials) {
   }
 }
 
+// ── Binance timestamp sync ────────────────────────────────
+// Fetches Binance server time and computes offset once, reuses it
+let binanceTimeOffset = 0;
+let binanceTimeSynced = false;
+
+async function getBinanceTimestamp() {
+  if (!binanceTimeSynced) {
+    try {
+      const res = await axios.get('https://api.binance.com/api/v3/time', { timeout: 5000 });
+      binanceTimeOffset = res.data.serverTime - Date.now();
+      binanceTimeSynced = true;
+      console.log(`[binance] time offset: ${binanceTimeOffset}ms`);
+    } catch (e) {
+      console.warn('[binance] could not sync time, using local:', e.message);
+    }
+  }
+  return Date.now() + binanceTimeOffset;
+}
+
 // ── Live key verification ─────────────────────────────────
 async function verifyWithExchange(exchange, credentials) {
   try {
     switch (exchange) {
 
       case 'binance': {
-        const qs  = binanceSign(credentials.apiSecret);
-        const res = await axios.get(`https://api.binance.com/api/v3/account?${qs}`, {
-          headers: { 'X-MBX-APIKEY': credentials.apiKey }, timeout: 10000,
+        const ts  = await getBinanceTimestamp();
+        const rw  = 10000;
+        const qs  = `recvWindow=${rw}&timestamp=${ts}`;
+        const sig = crypto.createHmac('sha256', credentials.apiSecret).update(qs).digest('hex');
+        const res = await axios.get(`https://api.binance.com/api/v3/account?${qs}&signature=${sig}`, {
+          headers: { 'X-MBX-APIKEY': credentials.apiKey }, timeout: 8000,
         });
         console.log('[binance] verify ok — canTrade:', res.data.canTrade);
         break;
@@ -72,12 +85,12 @@ async function verifyWithExchange(exchange, credentials) {
 
       case 'bybit': {
         const ts  = Date.now().toString();
-        const rw  = '60000';
+        const rw  = '5000';
         const sig = crypto.createHmac('sha256', credentials.apiSecret)
           .update(ts + credentials.apiKey + rw).digest('hex');
         await axios.get('https://api.bybit.com/v5/account/wallet-balance?accountType=UNIFIED', {
           headers: { 'X-BAPI-API-KEY': credentials.apiKey, 'X-BAPI-SIGN': sig,
-                     'X-BAPI-TIMESTAMP': ts, 'X-BAPI-RECV-WINDOW': rw }, timeout: 10000,
+                     'X-BAPI-TIMESTAMP': ts, 'X-BAPI-RECV-WINDOW': rw }, timeout: 8000,
         });
         break;
       }
@@ -88,7 +101,7 @@ async function verifyWithExchange(exchange, credentials) {
           .update(`${ts}GET/api/v5/account/balance`).digest('base64');
         await axios.get('https://www.okx.com/api/v5/account/balance', {
           headers: { 'OK-ACCESS-KEY': credentials.apiKey, 'OK-ACCESS-SIGN': sig,
-                     'OK-ACCESS-TIMESTAMP': ts, 'OK-ACCESS-PASSPHRASE': credentials.passphrase }, timeout: 10000,
+                     'OK-ACCESS-TIMESTAMP': ts, 'OK-ACCESS-PASSPHRASE': credentials.passphrase }, timeout: 8000,
         });
         break;
       }
@@ -102,7 +115,7 @@ async function verifyWithExchange(exchange, credentials) {
         await axios.get('https://api.kucoin.com/api/v1/accounts', {
           headers: { 'KC-API-KEY': credentials.apiKey, 'KC-API-SIGN': sig,
                      'KC-API-TIMESTAMP': ts, 'KC-API-PASSPHRASE': passSig,
-                     'KC-API-KEY-VERSION': '2' }, timeout: 10000,
+                     'KC-API-KEY-VERSION': '2' }, timeout: 8000,
         });
         break;
       }
@@ -126,39 +139,51 @@ async function fetchPortfolio(exchange, credentials) {
   switch (exchange) {
 
     case 'binance': {
-      const qs  = binanceSign(credentials.apiSecret);
-      const res = await axios.get(`https://api.binance.com/api/v3/account?${qs}`, {
-        headers: { 'X-MBX-APIKEY': credentials.apiKey }, timeout: 10000,
-      });
+      const ts  = await getBinanceTimestamp();
+      const rw  = 10000;
+      const qs  = `recvWindow=${rw}&timestamp=${ts}`;
+      const sig = crypto.createHmac('sha256', credentials.apiSecret).update(qs).digest('hex');
 
-      const allBalances = res.data.balances || [];
-      const nonZero     = allBalances.filter(b => parseFloat(b.free) + parseFloat(b.locked) > 0);
+      console.log(`[binance] ts=${ts}, offset=${binanceTimeOffset}ms`);
 
-      console.log(`[binance] total: ${allBalances.length}, non-zero: ${nonZero.length}`);
-      console.log(`[binance] assets:`, nonZero.map(b => `${b.asset}=${parseFloat(b.free)+parseFloat(b.locked)}`));
+      try {
+        const res = await axios.get(`https://api.binance.com/api/v3/account?${qs}&signature=${sig}`, {
+          headers: { 'X-MBX-APIKEY': credentials.apiKey }, timeout: 10000,
+        });
 
-      return nonZero.map(b => ({
-        symbol: b.asset,
-        free:   parseFloat(b.free),
-        locked: parseFloat(b.locked),
-        total:  parseFloat(b.free) + parseFloat(b.locked),
-      }));
+        const allBalances = res.data.balances || [];
+        const nonZero     = allBalances.filter(b => parseFloat(b.free) + parseFloat(b.locked) > 0);
+
+        console.log(`[binance] total: ${allBalances.length}, non-zero: ${nonZero.length}`);
+        console.log(`[binance] assets:`, nonZero.map(b => `${b.asset}=${parseFloat(b.free)+parseFloat(b.locked)}`));
+
+        return nonZero.map(b => ({
+          symbol: b.asset,
+          free:   parseFloat(b.free),
+          locked: parseFloat(b.locked),
+          total:  parseFloat(b.free) + parseFloat(b.locked),
+        }));
+
+      } catch (err) {
+        // Reset time sync on error so next call re-syncs
+        binanceTimeSynced = false;
+        console.error('[binance] fetchPortfolio error:', err.response?.status, JSON.stringify(err.response?.data));
+        throw err;
+      }
     }
 
     case 'bybit': {
       const ts  = Date.now().toString();
-      const rw  = '60000';
+      const rw  = '5000';
       const sig = crypto.createHmac('sha256', credentials.apiSecret)
         .update(ts + credentials.apiKey + rw).digest('hex');
       const res = await axios.get('https://api.bybit.com/v5/account/wallet-balance?accountType=UNIFIED', {
         headers: { 'X-BAPI-API-KEY': credentials.apiKey, 'X-BAPI-SIGN': sig,
                    'X-BAPI-TIMESTAMP': ts, 'X-BAPI-RECV-WINDOW': rw }, timeout: 10000,
       });
-
-      const coins   = res.data?.result?.list?.[0]?.coin || [];
+      const coins = res.data?.result?.list?.[0]?.coin || [];
       const nonZero = coins.filter(c => parseFloat(c.walletBalance) > 0);
       console.log(`[bybit] non-zero:`, nonZero.map(c => `${c.coin}=${c.walletBalance}`));
-
       return nonZero.map(c => ({
         symbol: c.coin,
         free:   parseFloat(c.availableToWithdraw),
@@ -176,11 +201,9 @@ async function fetchPortfolio(exchange, credentials) {
                    'OK-ACCESS-TIMESTAMP': ts, 'OK-ACCESS-PASSPHRASE': credentials.passphrase },
         timeout: 10000,
       });
-
       const details = res.data?.data?.[0]?.details || [];
       const nonZero = details.filter(d => parseFloat(d.cashBal) > 0);
       console.log(`[okx] non-zero:`, nonZero.map(d => `${d.ccy}=${d.cashBal}`));
-
       return nonZero.map(d => ({
         symbol: d.ccy,
         free:   parseFloat(d.availBal),
@@ -200,10 +223,8 @@ async function fetchPortfolio(exchange, credentials) {
                    'KC-API-TIMESTAMP': ts, 'KC-API-PASSPHRASE': passSig,
                    'KC-API-KEY-VERSION': '2' }, timeout: 10000,
       });
-
       const accounts = (res.data?.data || []).filter(a => parseFloat(a.balance) > 0 && a.type === 'trade');
-      console.log(`[kucoin] trade:`, accounts.map(a => `${a.currency}=${a.balance}`));
-
+      console.log(`[kucoin] trade accounts:`, accounts.map(a => `${a.currency}=${a.balance}`));
       return accounts.map(a => ({
         symbol: a.currency,
         free:   parseFloat(a.available),
@@ -219,16 +240,13 @@ async function fetchPortfolio(exchange, credentials) {
       const hash     = crypto.createHash('sha256').update(nonce + postData).digest('binary');
       const sig      = crypto.createHmac('sha512', secret)
         .update('/0/private/Balance' + hash, 'binary').digest('base64');
-
       const res = await axios.post('https://api.kraken.com/0/private/Balance', postData, {
         headers: { 'API-Key': credentials.apiKey, 'API-Sign': sig,
                    'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 10000,
       });
-
       const result    = res.data?.result || {};
       const krakenMap = { XXBT:'BTC', XETH:'ETH', ZUSD:'USD', ZEUR:'EUR', XLTC:'LTC', XXRP:'XRP' };
       console.log(`[kraken] balances:`, result);
-
       return Object.entries(result)
         .filter(([, v]) => parseFloat(v) > 0)
         .map(([asset, balance]) => ({
@@ -240,14 +258,14 @@ async function fetchPortfolio(exchange, credentials) {
     }
 
     case 'mexc': {
-      const qs  = binanceSign(credentials.apiSecret); // same format as Binance
-      const res = await axios.get(`https://api.mexc.com/api/v3/account?${qs}`, {
+      const ts  = Date.now();
+      const qs  = `timestamp=${ts}`;
+      const sig = crypto.createHmac('sha256', credentials.apiSecret).update(qs).digest('hex');
+      const res = await axios.get(`https://api.mexc.com/api/v3/account?${qs}&signature=${sig}`, {
         headers: { 'X-MEXC-APIKEY': credentials.apiKey }, timeout: 10000,
       });
-
       const nonZero = (res.data.balances || []).filter(b => parseFloat(b.free) + parseFloat(b.locked) > 0);
       console.log(`[mexc] non-zero:`, nonZero.map(b => `${b.asset}=${parseFloat(b.free)+parseFloat(b.locked)}`));
-
       return nonZero.map(b => ({
         symbol: b.asset,
         free:   parseFloat(b.free),
@@ -262,14 +280,11 @@ async function fetchPortfolio(exchange, credentials) {
       const bodyHash = crypto.createHash('sha512').update('').digest('hex');
       const signStr  = `GET\n${url}\n\n${bodyHash}\n${ts}`;
       const sig      = crypto.createHmac('sha512', credentials.apiSecret).update(signStr).digest('hex');
-
       const res = await axios.get(`https://api.gateio.ws${url}`, {
         headers: { 'KEY': credentials.apiKey, 'SIGN': sig, 'Timestamp': ts }, timeout: 10000,
       });
-
       const nonZero = (res.data || []).filter(a => parseFloat(a.available) + parseFloat(a.locked) > 0);
       console.log(`[gate] non-zero:`, nonZero.map(a => `${a.currency}=${parseFloat(a.available)+parseFloat(a.locked)}`));
-
       return nonZero.map(a => ({
         symbol: a.currency,
         free:   parseFloat(a.available),
@@ -285,15 +300,12 @@ async function fetchPortfolio(exchange, credentials) {
       const params  = `AccessKeyId=${credentials.apiKey}&SignatureMethod=HmacSHA256&SignatureVersion=2&Timestamp=${encodeURIComponent(ts)}`;
       const toSign  = `GET\n${host}\n${path}\n${params}`;
       const sig     = crypto.createHmac('sha256', credentials.apiSecret).update(toSign).digest('base64');
-
-      const res = await axios.get(`https://${host}${path}?${params}&Signature=${encodeURIComponent(sig)}`, { timeout: 10000 });
-      const spotAccount = (res.data?.data || []).find(a => a.type === 'spot');
-      if (!spotAccount) return [];
-
-      const balRes  = await axios.get(`https://${host}/v1/account/accounts/${spotAccount.id}/balance?${params}&Signature=${encodeURIComponent(sig)}`, { timeout: 10000 });
+      const res     = await axios.get(`https://${host}${path}?${params}&Signature=${encodeURIComponent(sig)}`, { timeout: 10000 });
+      const spot    = (res.data?.data || []).find(a => a.type === 'spot');
+      if (!spot) return [];
+      const balRes  = await axios.get(`https://${host}/v1/account/accounts/${spot.id}/balance?${params}&Signature=${encodeURIComponent(sig)}`, { timeout: 10000 });
       const nonZero = (balRes.data?.data?.list || []).filter(b => b.type === 'trade' && parseFloat(b.balance) > 0);
       console.log(`[htx] non-zero:`, nonZero.map(b => `${b.currency}=${b.balance}`));
-
       return nonZero.map(b => ({
         symbol: b.currency.toUpperCase(),
         free:   parseFloat(b.balance),
@@ -307,16 +319,13 @@ async function fetchPortfolio(exchange, credentials) {
       const path    = '/api/v2/spot/account/assets';
       const prehash = ts + 'GET' + path;
       const sig     = crypto.createHmac('sha256', credentials.apiSecret).update(prehash).digest('base64');
-
       const res = await axios.get(`https://api.bitget.com${path}`, {
         headers: { 'ACCESS-KEY': credentials.apiKey, 'ACCESS-SIGN': sig,
                    'ACCESS-TIMESTAMP': ts, 'ACCESS-PASSPHRASE': credentials.passphrase,
                    'locale': 'en-US' }, timeout: 10000,
       });
-
       const nonZero = (res.data?.data || []).filter(a => parseFloat(a.available) + parseFloat(a.frozen) > 0);
       console.log(`[bitget] non-zero:`, nonZero.map(a => `${a.coin}=${parseFloat(a.available)+parseFloat(a.frozen)}`));
-
       return nonZero.map(a => ({
         symbol: a.coin,
         free:   parseFloat(a.available),
@@ -327,25 +336,18 @@ async function fetchPortfolio(exchange, credentials) {
 
     case 'phemex': {
       const expiry = Date.now() + 60000;
-      const query  = `expiry=${expiry}`;
+      const path   = '/accounts/accountPositions';
       const sig    = crypto.createHmac('sha256', credentials.apiSecret)
-        .update('/accounts/accountPositions' + query + expiry).digest('hex');
-
-      const res = await axios.get(`https://api.phemex.com/accounts/accountPositions?currency=USD`, {
+        .update(path + `expiry=${expiry}` + expiry).digest('hex');
+      const res = await axios.get(`https://api.phemex.com${path}?currency=USD`, {
         headers: { 'x-phemex-access-token': credentials.apiKey,
                    'x-phemex-request-expiry': expiry,
                    'x-phemex-request-signature': sig }, timeout: 10000,
       });
-
       const spots = res.data?.data?.spotAccount || [];
-      return spots
-        .filter(a => parseFloat(a.balanceEv || a.balance || 0) > 0)
-        .map(a => ({
-          symbol: a.currency,
-          free:   parseFloat(a.balanceEv || a.balance || 0),
-          locked: 0,
-          total:  parseFloat(a.balanceEv || a.balance || 0),
-        }));
+      console.log(`[phemex] spots:`, spots);
+      return spots.filter(a => parseFloat(a.balanceEv || a.balance || 0) > 0)
+        .map(a => ({ symbol: a.currency, free: parseFloat(a.balanceEv || a.balance || 0), locked: 0, total: parseFloat(a.balanceEv || a.balance || 0) }));
     }
 
     case 'bitmex': {
@@ -353,13 +355,11 @@ async function fetchPortfolio(exchange, credentials) {
       const path    = '/api/v1/user/wallet';
       const sig     = crypto.createHmac('sha256', credentials.apiSecret)
         .update('GET' + path + expires).digest('hex');
-
       const res = await axios.get(`https://www.bitmex.com${path}`, {
-        headers: { 'api-key': credentials.apiKey, 'api-expires': expires,
-                   'api-signature': sig }, timeout: 10000,
+        headers: { 'api-key': credentials.apiKey, 'api-expires': expires, 'api-signature': sig }, timeout: 10000,
       });
-
       const amount = (res.data?.amount || 0) / 1e8;
+      console.log(`[bitmex] BTC wallet:`, amount);
       return amount > 0 ? [{ symbol:'BTC', free:amount, locked:0, total:amount }] : [];
     }
 
@@ -374,11 +374,13 @@ async function placeLiveOrder(exchange, credentials, { symbol, side, type, quant
   switch (exchange) {
 
     case 'binance': {
-      const params = { symbol, side:side.toUpperCase(), type:type.toUpperCase(), quantity };
-      if (type === 'limit') { params.price = price; params.timeInForce = 'GTC'; }
-      const qs  = binanceSign(credentials.apiSecret, params);
-      const res = await axios.post(
-        `https://api.binance.com/api/v3/order?${qs}`,
+      const ts     = await getBinanceTimestamp();
+      const rw     = 10000;
+      const params = `symbol=${symbol}&side=${side.toUpperCase()}&type=${type.toUpperCase()}&quantity=${quantity}&recvWindow=${rw}&timestamp=${ts}`;
+      const full   = type === 'limit' ? `${params}&price=${price}&timeInForce=GTC` : params;
+      const sig    = crypto.createHmac('sha256', credentials.apiSecret).update(full).digest('hex');
+      const res    = await axios.post(
+        `https://api.binance.com/api/v3/order?${full}&signature=${sig}`,
         null,
         { headers: { 'X-MBX-APIKEY': credentials.apiKey }, timeout: 10000 }
       );
@@ -391,7 +393,7 @@ async function placeLiveOrder(exchange, credentials, { symbol, side, type, quant
                         orderType:type==='market'?'Market':'Limit', qty:String(quantity),
                         ...(type==='limit' && { price:String(price) }) };
       const bodyStr = JSON.stringify(body);
-      const rw      = '60000';
+      const rw      = '5000';
       const sig     = crypto.createHmac('sha256', credentials.apiSecret)
         .update(ts + credentials.apiKey + rw + bodyStr).digest('hex');
       const res = await axios.post('https://api.bybit.com/v5/order/create', body, {
@@ -399,7 +401,7 @@ async function placeLiveOrder(exchange, credentials, { symbol, side, type, quant
                    'X-BAPI-TIMESTAMP':ts, 'X-BAPI-RECV-WINDOW':rw,
                    'Content-Type':'application/json' }, timeout: 10000,
       });
-      return { exchangeOrderId:res.data?.result?.orderId, status:res.data?.result?.orderStatus, raw:res.data };
+      return { exchangeOrderId: res.data?.result?.orderId, status: res.data?.result?.orderStatus, raw: res.data };
     }
 
     case 'okx': {
@@ -414,7 +416,7 @@ async function placeLiveOrder(exchange, credentials, { symbol, side, type, quant
                    'OK-ACCESS-TIMESTAMP':ts, 'OK-ACCESS-PASSPHRASE':credentials.passphrase,
                    'Content-Type':'application/json' }, timeout: 10000,
       });
-      return { exchangeOrderId:res.data?.data?.[0]?.ordId, status:res.data?.data?.[0]?.sCode, raw:res.data };
+      return { exchangeOrderId: res.data?.data?.[0]?.ordId, status: res.data?.data?.[0]?.sCode, raw: res.data };
     }
 
     default: {
@@ -451,11 +453,9 @@ async function connectExchange(userId, exchange, credentials, mode = 'readonly')
   }
   validateCredentials(exchange, credentials);
   if (mode !== 'paper') await verifyWithExchange(exchange, credentials);
-
   const encKey    = encrypt(credentials.apiKey.trim());
   const encSecret = encrypt(credentials.apiSecret.trim());
   const encPass   = credentials.passphrase ? encrypt(credentials.passphrase.trim()) : null;
-
   await pool.query(
     `INSERT INTO user_exchange_connections
        (user_id, exchange_id, api_key_enc, api_secret_enc, passphrase_enc, mode, connected_at)
@@ -496,7 +496,7 @@ async function testConnection(userId, exchangeId) {
     `UPDATE user_exchange_connections SET last_sync_at=NOW() WHERE user_id=$1 AND exchange_id=$2`,
     [userId, exchangeId]
   );
-  return { ok:true, message:'Connection verified' };
+  return { ok: true, message: 'Connection verified' };
 }
 
 async function getDecryptedCredentials(userId, exchangeId) {

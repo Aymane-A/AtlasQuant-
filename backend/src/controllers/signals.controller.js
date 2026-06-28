@@ -19,6 +19,7 @@ function parseRR(val) {
     return parseFloat(str) || 0;
 }
 
+// ── getAllSignals ──────────────────────────────────────────
 async function getAllSignals(req, res) {
     try {
         const { interval = '4h', refresh } = req.query;
@@ -69,10 +70,10 @@ async function getAllSignals(req, res) {
             interval:    r.interval,
             signal:      r.signal,
             confidence:  r.confidence,
-            price:       parseFloat(r.price),
-            entry:       parseFloat(r.entry),
-            stop_loss:   parseFloat(r.stop_loss),
-            take_profit: parseFloat(r.take_profit),
+            price:       parseFloat(r.price)       || 0,
+            entry:       parseFloat(r.entry)       || null,
+            stop_loss:   parseFloat(r.stop_loss)   || null,
+            take_profit: parseFloat(r.take_profit) || null,
             risk_reward: r.risk_reward,
             reasoning:   r.reasoning,
             indicators:  r.indicators,
@@ -87,6 +88,7 @@ async function getAllSignals(req, res) {
     }
 }
 
+// ── getSignalBySymbol ─────────────────────────────────────
 async function getSignalBySymbol(req, res) {
     try {
         const { symbol } = req.params;
@@ -100,6 +102,7 @@ async function getSignalBySymbol(req, res) {
     }
 }
 
+// ── getSupportedSymbols ───────────────────────────────────
 async function getSupportedSymbols(req, res) {
     try {
         const { rows } = await db.query('SELECT DISTINCT symbol FROM signals');
@@ -109,6 +112,7 @@ async function getSupportedSymbols(req, res) {
     }
 }
 
+// ── getAlphaEngineData ────────────────────────────────────
 async function getAlphaEngineData(req, res) {
     try {
         res.json({ success: true, data: { modelStatus: 'Active', confidenceScore: 0.92, lastPrediction: 'Bullish' } });
@@ -122,11 +126,10 @@ const PERIOD_DAYS = { '1M': 30, '3M': 90, '6M': 180, '1Y': 365 };
 
 function classifyAsset(symbol) {
     const s = symbol.toUpperCase();
-    const FOREX   = ['EUR','GBP','JPY','CHF','AUD','CAD','NZD','USD'];
+    const FOREX   = ['EUR','GBP','JPY','CHF','AUD','CAD','NZD'];
     const COMMO   = ['XAU','XAG','OIL','WTI','BRENT','GAS','NG','WHEAT','CORN','COPPER'];
     const INDICES = ['SPY','QQQ','DIA','IWM','SPX','NDX','VIX'];
-
-    if (FOREX.some(f  => s.includes(f) && s.includes('/') && !s.includes('USDT') && !s.includes('BTC'))) return 'Forex';
+    if (FOREX.some(f  => s.includes(f) && s.includes('/') && !s.includes('USDT'))) return 'Forex';
     if (COMMO.some(c  => s.includes(c))) return 'Commodités';
     if (INDICES.some(i => s.includes(i))) return 'Indices';
     return 'Crypto';
@@ -219,8 +222,7 @@ async function getAnalyticsData(req, res) {
 
         // ── Equity curve ──
         const sortedAscAll = signals.slice().sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-        let cumPnl = 0;
-        let cumBench = 0;
+        let cumPnl = 0, cumBench = 0;
         const equity = sortedAscAll.map(s => {
             const pnl = calcPnlPct(s);
             cumPnl   += pnl;
@@ -259,8 +261,7 @@ async function getAnalyticsData(req, res) {
             const tp     = parseFloat(s.take_profit) || 0;
             const rrRaw  = parseRR(s.risk_reward);
 
-            let rrDisplay = '—';
-            let pnlDisplay;
+            let rrDisplay = '—', pnlDisplay;
 
             if (entry && sl && tp) {
                 const risk   = Math.abs(entry - sl);
@@ -296,7 +297,6 @@ async function getAnalyticsData(req, res) {
             if (s.signal === 'BUY')  classMap[cls].buy++;
             if (s.signal === 'SELL') classMap[cls].sell++;
             classMap[cls].confSum += (s.confidence || 0);
-
             const entry = parseFloat(s.entry) || 0;
             const sl    = parseFloat(s.stop_loss) || 0;
             const tp    = parseFloat(s.take_profit) || 0;
