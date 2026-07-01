@@ -1,23 +1,41 @@
 /**
  * services/yahooFinance.service.js
- * Commodities & Forex via Yahoo Finance (no API key needed)
- * Symbols: XAU/USD, XAG/USD, OIL/USD, EUR/USD, GBP/USD
+ * Commodities, Forex & Indices via Yahoo Finance (no API key needed)
  *
  * + getStockCandles : ajouté pour le Backtester, permet de récupérer
  *   n'importe quel symbole boursier (AAPL, SPY, NVDA...), pas seulement
- *   les 5 paires commodities/forex de YF_SYMBOLS ci-dessous.
+ *   les paires de YF_SYMBOLS ci-dessous.
  */
 
 const YahooFinance = require('yahoo-finance2').default;
 const yahooFinance  = new YahooFinance();
 const logger        = require('../utils/logger');
 
+// asset_class doit matcher: 'Commodity' | 'Forex' | 'Indices'
 const YF_SYMBOLS = {
-  'GC=F':     { display: 'XAU/USD', type: 'Commodity', category: 'Gold'   },
-  'SI=F':     { display: 'XAG/USD', type: 'Commodity', category: 'Silver' },
-  'CL=F':     { display: 'OIL/USD', type: 'Commodity', category: 'Oil'    },
-  'EURUSD=X': { display: 'EUR/USD', type: 'Forex',     category: 'Forex'  },
-  'GBPUSD=X': { display: 'GBP/USD', type: 'Forex',     category: 'Forex'  },
+  // ── Commodities ──
+  'GC=F':     { display: 'XAU/USD', asset_class: 'Commodity', category: 'Gold'        },
+  'SI=F':     { display: 'XAG/USD', asset_class: 'Commodity', category: 'Silver'      },
+  'CL=F':     { display: 'OIL/USD', asset_class: 'Commodity', category: 'Crude Oil'   },
+  'NG=F':     { display: 'NATGAS',  asset_class: 'Commodity', category: 'Natural Gas' },
+  'HG=F':     { display: 'COPPER',  asset_class: 'Commodity', category: 'Copper'      },
+  'PL=F':     { display: 'XPT/USD', asset_class: 'Commodity', category: 'Platinum'    },
+
+  // ── Forex ──
+  'EURUSD=X': { display: 'EUR/USD', asset_class: 'Forex', category: 'Forex' },
+  'GBPUSD=X': { display: 'GBP/USD', asset_class: 'Forex', category: 'Forex' },
+  'USDJPY=X': { display: 'USD/JPY', asset_class: 'Forex', category: 'Forex' },
+  'USDCHF=X': { display: 'USD/CHF', asset_class: 'Forex', category: 'Forex' },
+  'AUDUSD=X': { display: 'AUD/USD', asset_class: 'Forex', category: 'Forex' },
+  'USDCAD=X': { display: 'USD/CAD', asset_class: 'Forex', category: 'Forex' },
+  'NZDUSD=X': { display: 'NZD/USD', asset_class: 'Forex', category: 'Forex' },
+  'EURGBP=X': { display: 'EUR/GBP', asset_class: 'Forex', category: 'Forex' },
+
+  // ── Indices ──
+  '^GSPC':    { display: 'SPX500',  asset_class: 'Indices', category: 'US Index' },
+  '^NDX':     { display: 'NAS100',  asset_class: 'Indices', category: 'US Index' },
+  '^DJI':     { display: 'US30',    asset_class: 'Indices', category: 'US Index' },
+  '^VIX':     { display: 'VIX',     asset_class: 'Indices', category: 'Volatility' },
 };
 
 const INTERVAL_MAP = {
@@ -26,17 +44,13 @@ const INTERVAL_MAP = {
   '1d': '1d',
 };
 
-/**
- * Fetch candles + price mn Yahoo Finance
- */
 async function getYFData(symbol, interval = '4h', limit = 100) {
   const yfInterval = INTERVAL_MAP[interval] || '1h';
 
-  // Calculate period (last 30 days for 1h, last 1 year for 1d)
   const now    = new Date();
   const period1 = new Date(now);
   if (yfInterval === '1h') {
-    period1.setDate(period1.getDate() - 7); // 7 days for hourly
+    period1.setDate(period1.getDate() - 7);
   } else {
     period1.setFullYear(period1.getFullYear() - 1);
   }
@@ -51,7 +65,6 @@ async function getYFData(symbol, interval = '4h', limit = 100) {
     throw new Error(`No data for ${symbol}`);
   }
 
-  // Filter valid candles u take last `limit`
   const candles = result.quotes
     .filter(q => q.open && q.high && q.low && q.close)
     .slice(-limit)
@@ -68,13 +81,9 @@ async function getYFData(symbol, interval = '4h', limit = 100) {
   }
 
   const price = candles[candles.length - 1].close;
-
   return { candles, price };
 }
 
-/**
- * Generate signal for a commodity/forex pair
- */
 async function generateYFSignal(symbol, interval = '4h') {
   logger.info(`[yahooFinance] Processing ${symbol} (${interval})...`);
 
@@ -85,10 +94,8 @@ async function generateYFSignal(symbol, interval = '4h') {
   const { generateReasoning }    = require('./ai.service');
 
   const { candles, price } = await getYFData(symbol, interval, 100);
-
   const indicators = computeAllIndicators(candles);
 
-  // Score
   const { rsi, macd, ema, bollinger, volume } = indicators;
   let bull = 0, bear = 0;
   if (rsi.value <= 35)                    bull += 2;
@@ -110,33 +117,31 @@ async function generateYFSignal(symbol, interval = '4h') {
   logger.info(`[yahooFinance] ${meta.display} → ${ai.signal} (${ai.confidence}%)`);
 
   return {
-    id:         `${symbol}_${Date.now()}`,
-    symbol:     meta.display,
-    rawSymbol:  symbol,
-    category:   meta.category,
-    type:       meta.type,
-    timestamp:  new Date().toISOString(),
+    id:          `${symbol}_${Date.now()}`,
+    symbol:      meta.display,
+    rawSymbol:   symbol,
+    asset_class: meta.asset_class,
+    category:    meta.category,
+    timestamp:   new Date().toISOString(),
     price,
-    signal:     ai.signal,
-    confidence: ai.confidence,
-    reasoning:  ai.reasoning,
-    score:      { bullish: bull, bearish: bear },
+    signal:      ai.signal,
+    confidence:  ai.confidence,
+    reasoning:   ai.reasoning,
+    score:       { bullish: bull, bearish: bear },
     indicators,
   };
 }
 
-/**
- * Scan all YF symbols
- */
 async function scanAllYF(interval = '4h') {
-  logger.info(`[yahooFinance] Scanning ${Object.keys(YF_SYMBOLS).length} commodities/forex...`);
+  const symbols = Object.keys(YF_SYMBOLS);
+  logger.info(`[yahooFinance] Scanning ${symbols.length} forex/commodities/indices...`);
   const results = [];
 
-  for (const symbol of Object.keys(YF_SYMBOLS)) {
+  for (const symbol of symbols) {
     try {
       const sig = await generateYFSignal(symbol, interval);
       results.push(sig);
-      await new Promise(r => setTimeout(r, 300)); // small delay
+      await new Promise(r => setTimeout(r, 300));
     } catch (err) {
       logger.error(`[yahooFinance] ${symbol} error: ${err.message}`);
     }
@@ -146,20 +151,13 @@ async function scanAllYF(interval = '4h') {
 }
 
 // ── EXTENSION BACKTESTER ────────────────────────────────────
-// Tout ce qui suit a été ajouté pour le Backtester. Rien au-dessus
-// n'a été modifié.
-
-// Mapping timeframe Backtester UI → intervalle Yahoo Finance
 const STOCK_INTERVAL_MAP = {
   '15M':  '15m',
   '1H':   '60m',
-  '4H':   '60m', // Yahoo n'a pas de natif 4H → agrégation manuelle (voir aggregateTo4H)
+  '4H':   '60m',
   Daily:  '1d',
 };
 
-/**
- * Regroupe des bougies 1H en bougies 4H (4 par 4).
- */
 function aggregateTo4H(candles) {
   const result = [];
   for (let i = 0; i < candles.length; i += 4) {
@@ -177,21 +175,6 @@ function aggregateTo4H(candles) {
   return result;
 }
 
-/**
- * Récupère l'historique OHLCV d'un symbole boursier quelconque
- * (action, ETF, indice...) — utilisé par le Backtester.
- *
- * Différent de getYFData() : celui-ci est limité à YF_SYMBOLS
- * (les 5 commodities/forex) et ne renvoie pas de dates par bougie.
- * getStockCandles() accepte n'importe quel ticker et une plage de
- * dates explicite (startDate/endDate), nécessaires pour le backtest.
- *
- * @param {string} symbol     - ex: "AAPL", "SPY", "NVDA"
- * @param {string} timeframe  - "Daily" | "4H" | "1H" | "15M"
- * @param {string} startDate  - "YYYY-MM-DD"
- * @param {string} endDate    - "YYYY-MM-DD"
- * @returns {Promise<Array>}  - [{ date, open, high, low, close, volume }, ...]
- */
 async function getStockCandles(symbol, timeframe, startDate, endDate) {
   const interval = STOCK_INTERVAL_MAP[timeframe] || '1d';
   const isIntraday = interval !== '1d';
@@ -203,14 +186,12 @@ async function getStockCandles(symbol, timeframe, startDate, endDate) {
     const maxLookback = new Date();
     maxLookback.setDate(maxLookback.getDate() - 59);
 
-    // Si la fin demandée est déjà trop ancienne
     if (effectiveEnd < maxLookback) {
       throw new Error(
         `Yahoo Finance ne supporte pas ${timeframe} avant ${maxLookback.toISOString().slice(0,10)}`
       );
     }
 
-    // Limiter seulement le début
     if (effectiveStart < maxLookback) {
       effectiveStart = maxLookback;
       logger.info(
@@ -219,11 +200,8 @@ async function getStockCandles(symbol, timeframe, startDate, endDate) {
     }
   }
 
-  // sécurité
   if (effectiveStart > effectiveEnd) {
-    throw new Error(
-      `Période invalide: ${effectiveStart} > ${effectiveEnd}`
-    );
+    throw new Error(`Période invalide: ${effectiveStart} > ${effectiveEnd}`);
   }
 
   try {
@@ -255,13 +233,8 @@ async function getStockCandles(symbol, timeframe, startDate, endDate) {
     return candles;
 
   } catch (error) {
-    logger.error(
-      `[yahooFinance] getStockCandles error (${symbol}): ${error.message}`
-    );
-
-    throw new Error(
-      `Impossible de récupérer les données pour ${symbol}: ${error.message}`
-    );
+    logger.error(`[yahooFinance] getStockCandles error (${symbol}): ${error.message}`);
+    throw new Error(`Impossible de récupérer les données pour ${symbol}: ${error.message}`);
   }
 }
 

@@ -93,6 +93,7 @@ app.use('/api/settings',  require('./routes/settings.routes'));
 app.use('/api/watchlist', require('./routes/watchlist.routes'));
 app.use('/api/dashboard', require('./routes/dashboard.routes'));
 app.use('/api/trading',   require('./routes/trading.routes'));
+app.use('/api/screener',  require('./routes/screener.routes'));
 
 // ── 4. Health Check ───────────────────────────────────────
 app.get('/api/health', (req, res) => {

@@ -121,3 +121,15 @@ button {
     transform: translateX(-50%);
   }
 }
+
+/* ── Glass panel — fond opaque + blur, pour tout panneau au-dessus du fond animé ── */
+.glass-panel {
+  background: rgba(8, 13, 24, 0.78);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border);
+}
+
+body.light .glass-panel {
+  background: rgba(255, 255, 255, 0.82);
+}

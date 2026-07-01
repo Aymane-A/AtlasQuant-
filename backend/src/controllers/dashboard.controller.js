@@ -116,11 +116,39 @@ async function getDashboardData(req, res) {
       volumeChart.unshift({ index: volumeChart.length, day: '—', volume: 0 });
     }
 
-    // ── 4. Alerts count ───────────────────────────────────
-    const { rows: alertRows } = await db.query(`
-      SELECT COUNT(*) FILTER (WHERE triggered=false) AS active
+    // ── 4. Alerts summary (active / triggered today / near) ─
+    const { rows: [alertRow] } = await db.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE triggered = false)                                            AS active,
+        COUNT(*) FILTER (WHERE triggered = true AND triggered_at >= NOW() - INTERVAL '1 day') AS triggered_today
       FROM alerts WHERE user_id = $1
     `, [userId]);
+
+    const alertsSummary = {
+      active:         parseInt(alertRow?.active)          || 0,
+      triggeredToday: parseInt(alertRow?.triggered_today)  || 0,
+    };
+
+    // ── 5. Recent activity — last 5 trades (open or closed) ─
+    const { rows: recentRows } = await db.query(`
+      SELECT
+        id, symbol, side, status, pnl,
+        opened_at, closed_at,
+        GREATEST(opened_at, COALESCE(closed_at, opened_at)) AS sort_ts
+      FROM trades
+      WHERE user_id = $1
+      ORDER BY sort_ts DESC
+      LIMIT 5
+    `, [userId]);
+
+    const recentActivity = recentRows.map(r => ({
+      id:       r.id,
+      symbol:   r.symbol,
+      side:     r.side,
+      status:   r.status,
+      pnl:      r.pnl !== null ? parseFloat(r.pnl) : null,
+      timestamp: r.status === 'closed' ? r.closed_at : r.opened_at,
+    }));
 
     res.json({
       success: true,
@@ -138,7 +166,9 @@ async function getDashboardData(req, res) {
       },
       equityCurve,
       volumeChart,
-      alertsActive: parseInt(alertRows[0]?.active) || 0,
+      alertsSummary,
+      recentActivity,
+      alertsActive: alertsSummary.active, // backward compat
     });
 
   } catch (err) {

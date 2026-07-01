@@ -1,6 +1,19 @@
 const COLOR = { BUY:'var(--green)', SELL:'var(--red)', HOLD:'var(--amber)' };
 const BG    = { BUY:'rgba(52,211,153,0.12)', SELL:'rgba(248,113,113,0.12)', HOLD:'rgba(251,191,36,0.1)' };
 
+const CLASS_COLOR = {
+  Crypto:    'var(--cyan)',
+  Forex:     'var(--purple-bright)',
+  Commodity: 'var(--amber)',
+  Indices:   'var(--green)',
+};
+const CLASS_LABEL = {
+  Crypto:    'CRYPTO',
+  Forex:     'FOREX',
+  Commodity: 'COMMO',
+  Indices:   'INDEX',
+};
+
 // ── Smart price formatter — handles PEPE, SHIB, BTC, XAU ─
 const smartPrice = (p) => {
   const n = parseFloat(p);
@@ -19,13 +32,16 @@ export default function SignalCard({ signal: s }) {
   const color = COLOR[s.signal] || 'var(--text-secondary)';
 
   // ── Normalize field names (backend sends snake_case) ─────
-  const price      = s.price;
-  const entry      = s.entry      || s.price;
-  const stopLoss   = s.stop_loss  ?? s.stopLoss;
-  const takeProfit = s.take_profit ?? s.takeProfit;
-  const riskReward = s.risk_reward ?? s.riskReward;
-  const timeframe  = s.interval   ?? s.timeframe ?? '4h';
-  const rsiValue   = s.indicators?.rsi?.value ?? s.indicators?.rsi;
+  const price       = s.price;
+  const entry       = s.entry      || s.price;
+  const stopLoss    = s.stop_loss  ?? s.stopLoss;
+  const takeProfit  = s.take_profit ?? s.takeProfit;
+  const riskReward  = s.risk_reward ?? s.riskReward;
+  const timeframe   = s.interval   ?? s.timeframe ?? '4h';
+  const rsiValue    = s.indicators?.rsi?.value ?? s.indicators?.rsi;
+  const assetClass  = s.asset_class || 'Crypto';
+  const classColor  = CLASS_COLOR[assetClass] || 'var(--text-secondary)';
+  const classLabel  = CLASS_LABEL[assetClass] || assetClass.toUpperCase();
 
   return (
     <div style={{
@@ -35,10 +51,24 @@ export default function SignalCard({ signal: s }) {
       borderTop: `2px solid ${color}`,
     }}>
       {/* Header */}
-      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:12 }}>
-        <span style={{ fontSize:16, fontWeight:700, letterSpacing:'.05em' }}>{s.symbol}</span>
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:8 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+          <span style={{ fontSize:16, fontWeight:700, letterSpacing:'.05em' }}>{s.symbol}</span>
+        </div>
         <span style={{ fontSize:10, fontFamily:'JetBrains Mono,monospace', padding:'3px 8px', borderRadius:4, fontWeight:600, letterSpacing:'.1em', background: BG[s.signal], color }}>
           {s.signal}
+        </span>
+      </div>
+
+      {/* Asset class tag */}
+      <div style={{ marginBottom:12 }}>
+        <span style={{
+          fontSize:9, fontFamily:'JetBrains Mono,monospace', fontWeight:600,
+          letterSpacing:'.12em', padding:'2px 7px', borderRadius:4,
+          background:`${classColor}1a`, color: classColor,
+          border:`1px solid ${classColor}33`,
+        }}>
+          {classLabel}
         </span>
       </div>
 

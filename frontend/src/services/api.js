@@ -62,9 +62,11 @@ export const signalsAPI = {
 
 // ── Market API ────────────────────────────────────────────
 export const marketAPI = {
-  prices:  ()                                        => api.get('/market/prices'),
-  stats:   (symbol)                                  => api.get(`/market/${symbol}/stats`),
-  candles: (symbol, interval = '4h', limit = 100)   => api.get(`/market/${symbol}/candles?interval=${interval}&limit=${limit}`),
+  prices:      ()                                    => api.get('/market/prices'),
+  forex:       ()                                    => api.get('/market/forex/prices'),
+  commodities: ()                                    => api.get('/market/commodities/prices'),
+  stats:       (symbol)                               => api.get(`/market/${symbol}/stats`),
+  candles:     (symbol, interval = '4h', limit = 100) => api.get(`/market/${symbol}/candles?interval=${interval}&limit=${limit}`),
 };
 
 export const alertsAPI = {
@@ -74,6 +76,12 @@ export const alertsAPI = {
   remove:      (id)      => api.delete(`/alerts/${id}`),
   togglePause: (id)      => api.patch(`/alerts/${id}/pause`),
   reset:       (id)      => api.patch(`/alerts/${id}/reset`),
+};
+
+export const screenerAPI = {
+  presets:      ()          => api.get('/screener/presets'),
+  savePreset:   (payload)   => api.post('/screener/presets', payload),
+  deletePreset: (id)        => api.delete(`/screener/presets/${id}`),
 };
 
 // ── Health ────────────────────────────────────────────────

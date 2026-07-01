@@ -1,9 +1,17 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import SignalCard from '../components/SignalCard';
 import { useSignals } from '../hooks/useSignals';
 
 const INTERVALS = ['1h', '4h', '1d'];
+
+const ASSET_CLASSES = [
+  { key: 'Tous',      label: 'Tous',       color: 'var(--cyan)'          },
+  { key: 'Crypto',    label: 'Crypto',     color: 'var(--cyan)'          },
+  { key: 'Forex',     label: 'Forex',      color: 'var(--purple-bright)' },
+  { key: 'Commodity', label: 'Commodités', color: 'var(--amber)'         },
+  { key: 'Indices',   label: 'Indices',    color: 'var(--green)'         },
+];
 
 export default function Signals() {
   const { t } = useTranslation();
@@ -15,19 +23,34 @@ export default function Signals() {
     { key: 'HOLD', label: t('signals.filterHold') },
   ];
 
-  const [interval, setInterval] = useState('4h');
+  const [interval, setInterval]   = useState('4h');
   const [filterKey, setFilterKey] = useState('Tous');
+  const [classKey, setClassKey]   = useState('Tous');
   const { signals, loading, error, lastUpdate, refresh } = useSignals(interval);
 
-  const filtered =
-    filterKey === 'Tous' ? signals : signals.filter(s => s.signal === filterKey);
+  // ── Counts par classe (pour badges) ──
+  const classCounts = useMemo(() => {
+    const counts = { Tous: signals.length, Crypto: 0, Forex: 0, Commodity: 0, Indices: 0 };
+    signals.forEach(s => {
+      const cls = s.asset_class || 'Crypto';
+      if (counts[cls] !== undefined) counts[cls]++;
+    });
+    return counts;
+  }, [signals]);
+
+  const filtered = useMemo(() => {
+    let result = signals;
+    if (classKey !== 'Tous')  result = result.filter(s => (s.asset_class || 'Crypto') === classKey);
+    if (filterKey !== 'Tous') result = result.filter(s => s.signal === filterKey);
+    return result;
+  }, [signals, classKey, filterKey]);
 
   const stats = {
-    active:  signals.length,
-    buy:     signals.filter(s => s.signal === 'BUY').length,
-    sell:    signals.filter(s => s.signal === 'SELL').length,
-    avgConf: signals.length
-      ? Math.round(signals.reduce((a, s) => a + s.confidence, 0) / signals.length)
+    active:  filtered.length,
+    buy:     filtered.filter(s => s.signal === 'BUY').length,
+    sell:    filtered.filter(s => s.signal === 'SELL').length,
+    avgConf: filtered.length
+      ? Math.round(filtered.reduce((a, s) => a + s.confidence, 0) / filtered.length)
       : 0,
   };
 
@@ -89,7 +112,40 @@ export default function Signals() {
         ))}
       </div>
 
-      {/* ── Filters ────────────────────────────────────────────────────────── */}
+      {/* ── Asset Class Tabs ───────────────────────────────────────────────── */}
+      <div style={{
+        display: 'flex', gap: 4, background: 'rgba(255,255,255,0.02)',
+        border: '1px solid var(--border)', borderRadius: 10, padding: 4,
+      }}>
+        {ASSET_CLASSES.map(c => {
+          const active = classKey === c.key;
+          return (
+            <button
+              key={c.key}
+              onClick={() => setClassKey(c.key)}
+              style={{
+                flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                padding: '8px 14px', borderRadius: 7, border: 'none', cursor: 'pointer',
+                fontFamily: 'JetBrains Mono,monospace', fontSize: 12, transition: 'all .2s',
+                background: active ? `${c.color}1a` : 'transparent',
+                color:      active ? c.color : 'var(--text-secondary)',
+                boxShadow:  active ? `inset 0 0 0 1px ${c.color}33` : 'none',
+              }}
+            >
+              <span style={{ width: 6, height: 6, borderRadius: '50%', background: c.color, opacity: active ? 1 : .4 }} />
+              {c.label}
+              <span style={{
+                fontSize: 10, padding: '1px 6px', borderRadius: 999,
+                background: 'rgba(255,255,255,0.06)', color: 'var(--text-muted)',
+              }}>
+                {classCounts[c.key] ?? 0}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* ── Signal Type Filters + Interval ────────────────────────────────── */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <div style={{
           display: 'flex', gap: 4, background: 'rgba(255,255,255,0.02)',
@@ -148,6 +204,13 @@ export default function Signals() {
               borderRadius: 12, padding: 16, height: 280, animation: 'pulse 2s infinite',
             }} />
           ))}
+        </div>
+      ) : filtered.length === 0 ? (
+        <div style={{
+          padding: '60px 20px', textAlign: 'center', color: 'var(--text-muted)',
+          fontFamily: 'JetBrains Mono,monospace', fontSize: 12,
+        }}>
+          {t('signals.noResults', 'Aucun signal pour ce filtre')}
         </div>
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12 }}>

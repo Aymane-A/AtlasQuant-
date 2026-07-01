@@ -1,48 +1,58 @@
 /**
- * src/controllers/screener.controller.js
+ * controllers/screener.controller.js — AtlasQuant AI
+ * Gère uniquement les presets de filtres (le filtrage lui-même
+ * se fait côté client, sur les données déjà chargées via /signals
+ * ou /market/forex|commodities/prices).
  */
-const db = require('../config/db');
+const db     = require('../config/db');
 const logger = require('../utils/logger');
 
-async function runScreen(req, res) {
-    try {
-        const userId = req.user.id;
-        const { criteria, market } = req.body;
+/** GET /api/screener/presets */
+async function listPresets(req, res) {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, name, asset_type, filters, created_at
+       FROM screener_presets WHERE user_id = $1 ORDER BY created_at DESC`,
+      [req.user.id]
+    );
+    res.json({ success: true, presets: rows });
+  } catch (err) {
+    logger.error(`[screener] listPresets: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
 
-        // 1. Validation: التأكد من معايير الفلترة
-        if (!criteria || !market) {
-            return res.status(400).json({ success: false, error: 'Invalid screen parameters' });
-        }
-
-        logger.info(`[Screener] User ${userId} running screen on ${market}`);
-
-        // 2. منطق الـ Screener:
-        // هنا ستقوم باستعلام قاعدة البيانات أو الـ Service الخاصة بك لاستخراج الأصول
-        // التي تطابق المعايير (مثلاً: RSI < 30 أو Volume > 1M)
-        const results = await performScreeningLogic(market, criteria);
-
-        // 3. الحفظ (اختياري): حفظ آخر عملية بحث للمستخدم
-        await db.query(
-            'INSERT INTO screen_history (user_id, criteria, results_count) VALUES ($1, $2, $3)',
-            [userId, JSON.stringify(criteria), results.length]
-        );
-
-        res.status(200).json({
-            success: true,
-            count: results.length,
-            data: results
-        });
-
-    } catch (err) {
-        logger.error(`[screener.controller] Error: ${err.message}`);
-        res.status(500).json({ success: false, error: 'Screening process failed' });
+/** POST /api/screener/presets  { name, assetType, filters } */
+async function savePreset(req, res) {
+  try {
+    const { name, assetType, filters } = req.body;
+    if (!name || !filters) {
+      return res.status(400).json({ success: false, error: 'name and filters are required' });
     }
+    const { rows: [preset] } = await db.query(
+      `INSERT INTO screener_presets (user_id, name, asset_type, filters)
+       VALUES ($1, $2, $3, $4) RETURNING id, name, asset_type, filters, created_at`,
+      [req.user.id, name.trim().slice(0, 100), assetType || 'crypto', JSON.stringify(filters)]
+    );
+    res.json({ success: true, preset });
+  } catch (err) {
+    logger.error(`[screener] savePreset: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
 }
 
-// دالة وهمية لمحاكاة المنطق (استبدلها باللوجيك الفعلي)
-async function performScreeningLogic(market, criteria) {
-    // مثال: هنا يتم دمج الفلاتر الرياضية
-    return [{ symbol: 'BTCUSDT', score: 95 }, { symbol: 'ETHUSDT', score: 88 }];
+/** DELETE /api/screener/presets/:id */
+async function deletePreset(req, res) {
+  try {
+    await db.query(
+      `DELETE FROM screener_presets WHERE id = $1 AND user_id = $2`,
+      [req.params.id, req.user.id]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    logger.error(`[screener] deletePreset: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
 }
 
-module.exports = { runScreen };
+module.exports = { listPresets, savePreset, deletePreset };

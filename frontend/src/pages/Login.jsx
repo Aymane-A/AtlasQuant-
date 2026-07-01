@@ -31,6 +31,7 @@ export default function Login() {
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
 
   const submit = async () => {
+    if (loading) return;
     setError('');
     setLoading(true);
     try {
@@ -42,7 +43,7 @@ export default function Login() {
       if (tab === 'login') await login(form.email, form.password);
       else                 await register(form.name, form.email, form.password);
 
-      navigate('/Dashboard');
+      navigate('/dashboard');
     } catch (err) {
       setError(err.error || err.message || t('login.errConn'));
     } finally {

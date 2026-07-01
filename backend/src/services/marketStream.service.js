@@ -251,6 +251,7 @@ async function buildMarketSnapshot() {
     sp500Intraday:  sp500?.spark || [],
     fearGreed:      fearGreed ? { value: fearGreed.value, label: fearGreed.label } : null,
     topMovers,
+    fetchedAt:      new Date().toISOString(),
   };
 }
 

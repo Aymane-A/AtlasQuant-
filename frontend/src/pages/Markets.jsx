@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { Line } from 'react-chartjs-2';
@@ -7,103 +7,56 @@ import {
   LineElement, BarElement, ArcElement, Tooltip, Legend, Filler,
 } from 'chart.js';
 import { useMarketData } from '../hooks/useMarketData';
+import { useSignals } from '../hooks/useSignals';
 import api from '../services/api';
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, ArcElement, Tooltip, Legend, Filler);
 
-// Fallback Mock Data constants
-const INITIAL_INDICES = [
-  { region:'USA',  name:'S&P 500',    val:'5,224.62', ch:'+1.24%', up:true,  spark:[5100,5120,5150,5180,5160,5200,5224] },
-  { region:'USA',  name:'NASDAQ',     val:'16,428.10',ch:'+1.87%', up:true,  spark:[16000,16100,16200,16300,16250,16380,16428] },
-  { region:'USA',  name:'Dow Jones',  val:'38,842.00',ch:'+0.72%', up:true,  spark:[38500,38600,38650,38700,38720,38800,38842] },
-  { region:'UK',   name:'FTSE 100',   val:'8,147.80', ch:'−0.18%', up:false, spark:[8200,8180,8170,8160,8150,8155,8147] },
-  { region:'GER',  name:'DAX',        val:'18,384.35',ch:'+0.42%', up:true,  spark:[18200,18250,18280,18310,18350,18370,18384] },
-  { region:'JPN',  name:'Nikkei 225', val:'38,460.00',ch:'−0.32%', up:false, spark:[38700,38600,38550,38500,38480,38470,38460] },
-  { region:'CHN',  name:'Shanghai',   val:'3,084.50', ch:'+0.88%', up:true,  spark:[3040,3050,3060,3070,3075,3080,3084] },
-  { region:'HKG',  name:'Hang Seng',  val:'17,284.00',ch:'+1.14%', up:true,  spark:[17000,17050,17100,17150,17200,17250,17284] },
-];
-
-const INITIAL_SECTORS = [
-  { name:'Technology', ch:'+2.14%', v:'+$12.4B', intensity:0.9  },
-  { name:'Energy',     ch:'−0.82%', v:'−$2.1B',  intensity:-0.4 },
-  { name:'Healthcare', ch:'+0.54%', v:'+$3.2B',  intensity:0.3  },
-  { name:'Financials', ch:'+1.22%', v:'+$8.1B',  intensity:0.6  },
-  { name:'Consumer',   ch:'+0.38%', v:'+$1.8B',  intensity:0.2  },
-  { name:'Real Estate',ch:'−1.24%', v:'−$4.2B',  intensity:-0.7 },
-  { name:'Utilities',  ch:'−0.44%', v:'−$1.2B',  intensity:-0.2 },
-  { name:'Materials',  ch:'+0.72%', v:'+$2.8B',  intensity:0.4  },
-];
-
-const INITIAL_COMMS = [
-  { n:'Gold',        sym:'XAU/USD', v:'$2,380.40', ch:'+0.31%', up:true  },
-  { n:'Silver',      sym:'XAG/USD', v:'$28.42',    ch:'+0.84%', up:true  },
-  { n:'Crude Oil',   sym:'WTI',     v:'$78.42',    ch:'−0.62%', up:false },
-  { n:'Brent',       sym:'BRENT',   v:'$82.18',    ch:'−0.44%', up:false },
-  { n:'Natural Gas', sym:'NG',      v:'$2.124',    ch:'+1.20%', up:true  },
-  { n:'Copper',      sym:'HG',      v:'$4.482',    ch:'+0.55%', up:true  },
-];
-
-const INITIAL_FOREX = [
-  { p:'EUR/USD', v:'1.0842', ch:'−0.12%', up:false },
-  { p:'GBP/USD', v:'1.2720', ch:'+0.08%', up:true  },
-  { p:'USD/JPY', v:'154.82', ch:'+0.35%', up:true  },
-  { p:'AUD/USD', v:'0.6542', ch:'+0.22%', up:true  },
-  { p:'USD/CAD', v:'1.3724', ch:'−0.11%', up:false },
-  { p:'USD/CHF', v:'0.9044', ch:'+0.18%', up:true  },
-];
-
-const INITIAL_CRYPTOS = [
-  { s:'BTC',  v:'$67,420', c:'+1.20%', up:true  },
-  { s:'ETH',  v:'$3,540',  c:'+0.84%', up:true  },
-  { s:'BNB',  v:'$582',    c:'+0.42%', up:true  },
-  { s:'SOL',  v:'$142',    c:'+3.14%', up:true  },
-  { s:'XRP',  v:'$0.512',  c:'−1.24%', up:false },
-  { s:'ADA',  v:'$0.448',  c:'−0.88%', up:false },
-  { s:'AVAX', v:'$34.82',  c:'+2.10%', up:true  },
-  { s:'DOGE', v:'$0.148',  c:'+4.82%', up:true  },
-];
-
-const INITIAL_TICKS = [
-  { s:'SPY',     v:'522.40',  c:'+1.24%', u:true  },
-  { s:'QQQ',     v:'448.82',  c:'+1.87%', u:true  },
-  { s:'AAPL',    v:'188.42',  c:'+2.34%', u:true  },
-  { s:'NVDA',    v:'875.50',  c:'−0.87%', u:false },
-  { s:'TSLA',    v:'242.10',  c:'−0.41%', u:false },
-  { s:'BTC',     v:'67,420',  c:'+1.20%', u:true  },
-  { s:'ETH',     v:'3,540',   c:'+0.84%', u:true  },
-  { s:'GOLD',    v:'2,380',   c:'+0.31%', u:true  },
-  { s:'OIL',     v:'78.42',   c:'−0.62%', u:false },
-  { s:'EUR/USD', v:'1.0842',  c:'−0.12%', u:false },
-];
-
-const cardStyle = { background:'var(--surface)', border:'1px solid var(--border)', borderRadius:12, padding:16, transition:'all .2s' };
-const panel = { background:'var(--surface)', border:'1px solid var(--border)', borderRadius:14, padding:22 };
+const cardStyle = { borderRadius:12, padding:16, transition:'all .2s' };
+const panel = { borderRadius:14, padding:22 };
 const monoSm = { fontFamily:'JetBrains Mono,monospace', fontSize:12 };
 const label10 = { fontSize:10, letterSpacing:'.15em', textTransform:'uppercase', fontFamily:'JetBrains Mono,monospace', color:'var(--text-muted)' };
 
+const SIGNAL_COLOR = { BUY:'var(--green)', SELL:'var(--red)', HOLD:'var(--amber)' };
+// Seuil minimum pour afficher un badge de signal — évite la saturation
+// visuelle quand la majorité des actifs ont un signal BUY/SELL faible.
+const SIGNAL_MIN_CONFIDENCE = 70;
+
+const NEWS_CATEGORY_COLOR = { Crypto:'var(--cyan)', Forex:'var(--purple-bright)', Commodity:'var(--amber)' };
+
 // ── Mapping nom d'indice affiché → ticker exploitable par le Backtester ──
-// Les noms d'indices ("Nikkei 225", "Hang Seng"...) ne sont pas des
-// tickers Yahoo valides pour l'historique de prix. On redirige vers un
-// ETF/ticker liquide qui réplique l'indice et dispose d'un historique fiable.
 const INDEX_BACKTEST_TICKER = {
   'S&P 500':    'SPY',
   'NASDAQ':     'QQQ',
   'Dow Jones':  'DIA',
-  'FTSE 100':   'ISF.L',   // iShares Core FTSE 100 ETF
-  'DAX':        'EXS1.DE', // iShares Core DAX ETF
-  'Nikkei 225': 'EWJ',     // iShares MSCI Japan ETF (proxy liquide, historique fiable)
-  'Shanghai':   'MCHI',    // iShares MSCI China ETF (proxy liquide)
-  'Hang Seng':  '2800.HK', // Tracker Fund of Hong Kong (suit le Hang Seng directement)
+  'FTSE 100':   'ISF.L',
+  'DAX':        'EXS1.DE',
+  'Nikkei 225': 'EWJ',
+  'Shanghai':   'MCHI',
+  'Hang Seng':  '2800.HK',
 };
 
 function resolveBacktestSymbol(name) {
   return INDEX_BACKTEST_TICKER[name] || name;
 }
 
-// ── Symboles éligibles à l'ajout en watchlist (crypto + forex + commodities) ──
 const WATCHLISTABLE_CATEGORIES = new Set(['crypto', 'forex', 'commodity']);
 
-// ── Bouton étoile réutilisable pour l'ajout rapide en watchlist ──
+const MARKET_TO_SIGNAL_SYMBOL = {
+  WTI:    'OIL/USD',
+  NG:     'NATGAS',
+  HG:     'COPPER',
+  BRENT:  null,
+};
+
+function toSignalSymbol(rawSymbol, category) {
+  if (!rawSymbol) return null;
+  const clean = rawSymbol.toUpperCase().trim();
+  if (category === 'crypto') return clean;
+  if (MARKET_TO_SIGNAL_SYMBOL[clean] !== undefined) return MARKET_TO_SIGNAL_SYMBOL[clean];
+  return clean;
+}
+
 function WatchlistStar({ symbol, category, onAdd, added }) {
   if (!WATCHLISTABLE_CATEGORIES.has(category)) return null;
   return (
@@ -122,31 +75,117 @@ function WatchlistStar({ symbol, category, onAdd, added }) {
   );
 }
 
+// ── Badge signal — uniquement pour les signaux à forte confiance ──
+function SignalDot({ symbol, category, signalMap }) {
+  const sigKey = toSignalSymbol(symbol, category);
+  if (!sigKey) return null;
+
+  let match = signalMap.get(sigKey);
+  if (!match && category === 'crypto') {
+    for (const [k, v] of signalMap) {
+      if (k.startsWith(sigKey)) { match = v; break; }
+    }
+  }
+  if (!match || match.signal === 'HOLD' || match.confidence < SIGNAL_MIN_CONFIDENCE) return null;
+
+  const color = SIGNAL_COLOR[match.signal];
+  return (
+    <span
+      title={`Active ${match.signal} signal — ${match.confidence}% confidence`}
+      style={{
+        display:'inline-flex', alignItems:'center', gap:3, marginLeft:6,
+        fontSize:9, fontFamily:'JetBrains Mono,monospace', fontWeight:700,
+        padding:'1px 6px', borderRadius:4, background:`${color}1a`, color,
+        border:`1px solid ${color}33`, letterSpacing:'.05em',
+      }}
+    >
+      ◈ {match.signal}
+    </span>
+  );
+}
+
+function PanelState({ loading, empty, label }) {
+  if (!loading && !empty) return null;
+  return (
+    <div style={{
+      padding:'30px 12px', textAlign:'center', ...monoSm, fontSize:11,
+      color:'var(--text-muted)', textTransform:'uppercase', letterSpacing:'.08em',
+    }}>
+      {loading ? `Loading ${label}...` : `No ${label} data available`}
+    </div>
+  );
+}
+
+// ── Formate un temps écoulé lisible ("just now", "5m ago", "2h ago") ──
+function timeAgo(iso) {
+  if (!iso) return '—';
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const sec = Math.floor(diffMs / 1000);
+  if (sec < 10)  return 'just now';
+  if (sec < 60)  return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60)  return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24)   return `${hr}h ago`;
+  return `${Math.floor(hr / 24)}d ago`;
+}
+
 export default function Markets() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const m = key => t(`marketsPage.${key}`);
 
   const { data: streamData, connected } = useMarketData();
+  const { signals } = useSignals('4h');
 
   const [watchlisted, setWatchlisted] = useState(new Set());
   const [toast, setToast] = useState(null);
+  const [search, setSearch] = useState('');
 
-  const currentTicks = streamData.ticks?.length ? streamData.ticks : INITIAL_TICKS;
-  const currentIndices = streamData.indices?.length ? streamData.indices : INITIAL_INDICES;
-  const currentSectors = streamData.sectors?.length ? streamData.sectors : INITIAL_SECTORS;
-  const currentComms = streamData.comms?.length ? streamData.comms : INITIAL_COMMS;
-  const currentForex = streamData.forex?.length ? streamData.forex : INITIAL_FOREX;
-  const currentCryptos = streamData.cryptos?.length ? streamData.cryptos : INITIAL_CRYPTOS;
+  const [calendar, setCalendar] = useState([]);
+  const [calendarLoading, setCalendarLoading] = useState(true);
 
-  // Fear & Greed réel (alternative.me, via le WebSocket) — fallback sur
-  // une valeur neutre tant que le premier snapshot n'est pas arrivé.
-  const fg = streamData.fearGreed?.value ?? 50;
-  const fgLabel = streamData.fearGreed?.label || 'Neutral';
+  const [news, setNews] = useState([]);
+  const [newsLoading, setNewsLoading] = useState(true);
+
+  // ── "Updated Xs ago" — se déclenche à chaque nouveau snapshot WebSocket ──
+  const [lastSnapshotAt, setLastSnapshotAt] = useState(null);
+  const [, forceTick] = useState(0);
+
+  useEffect(() => {
+    if (streamData && Object.keys(streamData).length > 0) {
+      setLastSnapshotAt(streamData.fetchedAt ? new Date(streamData.fetchedAt) : new Date());
+    }
+  }, [streamData]);
+
+  useEffect(() => {
+    const id = setInterval(() => forceTick(x => x + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const ticks    = streamData.ticks    || [];
+  const indices  = streamData.indices  || [];
+  const sectors  = streamData.sectors  || [];
+  const comms    = streamData.comms    || [];
+  const forex    = streamData.forex    || [];
+  const cryptos  = streamData.cryptos  || [];
+
+  const dataReady = connected && (indices.length > 0 || comms.length > 0 || forex.length > 0 || cryptos.length > 0);
+  const loading    = !connected || (!dataReady && indices.length === 0 && comms.length === 0 && forex.length === 0 && cryptos.length === 0);
+
+  const fg      = streamData.fearGreed?.value ?? null;
+  const fgLabel = streamData.fearGreed?.label || '—';
 
   const topMovers = streamData.topMovers || { gainers: [], losers: [] };
 
-  // ── Charge la watchlist existante au montage, pour griser les étoiles déjà ajoutées ──
+  const signalMap = useMemo(() => {
+    const map = new Map();
+    (signals || []).forEach(s => {
+      if (s.signal && s.signal !== 'HOLD') map.set(s.symbol.toUpperCase(), s);
+    });
+    return map;
+  }, [signals]);
+
   useEffect(() => {
     api.get('/watchlist')
       .then(res => {
@@ -154,6 +193,20 @@ export default function Markets() {
         setWatchlisted(new Set(symbols));
       })
       .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    api.get('/market/economic-calendar')
+      .then(res => setCalendar(res.data.events || []))
+      .catch(() => {})
+      .finally(() => setCalendarLoading(false));
+  }, []);
+
+  useEffect(() => {
+    api.get('/market/news')
+      .then(res => setNews(res.data.articles || []))
+      .catch(() => {})
+      .finally(() => setNewsLoading(false));
   }, []);
 
   const addToWatchlist = async (symbol) => {
@@ -169,9 +222,18 @@ export default function Markets() {
     }
   };
 
-  // ── Navigue vers le Backtester avec le symbole pré-rempli ──
   const goToBacktest = (symbol) => {
     navigate('/backtester', { state: { prefillSymbol: symbol } });
+  };
+
+  const fmtEventTime = (dt) => {
+    if (!dt) return '—';
+    const d = new Date(dt);
+    const now = new Date();
+    const sameDay = d.toDateString() === now.toDateString();
+    const time = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+    if (sameDay) return `Today ${time}`;
+    return `${d.toLocaleDateString('en-US', { weekday: 'short' })} ${time}`;
   };
 
   const globalChartOpts = useMemo(() => ({
@@ -182,7 +244,7 @@ export default function Markets() {
   }), []);
 
   const spChartData = useMemo(() => {
-    const points = streamData.sp500Intraday?.length ? streamData.sp500Intraday : [5100, 5120, 5150, 5180, 5160, 5200, 5224];
+    const points = streamData.sp500Intraday?.length ? streamData.sp500Intraday : [];
     return {
       labels: points.map((_, i) => i),
       datasets: [{
@@ -212,7 +274,7 @@ export default function Markets() {
   }), []);
 
   const optimizedIndices = useMemo(() => {
-    return currentIndices.map((idx) => ({
+    return indices.map((idx) => ({
       ...idx,
       chartData: {
         labels: idx.spark.map((_, j) => j),
@@ -226,74 +288,118 @@ export default function Markets() {
         }]
       }
     }));
-  }, [currentIndices]);
+  }, [indices]);
+
+  const matchesSearch = (name = '', symbol = '') => {
+    if (!search.trim()) return true;
+    const q = search.toLowerCase();
+    return name.toLowerCase().includes(q) || symbol.toLowerCase().includes(q);
+  };
+
+  const filteredIndices = useMemo(() => optimizedIndices.filter(i => matchesSearch(i.name, i.region)), [optimizedIndices, search]);
+  const filteredComms   = useMemo(() => comms.filter(c => matchesSearch(c.n, c.sym)), [comms, search]);
+  const filteredForex   = useMemo(() => forex.filter(f => matchesSearch(f.p, f.p)), [forex, search]);
+  const filteredCryptos = useMemo(() => cryptos.filter(c => matchesSearch(c.s, c.s)), [cryptos, search]);
 
   return (
     <>
-      {/* Toast notification */}
       {toast && (
-        <div style={{
+        <div className="glass-panel" style={{
           position: 'fixed', top: 80, right: 28, zIndex: 1000,
-          background: 'rgba(3,7,18,0.95)', border: '1px solid rgba(0,245,212,0.3)',
           borderRadius: 8, padding: '10px 16px', ...monoSm, fontSize: 12,
           color: 'var(--cyan)', boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+          borderColor: 'rgba(0,245,212,0.3)',
         }}>
           {toast}
         </div>
       )}
 
-      {/* Dynamic Status Connection Badge */}
-      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 10, ...monoSm, fontSize: 11 }}>
+      {/* Status + Last update */}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 14, marginBottom: 10, ...monoSm, fontSize: 11 }}>
+        {lastSnapshotAt && (
+          <span style={{ color: 'var(--text-muted)' }}>
+            Updated {timeAgo(lastSnapshotAt.toISOString())}
+          </span>
+        )}
         <span style={{ color: connected ? 'var(--green)' : 'var(--red)', display: 'flex', alignItems: 'center', gap: 6 }}>
           <span style={{ width: 6, height: 6, borderRadius: '50%', background: connected ? 'var(--green)' : 'var(--red)' }} />
-          {connected ? 'LIVE STREAM CONNECTED' : 'STREAM DISCONNECTED (MOCK MODE)'}
+          {connected ? 'LIVE STREAM CONNECTED' : 'CONNECTING TO STREAM...'}
         </span>
       </div>
 
+      {/* Search Bar */}
+      <div className="glass-panel" style={{ borderRadius: 10, padding: '10px 16px', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span style={{ color: 'var(--text-muted)', fontSize: 13 }}>⌕</span>
+        <input
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          placeholder="Search symbol or asset (e.g. gold, EUR, BTC)..."
+          style={{
+            flex: 1, background: 'transparent', border: 'none', outline: 'none',
+            color: 'var(--text-primary)', fontFamily: 'JetBrains Mono,monospace', fontSize: 12,
+          }}
+        />
+        {search && (
+          <button onClick={() => setSearch('')} style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 13 }}>×</button>
+        )}
+      </div>
+
       {/* Live Ticker Tape */}
-      <div style={{ overflow:'hidden', borderRadius:10, border:'1px solid var(--border)', background:'rgba(3,7,18,0.5)', marginBottom: 16 }}>
-        <div style={{ display:'flex', animation:'tickerScroll 30s linear infinite', whiteSpace:'nowrap' }}>
-          {[...currentTicks, ...currentTicks].map((tk, i) => (
-            <div key={i} style={{ padding:'10px 20px', borderRight:'1px solid var(--border)', ...monoSm, display:'inline-flex', gap:10, alignItems:'center', flexShrink:0 }}>
-              <span style={{ color:'var(--text-secondary)' }}>{tk.s}</span>
-              <span>{tk.v}</span>
-              <span style={{ color: tk.u ? 'var(--green)' : 'var(--red)' }}>{tk.c}</span>
-            </div>
-          ))}
-        </div>
+      <div className="glass-panel" style={{ overflow:'hidden', borderRadius:10, marginBottom: 16, minHeight: 42 }}>
+        {ticks.length === 0 ? (
+          <PanelState loading={loading} empty={!loading} label="ticker" />
+        ) : (
+          <div style={{ display:'flex', animation:'tickerScroll 30s linear infinite', whiteSpace:'nowrap' }}>
+            {[...ticks, ...ticks].map((tk, i) => (
+              <div key={i} style={{ padding:'10px 20px', borderRight:'1px solid var(--border)', ...monoSm, display:'inline-flex', gap:10, alignItems:'center', flexShrink:0 }}>
+                <span style={{ color:'var(--text-secondary)' }}>{tk.s}</span>
+                <span>{tk.v}</span>
+                <span style={{ color: tk.u ? 'var(--green)' : 'var(--red)' }}>{tk.c}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Top Movers */}
       <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, marginBottom: 16 }}>
-        <div style={panel}>
+        <div className="glass-panel" style={panel}>
           <div style={{ fontSize:12, fontWeight:600, marginBottom:12, display:'flex', alignItems:'center', gap:8, color:'var(--green)' }}>
             <div style={{ width:6, height:6, borderRadius:'50%', background:'var(--green)' }} /> {m('topGainers') || 'Top Gainers'}
           </div>
-          <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
-            {topMovers.gainers.length === 0 ? (
-              <div style={{ ...monoSm, fontSize:11, color:'var(--text-muted)' }}>—</div>
-            ) : topMovers.gainers.map(g => (
-              <div key={`${g.category}-${g.symbol}`} style={{ display:'flex', justifyContent:'space-between', ...monoSm, fontSize:11 }}>
-                <span style={{ color:'var(--text-secondary)' }}>{g.symbol} <span style={{ color:'var(--text-muted)', fontSize:9 }}>{g.category}</span></span>
-                <span style={{ color:'var(--green)', fontWeight:600 }}>+{g.changePct.toFixed(2)}%</span>
-              </div>
-            ))}
-          </div>
+          {loading ? (
+            <PanelState loading label="gainers" />
+          ) : topMovers.gainers.length === 0 ? (
+            <div style={{ ...monoSm, fontSize:11, color:'var(--text-muted)' }}>—</div>
+          ) : (
+            <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+              {topMovers.gainers.map(g => (
+                <div key={`${g.category}-${g.symbol}`} style={{ display:'flex', justifyContent:'space-between', ...monoSm, fontSize:11 }}>
+                  <span style={{ color:'var(--text-secondary)' }}>{g.symbol} <span style={{ color:'var(--text-muted)', fontSize:9 }}>{g.category}</span></span>
+                  <span style={{ color:'var(--green)', fontWeight:600 }}>+{g.changePct.toFixed(2)}%</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
-        <div style={panel}>
+        <div className="glass-panel" style={panel}>
           <div style={{ fontSize:12, fontWeight:600, marginBottom:12, display:'flex', alignItems:'center', gap:8, color:'var(--red)' }}>
             <div style={{ width:6, height:6, borderRadius:'50%', background:'var(--red)' }} /> {m('topLosers') || 'Top Losers'}
           </div>
-          <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
-            {topMovers.losers.length === 0 ? (
-              <div style={{ ...monoSm, fontSize:11, color:'var(--text-muted)' }}>—</div>
-            ) : topMovers.losers.map(l => (
-              <div key={`${l.category}-${l.symbol}`} style={{ display:'flex', justifyContent:'space-between', ...monoSm, fontSize:11 }}>
-                <span style={{ color:'var(--text-secondary)' }}>{l.symbol} <span style={{ color:'var(--text-muted)', fontSize:9 }}>{l.category}</span></span>
-                <span style={{ color:'var(--red)', fontWeight:600 }}>{l.changePct.toFixed(2)}%</span>
-              </div>
-            ))}
-          </div>
+          {loading ? (
+            <PanelState loading label="losers" />
+          ) : topMovers.losers.length === 0 ? (
+            <div style={{ ...monoSm, fontSize:11, color:'var(--text-muted)' }}>—</div>
+          ) : (
+            <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+              {topMovers.losers.map(l => (
+                <div key={`${l.category}-${l.symbol}`} style={{ display:'flex', justifyContent:'space-between', ...monoSm, fontSize:11 }}>
+                  <span style={{ color:'var(--text-secondary)' }}>{l.symbol} <span style={{ color:'var(--text-muted)', fontSize:9 }}>{l.category}</span></span>
+                  <span style={{ color:'var(--red)', fontWeight:600 }}>{l.changePct.toFixed(2)}%</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 
@@ -305,7 +411,7 @@ export default function Markets() {
           { name:'LSE',     open:false, infoKey:'closedOpensGmt' },
           { name:'TSE',     open:false, infoKey:'closedOpensJst' },
         ].map(mk => (
-          <div key={mk.name} style={{ flex:1, ...cardStyle, display:'flex', alignItems:'center', gap:12, borderColor: mk.open ? 'rgba(52,211,153,0.2)' : 'var(--border)' }}>
+          <div key={mk.name} className="glass-panel" style={{ flex:1, ...cardStyle, display:'flex', alignItems:'center', gap:12, borderColor: mk.open ? 'rgba(52,211,153,0.2)' : undefined }}>
             <div style={{ width:8, height:8, borderRadius:'50%', background: mk.open ? 'var(--green)' : 'var(--text-muted)' }} />
             <div>
               <div style={{ fontSize:12, fontWeight:600 }}>{mk.name}</div>
@@ -313,19 +419,25 @@ export default function Markets() {
             </div>
           </div>
         ))}
-        <div style={{ flex:2, ...cardStyle }}>
+        <div className="glass-panel" style={{ flex:2, ...cardStyle }}>
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:6 }}>
             <span style={{ ...monoSm, fontSize:10, color:'var(--text-secondary)' }}>{m('fearGreed')}</span>
             <span style={{ ...monoSm, fontSize:9, color:'var(--text-muted)' }}>{fgLabel}</span>
           </div>
-          <div style={{ height:8, borderRadius:4, background:'linear-gradient(90deg,#34d399,#fbbf24,#f87171)', position:'relative', margin:'12px 0' }}>
-            <div style={{ position:'absolute', top:-2, left:`${fg}%`, transform:'translateX(-50%)', width:12, height:12, background:'white', borderRadius:'50%', boxShadow:'0 2px 8px rgba(0,0,0,0.5)' }} />
-          </div>
-          <div style={{ display:'flex', justifyContent:'space-between', ...monoSm, fontSize:9, color:'var(--text-muted)' }}>
-            <span>{m('fear')}</span>
-            <span style={{ color:'var(--green)', fontSize:11, fontWeight:600 }}>{fg} {m('greedSuffix')}</span>
-            <span>{m('extreme')}</span>
-          </div>
+          {fg === null ? (
+            <div style={{ ...monoSm, fontSize:11, color:'var(--text-muted)', textAlign:'center', padding:'10px 0' }}>—</div>
+          ) : (
+            <>
+              <div style={{ height:8, borderRadius:4, background:'linear-gradient(90deg,#34d399,#fbbf24,#f87171)', position:'relative', margin:'12px 0' }}>
+                <div style={{ position:'absolute', top:-2, left:`${fg}%`, transform:'translateX(-50%)', width:12, height:12, background:'white', borderRadius:'50%', boxShadow:'0 2px 8px rgba(0,0,0,0.5)' }} />
+              </div>
+              <div style={{ display:'flex', justifyContent:'space-between', ...monoSm, fontSize:9, color:'var(--text-muted)' }}>
+                <span>{m('fear')}</span>
+                <span style={{ color:'var(--green)', fontSize:11, fontWeight:600 }}>{fg} {m('greedSuffix')}</span>
+                <span>{m('extreme')}</span>
+              </div>
+            </>
+          )}
         </div>
       </div>
 
@@ -334,136 +446,271 @@ export default function Markets() {
         <div style={{ fontSize:11, letterSpacing:'.2em', color:'var(--text-muted)', textTransform:'uppercase', fontFamily:'JetBrains Mono,monospace', marginBottom:14 }}>
           {m('globalIndices')}
         </div>
-        <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:12 }}>
-          {optimizedIndices.map((idx) => (
-            <div key={idx.name} style={{ ...cardStyle, cursor:'pointer' }} onClick={() => goToBacktest(resolveBacktestSymbol(idx.name))}>
-              <div style={{ ...label10, marginBottom:4 }}>{idx.region}</div>
-              <div style={{ fontSize:13, fontWeight:600, marginBottom:8 }}>{idx.name}</div>
-              <div style={{ fontSize:20, fontWeight:700, fontFamily:'JetBrains Mono,monospace', color: idx.up ? 'var(--green)' : 'var(--red)' }}>{idx.val}</div>
-              <div style={{ ...monoSm, color: idx.up ? 'var(--green)' : 'var(--red)', marginTop:2, marginBottom:10, fontSize:11 }}>{idx.ch}</div>
-              <div style={{ height:28 }}>
-                <Line
-                  data={idx.chartData}
-                  options={globalChartOpts}
-                  height={28}
-                />
+        {indices.length === 0 ? (
+          <div className="glass-panel" style={{ borderRadius:12 }}>
+            <PanelState loading={loading} empty={!loading} label="indices" />
+          </div>
+        ) : filteredIndices.length === 0 ? (
+          <div className="glass-panel" style={{ borderRadius:12 }}>
+            <PanelState loading={false} empty label="matching indices" />
+          </div>
+        ) : (
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:12 }}>
+            {filteredIndices.map((idx) => (
+              <div key={idx.name} className="glass-panel" style={{ ...cardStyle, cursor:'pointer' }} onClick={() => goToBacktest(resolveBacktestSymbol(idx.name))}>
+                <div style={{ ...label10, marginBottom:4 }}>{idx.region}</div>
+                <div style={{ fontSize:13, fontWeight:600, marginBottom:8 }}>{idx.name}</div>
+                <div style={{ fontSize:20, fontWeight:700, fontFamily:'JetBrains Mono,monospace', color: idx.up ? 'var(--green)' : 'var(--red)' }}>{idx.val}</div>
+                <div style={{ ...monoSm, color: idx.up ? 'var(--green)' : 'var(--red)', marginTop:2, marginBottom:10, fontSize:11 }}>{idx.ch}</div>
+                <div style={{ height:28 }}>
+                  <Line data={idx.chartData} options={globalChartOpts} height={28} />
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Sector Heatmap + S&P Intraday */}
       <div style={{ display:'grid', gridTemplateColumns:'1fr 1.2fr', gap:16, marginBottom: 16 }}>
-        <div style={panel}>
+        <div className="glass-panel" style={panel}>
           <div style={{ fontSize:13, fontWeight:600, marginBottom:18, display:'flex', alignItems:'center', gap:8 }}>
             <div style={{ width:6, height:6, borderRadius:'50%', background:'var(--cyan)' }} /> {m('sectorPerf')}
           </div>
-          <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:8 }}>
-            {currentSectors.map(s => {
-              const pos = s.intensity > 0;
-              const a = Math.abs(s.intensity);
-              const bg = pos ? `rgba(52,211,153,${0.1+a*0.25})` : `rgba(248,113,113,${0.1+a*0.25})`;
-              const bc = pos ? `rgba(52,211,153,${0.2+a*0.3})` : `rgba(248,113,113,${0.2+a*0.3})`;
-              return (
-                <div key={s.name} style={{ background:bg, border:`1px solid ${bc}`, borderRadius:10, padding:14, minHeight:80, display:'flex', flexDirection:'column', justifyContent:'space-between', transition:'transform .2s', cursor:'default' }}
-                  onMouseOver={e=>e.currentTarget.style.transform='scale(1.03)'}
-                  onMouseOut={e=>e.currentTarget.style.transform='scale(1)'}>
-                  <div style={{ fontSize:11, fontWeight:600, color: pos?'#34d399':'#f87171' }}>{s.name}</div>
-                  <div>
-                    <div style={{ fontSize:16, fontWeight:700, fontFamily:'JetBrains Mono,monospace', color: pos?'var(--green)':'var(--red)' }}>{s.ch}</div>
-                    <div style={{ fontSize:10, fontFamily:'JetBrains Mono,monospace', color: pos?'#34d399':'#f87171', opacity:.7, marginTop:4 }}>{s.v}</div>
+          {sectors.length === 0 ? (
+            <PanelState loading={loading} empty={!loading} label="sectors" />
+          ) : (
+            <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:8 }}>
+              {sectors.map(s => {
+                const pos = s.intensity > 0;
+                const a = Math.abs(s.intensity);
+                const bg = pos ? `rgba(52,211,153,${0.1+a*0.25})` : `rgba(248,113,113,${0.1+a*0.25})`;
+                const bc = pos ? `rgba(52,211,153,${0.2+a*0.3})` : `rgba(248,113,113,${0.2+a*0.3})`;
+                return (
+                  <div key={s.name} style={{ background:bg, border:`1px solid ${bc}`, borderRadius:10, padding:14, minHeight:80, display:'flex', flexDirection:'column', justifyContent:'space-between', transition:'transform .2s', cursor:'default' }}
+                    onMouseOver={e=>e.currentTarget.style.transform='scale(1.03)'}
+                    onMouseOut={e=>e.currentTarget.style.transform='scale(1)'}>
+                    <div style={{ fontSize:11, fontWeight:600, color: pos?'#34d399':'#f87171' }}>{s.name}</div>
+                    <div>
+                      <div style={{ fontSize:16, fontWeight:700, fontFamily:'JetBrains Mono,monospace', color: pos?'var(--green)':'var(--red)' }}>{s.ch}</div>
+                      {s.v && <div style={{ fontSize:10, fontFamily:'JetBrains Mono,monospace', color: pos?'#34d399':'#f87171', opacity:.7, marginTop:4 }}>{s.v}</div>}
+                    </div>
                   </div>
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+          )}
         </div>
 
-        <div style={panel}>
+        <div className="glass-panel" style={panel}>
           <div style={{ fontSize:13, fontWeight:600, marginBottom:18, display:'flex', alignItems:'center', gap:8 }}>
             <div style={{ width:6, height:6, borderRadius:'50%', background:'var(--purple-bright)' }} /> {m('spIntraday')}
           </div>
           <div style={{ position:'relative', height:240 }}>
-            <Line data={spChartData} options={spChartOpts} />
+            {spChartData.labels.length === 0 ? (
+              <PanelState loading={loading} empty={!loading} label="chart" />
+            ) : (
+              <Line data={spChartData} options={spChartOpts} />
+            )}
           </div>
         </div>
+      </div>
+
+      {/* Economic Calendar */}
+      <div className="glass-panel" style={{ ...panel, marginBottom: 16 }}>
+        <div style={{ fontSize:13, fontWeight:600, marginBottom:18, display:'flex', alignItems:'center', gap:8 }}>
+          <div style={{ width:6, height:6, borderRadius:'50%', background:'var(--red)' }} />
+          Economic Calendar
+          <span style={{ fontSize: 11, color: 'var(--text-secondary)', fontWeight: 400, marginLeft: 6 }}>
+            This week
+          </span>
+        </div>
+        {calendarLoading ? (
+          <PanelState loading label="calendar" />
+        ) : calendar.length === 0 ? (
+          <div style={{ ...monoSm, fontSize: 11, color: 'var(--text-muted)', padding: '20px 0', textAlign: 'center' }}>
+            No upcoming events
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 280, overflowY: 'auto' }}>
+            {calendar.map((ev, i) => (
+              <div key={i} style={{
+                display: 'flex', alignItems: 'center', gap: 12, padding: '9px 12px',
+                borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border)',
+              }}>
+                <div style={{ width: 4, height: 32, borderRadius: 2, background: ev.impactColor, flexShrink: 0 }} />
+                <div style={{ width: 42, flexShrink: 0, ...monoSm, fontSize: 10, color: 'var(--text-muted)' }}>
+                  {ev.country}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {ev.title}
+                  </div>
+                  <div style={{ ...monoSm, fontSize: 10, color: 'var(--text-secondary)', marginTop: 2 }}>
+                    {fmtEventTime(ev.datetime)}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 10, ...monoSm, fontSize: 10, flexShrink: 0 }}>
+                  {ev.actual && <span style={{ color: 'var(--cyan)' }}>A: {ev.actual}</span>}
+                  {ev.forecast && <span style={{ color: 'var(--text-secondary)' }}>F: {ev.forecast}</span>}
+                  {ev.previous && <span style={{ color: 'var(--text-muted)' }}>P: {ev.previous}</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Commodities + Forex */}
       <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16, marginBottom: 16 }}>
-        <div style={panel}>
+        <div className="glass-panel" style={panel}>
           <div style={{ fontSize:13, fontWeight:600, marginBottom:18, display:'flex', alignItems:'center', gap:8 }}>
             <div style={{ width:6, height:6, borderRadius:'50%', background:'var(--amber)' }} /> {m('commodities')}
           </div>
-          <table style={{ width:'100%', borderCollapse:'collapse' }}>
-            <thead>
-              <tr>{['', m('colCommodity'), m('colSymbol'), m('colPrice'), m('colChange')].map((h,hi)=><th key={hi} style={{ textAlign:'left', padding:'9px 12px', ...label10, borderBottom:'1px solid var(--border)', fontWeight:400 }}>{h}</th>)}</tr>
-            </thead>
-            <tbody>
-              {currentComms.map(c=>(
-                <tr key={c.sym} style={{ borderBottom:'1px solid rgba(255,255,255,0.03)', cursor:'pointer' }} onClick={() => goToBacktest(c.sym)}>
-                  <td style={{ padding:'11px 8px', width: 20 }}>
-                    <WatchlistStar symbol={c.sym} category="commodity" onAdd={addToWatchlist} added={watchlisted.has(c.sym.toUpperCase())} />
-                  </td>
-                  <td style={{ padding:'11px 12px', ...monoSm }}>{c.n || c.name}</td>
-                  <td style={{ padding:'11px 12px', ...monoSm, color:'var(--text-muted)' }}>{c.sym}</td>
-                  <td style={{ padding:'11px 12px', ...monoSm }}>{c.v || c.val}</td>
-                  <td style={{ padding:'11px 12px', ...monoSm, color: c.up?'var(--green)':'var(--red)' }}>{c.ch || c.change}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          {comms.length === 0 ? (
+            <PanelState loading={loading} empty={!loading} label="commodities" />
+          ) : filteredComms.length === 0 ? (
+            <PanelState loading={false} empty label="matching commodities" />
+          ) : (
+            <table style={{ width:'100%', borderCollapse:'collapse' }}>
+              <thead>
+                <tr>{['', m('colCommodity'), m('colSymbol'), m('colPrice'), m('colChange')].map((h,hi)=><th key={hi} style={{ textAlign:'left', padding:'9px 12px', ...label10, borderBottom:'1px solid var(--border)', fontWeight:400 }}>{h}</th>)}</tr>
+              </thead>
+              <tbody>
+                {filteredComms.map(c=>(
+                  <tr key={c.sym} style={{ borderBottom:'1px solid rgba(255,255,255,0.03)', cursor:'pointer' }} onClick={() => goToBacktest(c.sym)}>
+                    <td style={{ padding:'11px 8px', width: 20 }}>
+                      <WatchlistStar symbol={c.sym} category="commodity" onAdd={addToWatchlist} added={watchlisted.has(c.sym.toUpperCase())} />
+                    </td>
+                    <td style={{ padding:'11px 12px', ...monoSm }}>
+                      {c.n || c.name}
+                      <SignalDot symbol={c.sym} category="commodity" signalMap={signalMap} />
+                    </td>
+                    <td style={{ padding:'11px 12px', ...monoSm, color:'var(--text-muted)' }}>{c.sym}</td>
+                    <td style={{ padding:'11px 12px', ...monoSm }}>{c.v}</td>
+                    <td style={{ padding:'11px 12px', ...monoSm, color: c.up?'var(--green)':'var(--red)' }}>{c.ch}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
 
-        <div style={panel}>
+        <div className="glass-panel" style={panel}>
           <div style={{ fontSize:13, fontWeight:600, marginBottom:18, display:'flex', alignItems:'center', gap:8 }}>
             <div style={{ width:6, height:6, borderRadius:'50%', background:'var(--green)' }} /> {m('forexPairs')}
           </div>
-          <table style={{ width:'100%', borderCollapse:'collapse' }}>
-            <thead>
-              <tr>{['', m('colPair'), m('colRate'), m('colChange'), m('colTrend')].map((h,hi)=><th key={hi} style={{ textAlign:'left', padding:'9px 12px', ...label10, borderBottom:'1px solid var(--border)', fontWeight:400 }}>{h}</th>)}</tr>
-            </thead>
-            <tbody>
-              {currentForex.map(f=>(
-                <tr key={f.p || f.pair} style={{ borderBottom:'1px solid rgba(255,255,255,0.03)', cursor:'pointer' }} onClick={() => goToBacktest(f.p)}>
-                  <td style={{ padding:'11px 8px', width: 20 }}>
-                    <WatchlistStar symbol={f.p} category="forex" onAdd={addToWatchlist} added={watchlisted.has((f.p || '').toUpperCase())} />
-                  </td>
-                  <td style={{ padding:'11px 12px', ...monoSm, fontWeight:600 }}>{f.p || f.pair}</td>
-                  <td style={{ padding:'11px 12px', ...monoSm }}>{f.v || f.val}</td>
-                  <td style={{ padding:'11px 12px', ...monoSm, color: f.up?'var(--green)':'var(--red)' }}>{f.ch || f.change}</td>
-                  <td style={{ padding:'11px 12px' }}><div style={{ width:40, height:2, background: f.up?'rgba(52,211,153,0.4)':'rgba(248,113,113,0.4)', borderRadius:1 }} /></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          {forex.length === 0 ? (
+            <PanelState loading={loading} empty={!loading} label="forex pairs" />
+          ) : filteredForex.length === 0 ? (
+            <PanelState loading={false} empty label="matching pairs" />
+          ) : (
+            <table style={{ width:'100%', borderCollapse:'collapse' }}>
+              <thead>
+                <tr>{['', m('colPair'), m('colRate'), m('colChange'), m('colTrend')].map((h,hi)=><th key={hi} style={{ textAlign:'left', padding:'9px 12px', ...label10, borderBottom:'1px solid var(--border)', fontWeight:400 }}>{h}</th>)}</tr>
+              </thead>
+              <tbody>
+                {filteredForex.map(f=>(
+                  <tr key={f.p} style={{ borderBottom:'1px solid rgba(255,255,255,0.03)', cursor:'pointer' }} onClick={() => goToBacktest(f.p)}>
+                    <td style={{ padding:'11px 8px', width: 20 }}>
+                      <WatchlistStar symbol={f.p} category="forex" onAdd={addToWatchlist} added={watchlisted.has((f.p || '').toUpperCase())} />
+                    </td>
+                    <td style={{ padding:'11px 12px', ...monoSm, fontWeight:600 }}>
+                      {f.p}
+                      <SignalDot symbol={f.p} category="forex" signalMap={signalMap} />
+                    </td>
+                    <td style={{ padding:'11px 12px', ...monoSm }}>{f.v}</td>
+                    <td style={{ padding:'11px 12px', ...monoSm, color: f.up?'var(--green)':'var(--red)' }}>{f.ch}</td>
+                    <td style={{ padding:'11px 12px' }}><div style={{ width:40, height:2, background: f.up?'rgba(52,211,153,0.4)':'rgba(248,113,113,0.4)', borderRadius:1 }} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
       </div>
 
       {/* Crypto */}
-      <div style={panel}>
+      <div className="glass-panel" style={{ ...panel, marginBottom: 16 }}>
         <div style={{ fontSize:13, fontWeight:600, marginBottom:18, display:'flex', alignItems:'center', gap:8 }}>
           <div style={{ width:6, height:6, borderRadius:'50%', background:'var(--purple-bright)' }} /> {m('cryptoTop8')}
         </div>
-        <div style={{ display:'grid', gridTemplateColumns:'repeat(8,1fr)', gap:10 }}>
-          {currentCryptos.map(c=>{
-            const symbol = c.s || c.symbol;
-            return (
-              <div key={symbol} style={{ ...cardStyle, textAlign:'center', padding:12, cursor:'pointer', position:'relative' }}
-                onClick={() => goToBacktest(symbol)}
-                onMouseOver={e=>e.currentTarget.style.borderColor='rgba(0,245,212,0.2)'}
-                onMouseOut={e=>e.currentTarget.style.borderColor='var(--border)'}>
-                <div style={{ position:'absolute', top:6, right:8 }}>
-                  <WatchlistStar symbol={symbol} category="crypto" onAdd={addToWatchlist} added={watchlisted.has(symbol.toUpperCase())} />
+        {cryptos.length === 0 ? (
+          <PanelState loading={loading} empty={!loading} label="crypto" />
+        ) : filteredCryptos.length === 0 ? (
+          <PanelState loading={false} empty label="matching coins" />
+        ) : (
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(8,1fr)', gap:10 }}>
+            {filteredCryptos.map(c=>{
+              const symbol = c.s;
+              return (
+                <div key={symbol} className="glass-panel" style={{ ...cardStyle, textAlign:'center', padding:12, cursor:'pointer', position:'relative' }}
+                  onClick={() => goToBacktest(symbol)}
+                  onMouseOver={e=>e.currentTarget.style.borderColor='rgba(0,245,212,0.2)'}
+                  onMouseOut={e=>e.currentTarget.style.borderColor='var(--border)'}>
+                  <div style={{ position:'absolute', top:6, right:8 }}>
+                    <WatchlistStar symbol={symbol} category="crypto" onAdd={addToWatchlist} added={watchlisted.has(symbol.toUpperCase())} />
+                  </div>
+                  <div style={{ fontSize:12, fontWeight:700, marginBottom:4, display:'flex', alignItems:'center', justifyContent:'center' }}>
+                    {symbol}
+                    <SignalDot symbol={symbol} category="crypto" signalMap={signalMap} />
+                  </div>
+                  <div style={{ fontSize:13, ...monoSm, fontWeight:600, color: c.up?'var(--green)':'var(--red)' }}>{c.v}</div>
+                  <div style={{ fontSize:10, ...monoSm, color: c.up?'var(--green)':'var(--red)', marginTop:3 }}>{c.c}</div>
                 </div>
-                <div style={{ fontSize:12, fontWeight:700, marginBottom:4 }}>{symbol}</div>
-                <div style={{ fontSize:13, ...monoSm, fontWeight:600, color: c.up?'var(--green)':'var(--red)' }}>{c.v || c.val}</div>
-                <div style={{ fontSize:10, ...monoSm, color: c.up?'var(--green)':'var(--red)', marginTop:3 }}>{c.c || c.change}</div>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Market News */}
+      <div className="glass-panel" style={panel}>
+        <div style={{ fontSize:13, fontWeight:600, marginBottom:18, display:'flex', alignItems:'center', gap:8 }}>
+          <div style={{ width:6, height:6, borderRadius:'50%', background:'var(--cyan)' }} />
+          Market News
         </div>
+        {newsLoading ? (
+          <PanelState loading label="news" />
+        ) : news.length === 0 ? (
+          <div style={{ ...monoSm, fontSize: 11, color: 'var(--text-muted)', padding: '20px 0', textAlign: 'center' }}>
+            No news available
+          </div>
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px 20px' }}>
+            {news.map((article, i) => (
+              <a
+                key={i}
+                href={article.link}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  display: 'flex', flexDirection: 'column', gap: 4, padding: '9px 12px',
+                  borderRadius: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border)',
+                  textDecoration: 'none', transition: 'background .15s',
+                }}
+                onMouseOver={e => e.currentTarget.style.background = 'rgba(255,255,255,0.04)'}
+                onMouseOut={e => e.currentTarget.style.background = 'rgba(255,255,255,0.02)'}
+              >
+                <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', lineHeight: 1.4 }}>
+                  {article.title}
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, ...monoSm, fontSize: 10 }}>
+                  <span style={{
+                    color: NEWS_CATEGORY_COLOR[article.category] || 'var(--text-muted)',
+                    fontWeight: 600, letterSpacing: '.05em',
+                  }}>
+                    {article.category}
+                  </span>
+                  <span style={{ color: 'var(--text-muted)' }}>·</span>
+                  <span style={{ color: 'var(--text-muted)' }}>{article.source}</span>
+                  <span style={{ color: 'var(--text-muted)' }}>·</span>
+                  <span style={{ color: 'var(--text-muted)' }}>{timeAgo(article.publishedAt)}</span>
+                </div>
+              </a>
+            ))}
+          </div>
+        )}
       </div>
 
       <style>{`

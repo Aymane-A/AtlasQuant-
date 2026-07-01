@@ -218,6 +218,17 @@ async function migrate() {
       updated_at        TIMESTAMPTZ    NOT NULL DEFAULT NOW()
     );
     CREATE INDEX IF NOT EXISTS idx_live_orders_user ON live_orders(user_id);
+
+    -- ── Screener presets ──────────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS screener_presets (
+      id          SERIAL PRIMARY KEY,
+      user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name        VARCHAR(100) NOT NULL,
+      asset_type  VARCHAR(20)  NOT NULL DEFAULT 'crypto',
+      filters     JSONB        NOT NULL,
+      created_at  TIMESTAMPTZ  DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_screener_presets_user ON screener_presets(user_id);
   `);
 
   // ── Triggers ──────────────────────────────────────────────
@@ -251,6 +262,11 @@ async function migrate() {
     ALTER TABLE alerts ADD COLUMN IF NOT EXISTS notify_email    BOOLEAN DEFAULT TRUE;
     ALTER TABLE alerts ADD COLUMN IF NOT EXISTS notify_telegram BOOLEAN DEFAULT FALSE;
     ALTER TABLE alerts ADD COLUMN IF NOT EXISTS metadata        JSONB;
+
+    ALTER TABLE signals ADD COLUMN IF NOT EXISTS asset_class TEXT NOT NULL DEFAULT 'Crypto';
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_signals_asset_class ON signals(asset_class);
   `);
 
   logger.info('[db] ✅ Tables PostgreSQL prêtes');

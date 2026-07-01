@@ -2,8 +2,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { signalsAPI } from '../services/api';
 
-const POLL_MS   = 60 * 1000; // ! min
-const RETRY_MS  = 65 * 1000;     // 65s after rate-limit
+const POLL_MS   = 60 * 1000; // 1 min
+const RETRY_MS  = 65 * 1000; // 65s after rate-limit
 
 export function useSignals(interval = '4h') {
   const [signals,    setSignals]    = useState([]);
@@ -20,7 +20,13 @@ export function useSignals(interval = '4h') {
         ? await signalsAPI.refresh(interval)
         : await signalsAPI.getAll(interval);
 
-      setSignals(res.data.signals || []);
+      // Normalize asset_class — fallback pour les anciennes lignes DB sans classe
+      const normalized = (res.data.signals || []).map(s => ({
+        ...s,
+        asset_class: s.asset_class || 'Crypto',
+      }));
+
+      setSignals(normalized);
       setLastUpdate(new Date());
     } catch (err) {
       if (err.isRateLimit) {

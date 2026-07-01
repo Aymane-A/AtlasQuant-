@@ -1,6 +1,8 @@
 const axios  = require("axios");
 const logger = require("../utils/logger");
 const env    = require("../config/env");
+const YahooFinance  = require("yahoo-finance2").default;
+const yahooFinance  = new YahooFinance({ suppressNotices: ['yahooSurvey'] });
 
 // ── API clients ────────────────────────────────────────────
 const coinGeckoClient = axios.create({
@@ -15,32 +17,61 @@ const cmcClient = axios.create({
 
 const blockchainClient = axios.create({ baseURL: env.BLOCKCHAIN_URL, timeout: 20000 });
 
-// ── Shared Binance exchange instance (lazy ccxt load) ──────
+// ── Shared Binance exchange instance (singleton-promise pattern) ──
 // ccxt is NOT required at the top level — it's ~50MB and crashes
 // the heap if loaded at startup. It's required lazily here instead.
-let _exchange = null;
-async function getBinanceExchange() {
-  if (!_exchange) {
-    const ccxt = require("ccxt"); // ← lazy: only loaded on first actual use
-    _exchange = new ccxt.binance({
-      apiKey: env.BINANCE_API_KEY,
-      secret: env.BINANCE_API_SECRET,
-      options: {
-        defaultType:             "spot",
-        adjustForTimeDifference: true,
-      },
-      enableRateLimit: true,
-    });
-    try {
-      await _exchange.loadTimeDifference();
-    } catch (e) {
-      logger.warn(`[marketData] Time sync warning: ${e.message}`);
-    }
+// Using a shared in-flight promise prevents concurrent requests from
+// racing to create multiple instances or reading a half-reset `null`.
+let _exchange        = null;
+let _exchangePromise = null;
+
+async function createBinanceExchange() {
+  const ccxt = require("ccxt"); // ← lazy: only loaded on first actual use
+  const ex = new ccxt.binance({
+    apiKey: env.BINANCE_API_KEY,
+    secret: env.BINANCE_API_SECRET,
+    options: {
+      defaultType:             "spot",
+      adjustForTimeDifference: true,
+      recvWindow:              60000, // wider window — tolerates clock drift
+    },
+    enableRateLimit: true,
+  });
+  try {
+    await ex.loadTimeDifference();
+  } catch (e) {
+    logger.warn(`[marketData] Time sync warning: ${e.message}`);
   }
-  return _exchange;
+  return ex;
 }
 
-// ── 1. BINANCE ─────────────────────────────────────────────
+async function getBinanceExchange() {
+  if (_exchange) return _exchange;
+  if (_exchangePromise) return _exchangePromise; // already being created — wait on it
+
+  _exchangePromise = createBinanceExchange()
+    .then(ex => {
+      _exchange = ex;
+      _exchangePromise = null;
+      return ex;
+    })
+    .catch(err => {
+      _exchangePromise = null;
+      throw err;
+    });
+
+  return _exchangePromise;
+}
+
+function resetBinanceExchange() {
+  _exchange = null;
+  _exchangePromise = null;
+}
+
+const isTimestampError = (err) =>
+  /timestamp/i.test(err?.message || "") || err?.message?.includes("-1021");
+
+// ── 1. BINANCE (Crypto) ─────────────────────────────────────
 const fetchOHLCV = async (symbol = "BTC/USDT", timeframe = "1h", limit = 200) => {
   try {
     const exchange = await getBinanceExchange();
@@ -53,7 +84,7 @@ const fetchOHLCV = async (symbol = "BTC/USDT", timeframe = "1h", limit = 200) =>
     return candles;
   } catch (error) {
     logger.error(`❌ Binance fetchOHLCV error: ${error.message}`);
-    _exchange = null;
+    if (isTimestampError(error)) resetBinanceExchange();
     return [];
   }
 };
@@ -72,19 +103,40 @@ const fetchTicker = async (symbol = "BTC/USDT") => {
     };
   } catch (error) {
     logger.error(`❌ fetchTicker error (${symbol}): ${error.message}`);
-    _exchange = null;
+    if (isTimestampError(error)) resetBinanceExchange();
     return null;
   }
 };
 
-const fetchMultipleTickers = async (symbols) => {
-  const results = {};
-  for (const sym of symbols) {
-    const ticker = await fetchTicker(sym);
-    if (ticker) results[sym] = ticker;
-    await new Promise(r => setTimeout(r, 300));
+// ── Batch ticker fetch (single round-trip instead of N) ────
+// Retries once automatically on clock-drift (-1021) errors.
+const fetchMultipleTickers = async (symbols, _isRetry = false) => {
+  try {
+    const exchange = await getBinanceExchange();
+    const tickers  = await exchange.fetchTickers(symbols); // ← single batch call
+    const results  = {};
+    for (const [sym, ticker] of Object.entries(tickers)) {
+      results[sym] = {
+        symbol:     sym,
+        price:      ticker.last,
+        change24h:  parseFloat((ticker.percentage || 0).toFixed(2)),
+        high24h:    ticker.high,
+        low24h:     ticker.low,
+        volume24h:  ticker.baseVolume,
+      };
+    }
+    return results;
+  } catch (error) {
+    logger.error(`❌ fetchMultipleTickers (batch) error: ${error.message}`);
+    if (isTimestampError(error)) {
+      resetBinanceExchange();
+      if (!_isRetry) {
+        await new Promise(r => setTimeout(r, 300));
+        return fetchMultipleTickers(symbols, true); // retry once after resync
+      }
+    }
+    return {};
   }
-  return results;
 };
 
 const toExchangeSymbol = (symbol = "BTCUSDT") => {
@@ -262,6 +314,156 @@ const fetchBitcoinOnChain = async () => {
   }
 };
 
+// ── 5. YAHOO FINANCE (Forex + Commodities) ─────────────────
+const FOREX_PAIRS = {
+  EURUSD: "EURUSD=X", GBPUSD: "GBPUSD=X", USDJPY: "USDJPY=X",
+  USDCHF: "USDCHF=X", AUDUSD: "AUDUSD=X", USDCAD: "USDCAD=X",
+  NZDUSD: "NZDUSD=X", EURGBP: "EURGBP=X", EURJPY: "EURJPY=X",
+  GBPJPY: "GBPJPY=X", USDCNY: "USDCNY=X", USDMXN: "USDMXN=X",
+  USDZAR: "USDZAR=X", USDTRY: "USDTRY=X",
+};
+
+const COMMODITY_PAIRS = {
+  XAUUSD:  "GC=F",  // Gold
+  XAGUSD:  "SI=F",  // Silver
+  WTI:     "CL=F",  // Crude Oil WTI
+  BRENT:   "BZ=F",  // Brent Crude
+  NATGAS:  "NG=F",  // Natural Gas
+  COPPER:  "HG=F",
+  XPTUSD:  "PL=F",  // Platinum
+  XPDUSD:  "PA=F",  // Palladium
+  CORN:    "ZC=F",
+  WHEAT:   "ZW=F",
+  SOYBEAN: "ZS=F",
+  COFFEE:  "KC=F",
+  COTTON:  "CT=F",
+  SUGAR:   "SB=F",
+};
+
+const fetchYahooTicker = async (displaySymbol, yahooSymbol) => {
+  try {
+    const q = await yahooFinance.quote(yahooSymbol);
+    return {
+      symbol:      displaySymbol,
+      price:       q.regularMarketPrice,
+      changePct:   parseFloat((q.regularMarketChangePercent || 0).toFixed(2)),
+      high24h:     q.regularMarketDayHigh,
+      low24h:      q.regularMarketDayLow,
+      quoteVolume: q.regularMarketVolume || 0,
+    };
+  } catch (error) {
+    logger.error(`❌ Yahoo fetchTicker error (${yahooSymbol}): ${error.message}`);
+    return null;
+  }
+};
+
+// ── Batch Yahoo fetch (single round-trip instead of N) ─────
+const fetchMultipleYahooTickers = async (pairMap) => {
+  try {
+    const entries      = Object.entries(pairMap); // [[displaySymbol, yahooSymbol], ...]
+    const yahooSymbols = entries.map(([, ySym]) => ySym);
+    const quotes       = await yahooFinance.quote(yahooSymbols); // ← single batch call
+    const quoteArr     = Array.isArray(quotes) ? quotes : [quotes];
+
+    const bySymbol = Object.fromEntries(quoteArr.filter(Boolean).map(q => [q.symbol, q]));
+
+    const out = {};
+    for (const [displaySymbol, yahooSymbol] of entries) {
+      const q = bySymbol[yahooSymbol];
+      if (!q) continue;
+      out[displaySymbol] = {
+        symbol:      displaySymbol,
+        price:       q.regularMarketPrice,
+        changePct:   parseFloat((q.regularMarketChangePercent || 0).toFixed(2)),
+        high24h:     q.regularMarketDayHigh,
+        low24h:      q.regularMarketDayLow,
+        quoteVolume: q.regularMarketVolume || 0,
+      };
+    }
+    return out;
+  } catch (error) {
+    logger.error(`❌ Yahoo fetchMultipleTickers (batch) error: ${error.message}`);
+    return {};
+  }
+};
+
+const getForexPrices      = () => fetchMultipleYahooTickers(FOREX_PAIRS);
+const getCommodityPrices  = () => fetchMultipleYahooTickers(COMMODITY_PAIRS);
+
+// Yahoo intraday history is capped (~7 days), so 4h candles are
+// aggregated client-side from 60m candles.
+const YAHOO_INTERVAL_MAP = { "15m": "15m", "1h": "60m", "4h": "60m", "1d": "1d" };
+
+const aggregateTo4h = (hourly) => {
+  const out = [];
+  for (let i = 0; i < hourly.length; i += 4) {
+    const chunk = hourly.slice(i, i + 4);
+    if (!chunk.length) continue;
+    out.push({
+      timestamp: chunk[0].timestamp,
+      date:      chunk[0].date,
+      open:      chunk[0].open,
+      high:      Math.max(...chunk.map(c => c.high)),
+      low:       Math.min(...chunk.map(c => c.low)),
+      close:     chunk.at(-1).close,
+      volume:    chunk.reduce((s, c) => s + (c.volume || 0), 0),
+    });
+  }
+  return out;
+};
+
+const fetchYahooCandles = async (yahooSymbol, interval = "1d", limit = 200) => {
+  try {
+    const yInterval   = YAHOO_INTERVAL_MAP[interval] || "1d";
+    const isIntraday  = yInterval !== "1d";
+    const period1 = new Date();
+    period1.setDate(period1.getDate() - (isIntraday ? 7 : Math.max(limit, 30)));
+
+    const result = await yahooFinance.chart(yahooSymbol, {
+      period1, period2: new Date(), interval: yInterval,
+    });
+
+    let candles = (result.quotes || [])
+      .filter(q => q.close != null)
+      .map(q => ({
+        timestamp: new Date(q.date).getTime(),
+        date:      new Date(q.date).toISOString(),
+        open: q.open, high: q.high, low: q.low, close: q.close,
+        volume: q.volume || 0,
+      }));
+
+    if (interval === "4h") candles = aggregateTo4h(candles);
+    return candles.slice(-limit);
+  } catch (error) {
+    logger.error(`❌ Yahoo fetchCandles error (${yahooSymbol}): ${error.message}`);
+    return [];
+  }
+};
+
+// ── 6. UNIFIED ASSET ROUTER (crypto / forex / commodity) ───
+const detectAssetType = (symbol = "") => {
+  const clean = symbol.toUpperCase().replace("/", "");
+  if (FOREX_PAIRS[clean])     return "forex";
+  if (COMMODITY_PAIRS[clean]) return "commodity";
+  return "crypto";
+};
+
+const getUnifiedCandles = async (symbol, interval = "1h", limit = 200) => {
+  const clean = symbol.toUpperCase().replace("/", "");
+  const type  = detectAssetType(clean);
+  if (type === "forex")     return fetchYahooCandles(FOREX_PAIRS[clean], interval, limit);
+  if (type === "commodity") return fetchYahooCandles(COMMODITY_PAIRS[clean], interval, limit);
+  return getCandles(symbol, interval, limit);
+};
+
+const getUnifiedStats = async (symbol) => {
+  const clean = symbol.toUpperCase().replace("/", "");
+  const type  = detectAssetType(clean);
+  if (type === "forex")     return fetchYahooTicker(clean, FOREX_PAIRS[clean]);
+  if (type === "commodity") return fetchYahooTicker(clean, COMMODITY_PAIRS[clean]);
+  return get24hrStats(symbol);
+};
+
 // ── MASTER FUNCTION ────────────────────────────────────────
 const fetchAllMarkets = async () => {
   logger.info("🌐 Refreshing all market data...");
@@ -295,4 +497,8 @@ module.exports = {
   fetchLowCapGems, fetchGlobalMarket,
   fetchTrendingCMC, fetchFearGreedIndex,
   fetchBitcoinOnChain, fetchAllMarkets,
+  // forex / commodities
+  FOREX_PAIRS, COMMODITY_PAIRS,
+  getForexPrices, getCommodityPrices,
+  detectAssetType, getUnifiedCandles, getUnifiedStats,
 };

@@ -9,6 +9,13 @@ import { useAuth } from '../context/AuthContext';
 const kpiStyle   = { background:'var(--surface)', border:'1px solid var(--border)', borderRadius:12, padding:'20px 20px 16px', position:'relative', overflow:'hidden', transition:'all .3s' };
 const labelStyle = { fontSize:11, letterSpacing:'.12em', color:'var(--text-secondary)', textTransform:'uppercase', fontFamily:'JetBrains Mono,monospace', marginBottom:12 };
 
+const CLASS_COLOR = {
+  Crypto:    'var(--cyan)',
+  Forex:     'var(--purple-bright)',
+  Commodity: 'var(--amber)',
+  Indices:   'var(--green)',
+};
+
 // ── Helper: extract numeric price from any shape ──────────
 const extractPrice = (p) => {
   if (!p) return 0;
@@ -17,8 +24,29 @@ const extractPrice = (p) => {
   return parseFloat(p) || 0;
 };
 
-const fmt = (n, digits = 2) =>
-  extractPrice(n).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+// ── Smart price formatter — gère PEPE/SHIB (micro-cap) jusqu'à XAU ──
+const fmt = (p) => {
+  const n = extractPrice(p);
+  if (!n) return '0.00';
+  if (n >= 10000)   return n.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  if (n >= 1000)    return n.toLocaleString('en-US', { maximumFractionDigits: 2 });
+  if (n >= 1)       return n.toFixed(2);
+  if (n >= 0.01)    return n.toFixed(4);
+  if (n >= 0.0001)  return n.toFixed(6);
+  return n.toFixed(8);
+};
+
+const timeAgo = (ts) => {
+  if (!ts) return '—';
+  const diffMs = Date.now() - new Date(ts).getTime();
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ago`;
+};
 
 export default function Dashboard() {
   const { t }                                    = useTranslation();
@@ -28,10 +56,14 @@ export default function Dashboard() {
 
   const [prices, setPrices]       = useState({});
   const [dashLoading, setDashLoading] = useState(true);
-  const [dashData, setDashData]   = useState({ stats: null, equityCurve: [], volumeChart: [] });
+  const [dashData, setDashData]   = useState({
+    stats: null, equityCurve: [], volumeChart: [],
+    alertsSummary: { active: 0, triggeredToday: 0 },
+    recentActivity: [],
+  });
 
   useEffect(() => {
-    // Live prices
+    // Live prices (Binance only — sert au lookup live des signaux Crypto)
     marketAPI.prices()
       .then(r => setPrices(r?.data?.prices || {}))
       .catch(() => {});
@@ -41,9 +73,11 @@ export default function Dashboard() {
       .then(res => {
         if (res.data.success) {
           setDashData({
-            stats:       res.data.stats,
-            equityCurve: res.data.equityCurve,
-            volumeChart: res.data.volumeChart,
+            stats:           res.data.stats,
+            equityCurve:     res.data.equityCurve,
+            volumeChart:     res.data.volumeChart,
+            alertsSummary:   res.data.alertsSummary   || { active: 0, triggeredToday: 0 },
+            recentActivity:  res.data.recentActivity  || [],
           });
         }
       })
@@ -179,8 +213,14 @@ export default function Dashboard() {
         ) : (
           <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
             {topSignals.map(sig => {
-              // Try to get live price for this symbol from prices map
-              const liveEntry = prices[sig.symbol] || prices[sig.symbol + 'USDT'];
+              const assetClass = sig.asset_class || 'Crypto';
+              const classColor = CLASS_COLOR[assetClass] || 'var(--text-secondary)';
+
+              // Live price lookup — uniquement pour Crypto (Binance feed).
+              // Forex/Commodity/Indices n'ont pas de live feed Binance → fallback direct sur sig.price.
+              const liveEntry = assetClass === 'Crypto'
+                ? (prices[sig.symbol] || prices[sig.symbol + 'USDT'])
+                : null;
               const livePrice = liveEntry ? extractPrice(liveEntry) : null;
               const displayPrice = livePrice || sig.price || 0;
               const changePct = liveEntry?.changePct ?? sig.change24h ?? 0;
@@ -191,7 +231,16 @@ export default function Dashboard() {
                     {sig.signal === 'BUY' ? '▲' : sig.signal === 'SELL' ? '▼' : '◈'}
                   </div>
                   <div style={{ flex:1 }}>
-                    <div style={{ fontSize:13, fontWeight:600 }}>{sig.symbol}</div>
+                    <div style={{ display:'flex', alignItems:'center', gap:7 }}>
+                      <span style={{ fontSize:13, fontWeight:600 }}>{sig.symbol}</span>
+                      <span style={{
+                        fontSize:8, fontFamily:'JetBrains Mono,monospace', fontWeight:600,
+                        letterSpacing:'.08em', padding:'1px 5px', borderRadius:3,
+                        background:`${classColor}1a`, color: classColor,
+                      }}>
+                        {assetClass.toUpperCase()}
+                      </span>
+                    </div>
                     <div style={{ fontSize:11, color:'var(--text-secondary)', fontFamily:'JetBrains Mono,monospace', marginTop:2 }}>
                       {sig.indicators?.rsi?.interpretation || 'Analyzing market trend...'}
                     </div>
@@ -211,28 +260,97 @@ export default function Dashboard() {
         )}
       </div>
 
-      {/* ── Quick Crypto Prices ── */}
-      {Object.keys(prices).length > 0 && (
-        <div style={{ display:'grid', gridTemplateColumns:'repeat(5,1fr)', gap:10 }}>
-          {Object.entries(prices).slice(0, 5).map(([sym, priceObj]) => {
-            const p      = extractPrice(priceObj);
-            const change = typeof priceObj === 'object' ? (priceObj.changePct ?? 0) : 0;
-            return (
-              <div key={sym} style={{ background:'var(--surface)', border:'1px solid var(--border)', borderRadius:10, padding:'12px 14px', textAlign:'center' }}>
-                <div style={{ fontSize:11, fontWeight:700, color:'var(--text-secondary)', marginBottom:4 }}>
-                  {sym.replace('USDT', '')}
-                </div>
-                <div style={{ fontSize:14, fontWeight:600, fontFamily:'JetBrains Mono,monospace', color:'var(--cyan)' }}>
-                  ${fmt(p)}
-                </div>
-                <div style={{ fontSize:10, fontFamily:'JetBrains Mono,monospace', color: change >= 0 ? 'var(--green)' : 'var(--red)', marginTop:4 }}>
-                  {change >= 0 ? '+' : ''}{parseFloat(change).toFixed(2)}%
-                </div>
-              </div>
-            );
-          })}
+      {/* ── Recent Activity + Active Alerts ── */}
+      <div style={{ display:'grid', gridTemplateColumns:'1.4fr 1fr', gap:16 }}>
+
+        {/* Recent Activity */}
+        <div className="panel" style={{ padding:22, background:'var(--surface)', border:'1px solid var(--border)', borderRadius:12 }}>
+          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:18 }}>
+            <div style={{ fontSize:13, fontWeight:600, display:'flex', alignItems:'center', gap:8 }}>
+              <div style={{ width:6, height:6, borderRadius:'50%', background:'var(--green)' }} />
+              {t('dashboard.recentActivity', 'Recent Activity')}
+            </div>
+            <button onClick={() => navigate('/portfolio')} style={{ fontSize:12, color:'var(--cyan)', background:'none', border:'none', fontFamily:'JetBrains Mono,monospace', cursor:'pointer' }}>
+              {t('dashboard.viewAll')}
+            </button>
+          </div>
+
+          {dashLoading ? (
+            <div style={{ color:'var(--text-secondary)', fontFamily:'JetBrains Mono,monospace', fontSize:12, padding:20 }}>
+              {t('dashboard.loading')}
+            </div>
+          ) : dashData.recentActivity.length === 0 ? (
+            <div style={{ color:'var(--text-muted)', fontFamily:'JetBrains Mono,monospace', fontSize:11, padding:'20px 0', textAlign:'center' }}>
+              No trades yet
+            </div>
+          ) : (
+            <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+              {dashData.recentActivity.map(tr => {
+                const isClosed = tr.status === 'closed';
+                const pnlPositive = (tr.pnl ?? 0) >= 0;
+                return (
+                  <div key={tr.id} style={{ display:'flex', alignItems:'center', gap:12, padding:'10px 14px', borderRadius:8, background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)' }}>
+                    <div style={{ width:28, height:28, borderRadius:7, display:'flex', alignItems:'center', justifyContent:'center', fontSize:12, background: isClosed ? (pnlPositive ? 'rgba(52,211,153,0.12)' : 'rgba(248,113,113,0.12)') : 'rgba(0,245,212,0.1)', color: isClosed ? (pnlPositive ? 'var(--green)' : 'var(--red)') : 'var(--cyan)' }}>
+                      {isClosed ? '✓' : '◈'}
+                    </div>
+                    <div style={{ flex:1 }}>
+                      <div style={{ fontSize:13, fontWeight:600 }}>
+                        {tr.symbol} <span style={{ fontSize:10, color:'var(--text-muted)', fontFamily:'JetBrains Mono,monospace', textTransform:'uppercase' }}>{tr.side}</span>
+                      </div>
+                      <div style={{ fontSize:11, color:'var(--text-secondary)', fontFamily:'JetBrains Mono,monospace', marginTop:2 }}>
+                        {isClosed ? 'Closed' : 'Opened'} · {timeAgo(tr.timestamp)}
+                      </div>
+                    </div>
+                    {isClosed && tr.pnl !== null && (
+                      <div style={{ fontSize:13, fontWeight:600, fontFamily:'JetBrains Mono,monospace', color: pnlPositive ? 'var(--green)' : 'var(--red)' }}>
+                        {pnlPositive ? '+' : ''}{tr.pnl.toFixed(2)}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
-      )}
+
+        {/* Active Alerts */}
+        <div className="panel" style={{ padding:22, background:'var(--surface)', border:'1px solid var(--border)', borderRadius:12 }}>
+          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:18 }}>
+            <div style={{ fontSize:13, fontWeight:600, display:'flex', alignItems:'center', gap:8 }}>
+              <div style={{ width:6, height:6, borderRadius:'50%', background:'var(--amber)' }} />
+              {t('dashboard.alerts', 'Alerts')}
+            </div>
+            <button onClick={() => navigate('/alerts')} style={{ fontSize:12, color:'var(--cyan)', background:'none', border:'none', fontFamily:'JetBrains Mono,monospace', cursor:'pointer' }}>
+              {t('dashboard.viewAll')}
+            </button>
+          </div>
+
+          {dashLoading ? (
+            <div style={{ color:'var(--text-secondary)', fontFamily:'JetBrains Mono,monospace', fontSize:12, padding:20 }}>
+              {t('dashboard.loading')}
+            </div>
+          ) : (
+            <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
+              <div style={{ display:'flex', alignItems:'baseline', gap:10 }}>
+                <span style={{ fontSize:36, fontWeight:700, color:'var(--cyan)' }}>{dashData.alertsSummary.active}</span>
+                <span style={{ fontSize:11, color:'var(--text-secondary)', fontFamily:'JetBrains Mono,monospace', textTransform:'uppercase' }}>active</span>
+              </div>
+              {dashData.alertsSummary.triggeredToday > 0 ? (
+                <div style={{ display:'flex', alignItems:'center', gap:8, padding:'10px 12px', borderRadius:8, background:'rgba(251,191,36,0.08)', border:'1px solid rgba(251,191,36,0.2)' }}>
+                  <span style={{ fontSize:13 }}>🔔</span>
+                  <span style={{ fontSize:11, color:'var(--amber)', fontFamily:'JetBrains Mono,monospace' }}>
+                    {dashData.alertsSummary.triggeredToday} triggered today
+                  </span>
+                </div>
+              ) : (
+                <div style={{ fontSize:11, color:'var(--text-muted)', fontFamily:'JetBrains Mono,monospace' }}>
+                  No alerts triggered today
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
     </>
   );
 }

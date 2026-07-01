@@ -4,9 +4,6 @@
 const db     = require('../config/db');
 const logger = require('../utils/logger');
 
-// NOTE: scanAll / scanAllYF required lazily inside getAllSignals()
-// to break circular dependency chain.
-
 function parseRR(val) {
     if (!val) return 0;
     if (typeof val === 'number') return val;
@@ -22,10 +19,9 @@ function parseRR(val) {
 // ── getAllSignals ──────────────────────────────────────────
 async function getAllSignals(req, res) {
     try {
-        const { interval = '4h', refresh } = req.query;
+        const { interval = '4h', refresh, class: assetClass } = req.query;
 
         if (refresh === 'true') {
-            // Lazy require — avoids circular dep at module load time
             const { scanAll }   = require('../services/signalGenerator.service');
             const { scanAllYF } = require('../services/yahooFinance.service');
 
@@ -41,8 +37,8 @@ async function getAllSignals(req, res) {
 
             for (const sig of allSignals) {
                 await db.query(`
-                    INSERT INTO signals (symbol, interval, signal, confidence, price, entry, stop_loss, take_profit, risk_reward, reasoning, indicators)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                    INSERT INTO signals (symbol, interval, signal, confidence, price, entry, stop_loss, take_profit, risk_reward, reasoning, indicators, asset_class)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
                     ON CONFLICT DO NOTHING
                 `, [
                     sig.symbol, interval, sig.signal, sig.confidence,
@@ -52,17 +48,25 @@ async function getAllSignals(req, res) {
                     sig.take_profit || null,
                     sig.risk_reward || null,
                     sig.reasoning,
-                    JSON.stringify(sig.indicators)
+                    JSON.stringify(sig.indicators),
+                    sig.asset_class || 'Crypto',
                 ]);
             }
 
-            return res.json({ success: true, signals: allSignals, scannedAt: new Date().toISOString() });
+            const filtered = assetClass
+                ? allSignals.filter(s => s.asset_class === assetClass)
+                : allSignals;
+
+            return res.json({ success: true, signals: filtered, scannedAt: new Date().toISOString() });
         }
 
-        const { rows } = await db.query(
-            `SELECT * FROM signals WHERE interval = $1 ORDER BY created_at DESC LIMIT 30`,
-            [interval]
-        );
+        const query = assetClass
+            ? `SELECT * FROM signals WHERE interval = $1 AND asset_class = $2 ORDER BY created_at DESC LIMIT 60`
+            : `SELECT * FROM signals WHERE interval = $1 ORDER BY created_at DESC LIMIT 60`;
+
+        const { rows } = assetClass
+            ? await db.query(query, [interval, assetClass])
+            : await db.query(query, [interval]);
 
         const signals = rows.map(r => ({
             id:          r.id,
@@ -77,6 +81,7 @@ async function getAllSignals(req, res) {
             risk_reward: r.risk_reward,
             reasoning:   r.reasoning,
             indicators:  r.indicators,
+            asset_class: r.asset_class || 'Crypto',
             timestamp:   r.created_at,
         }));
 
@@ -105,8 +110,8 @@ async function getSignalBySymbol(req, res) {
 // ── getSupportedSymbols ───────────────────────────────────
 async function getSupportedSymbols(req, res) {
     try {
-        const { rows } = await db.query('SELECT DISTINCT symbol FROM signals');
-        res.json({ success: true, symbols: rows.map(r => r.symbol) });
+        const { rows } = await db.query('SELECT DISTINCT symbol, asset_class FROM signals ORDER BY asset_class, symbol');
+        res.json({ success: true, symbols: rows });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
@@ -124,14 +129,16 @@ async function getAlphaEngineData(req, res) {
 // ── helpers ───────────────────────────────────────────────
 const PERIOD_DAYS = { '1M': 30, '3M': 90, '6M': 180, '1Y': 365 };
 
-function classifyAsset(symbol) {
+// Fallback uniquement si une vieille ligne n'a pas de asset_class (avant migration)
+function classifyAsset(symbol, fallbackClass) {
+    if (fallbackClass) return fallbackClass;
     const s = symbol.toUpperCase();
     const FOREX   = ['EUR','GBP','JPY','CHF','AUD','CAD','NZD'];
-    const COMMO   = ['XAU','XAG','OIL','WTI','BRENT','GAS','NG','WHEAT','CORN','COPPER'];
-    const INDICES = ['SPY','QQQ','DIA','IWM','SPX','NDX','VIX'];
-    if (FOREX.some(f  => s.includes(f) && s.includes('/') && !s.includes('USDT'))) return 'Forex';
-    if (COMMO.some(c  => s.includes(c))) return 'Commodités';
+    const COMMO   = ['XAU','XAG','OIL','WTI','BRENT','GAS','NATGAS','COPPER','XPT','WHEAT','CORN'];
+    const INDICES = ['SPX','NAS100','US30','VIX','SPY','QQQ','DIA','IWM','SPX500','NDX'];
     if (INDICES.some(i => s.includes(i))) return 'Indices';
+    if (FOREX.some(f  => s.includes(f) && s.includes('/'))) return 'Forex';
+    if (COMMO.some(c  => s.includes(c))) return 'Commodity';
     return 'Crypto';
 }
 
@@ -148,12 +155,12 @@ async function getAnalyticsData(req, res) {
 
         const query = days
             ? `SELECT symbol, signal, confidence, price, entry,
-                      stop_loss, take_profit, risk_reward, created_at
+                      stop_loss, take_profit, risk_reward, created_at, asset_class
                FROM signals
                WHERE created_at >= NOW() - ($1 || ' days')::INTERVAL
                ORDER BY created_at DESC`
             : `SELECT symbol, signal, confidence, price, entry,
-                      stop_loss, take_profit, risk_reward, created_at
+                      stop_loss, take_profit, risk_reward, created_at, asset_class
                FROM signals ORDER BY created_at DESC`;
 
         const { rows: signals } = days
@@ -191,16 +198,14 @@ async function getAnalyticsData(req, res) {
 
         const uniqueSymbols = [...new Set(signals.map(s => s.symbol))];
 
-        // ── KPIs ──
         const kpis = [
             { label:'Total Signals',  v: total.toString(),               sub:`${wins} BUY · ${sells.length} SELL`, color:'var(--cyan)'          },
             { label:'Win Rate',       v: winRate + '%',                   sub:`▲ ${wins} signaux haussiers`,        color:'var(--green)'         },
             { label:'Avg Confidence', v: avgConf + '%',                   sub:'Moyenne IA',                         color:'var(--amber)'         },
             { label:'Avg R:R',        v: `1:${avgRR}`,                    sub:'Risk/Reward moyen',                  color:'var(--cyan)'          },
-            { label:'Actifs',         v: uniqueSymbols.length.toString(), sub:'Crypto · Forex · Commo',             color:'var(--purple-bright)' },
+            { label:'Actifs',         v: uniqueSymbols.length.toString(), sub:'Crypto · Forex · Commo · Indices',   color:'var(--purple-bright)' },
         ];
 
-        // ── Real P&L per signal ──
         function calcPnlPct(s) {
             const entry  = parseFloat(s.entry)       || parseFloat(s.price) || 0;
             const sl     = parseFloat(s.stop_loss)   || 0;
@@ -220,7 +225,6 @@ async function getAnalyticsData(req, res) {
             return conf >= 55 ? 0.3 : -0.3;
         }
 
-        // ── Equity curve ──
         const sortedAscAll = signals.slice().sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
         let cumPnl = 0, cumBench = 0;
         const equity = sortedAscAll.map(s => {
@@ -235,7 +239,6 @@ async function getAnalyticsData(req, res) {
             };
         });
 
-        // ── Monthly returns ──
         const monthMap = {};
         sortedAscAll.forEach(s => {
             const d   = new Date(s.created_at);
@@ -254,7 +257,6 @@ async function getAnalyticsData(req, res) {
             winRate: parseFloat(((v.wins / v.count) * 100).toFixed(0)),
         }));
 
-        // ── Trade log ──
         const trades = signals.slice(0, 10).map(s => {
             const entry  = parseFloat(s.entry)       || parseFloat(s.price) || 0;
             const sl     = parseFloat(s.stop_loss)   || 0;
@@ -280,18 +282,19 @@ async function getAnalyticsData(req, res) {
             }
 
             return {
-                date: new Date(s.created_at).toISOString().split('T')[0],
-                sym:  s.symbol,
-                side: s.signal === 'BUY' ? 'Long' : s.signal === 'SELL' ? 'Short' : 'Hold',
-                pnl:  pnlDisplay,
-                rr:   rrDisplay,
+                date:        new Date(s.created_at).toISOString().split('T')[0],
+                sym:         s.symbol,
+                asset_class: classifyAsset(s.symbol, s.asset_class),
+                side:        s.signal === 'BUY' ? 'Long' : s.signal === 'SELL' ? 'Short' : 'Hold',
+                pnl:         pnlDisplay,
+                rr:          rrDisplay,
             };
         });
 
-        // ── P&L Attribution by asset class ──
+        // ── P&L Attribution by asset class (utilise asset_class réel, fallback si null) ──
         const classMap = {};
         signals.forEach(s => {
-            const cls = classifyAsset(s.symbol);
+            const cls = classifyAsset(s.symbol, s.asset_class);
             if (!classMap[cls]) classMap[cls] = { total: 0, buy: 0, sell: 0, confSum: 0, rrSum: 0, rrCount: 0 };
             classMap[cls].total++;
             if (s.signal === 'BUY')  classMap[cls].buy++;
@@ -311,7 +314,7 @@ async function getAnalyticsData(req, res) {
             if (rr > 0) { classMap[cls].rrSum += rr; classMap[cls].rrCount++; }
         });
 
-        const COLORS = { 'Crypto':'var(--cyan)', 'Forex':'var(--purple-bright)', 'Commodités':'var(--amber)', 'Indices':'var(--green)' };
+        const COLORS = { 'Crypto':'var(--cyan)', 'Forex':'var(--purple-bright)', 'Commodity':'var(--amber)', 'Indices':'var(--green)' };
         const attribution = Object.entries(classMap).map(([name, v]) => ({
             name,
             total:   v.total,
@@ -322,7 +325,6 @@ async function getAnalyticsData(req, res) {
             color:   COLORS[name] || 'var(--cyan)',
         })).sort((a, b) => b.total - a.total);
 
-        // ── Performance by Day of Week ──
         const DOW_ORDER = ['Lun','Mar','Mer','Jeu','Ven','Sam','Dim'];
         const dowMap = {};
         DOW_ORDER.forEach(d => { dowMap[d] = { buy: 0, sell: 0, hold: 0, total: 0 }; });
@@ -344,7 +346,6 @@ async function getAnalyticsData(req, res) {
             sell: dowMap[day].sell,
         }));
 
-        // ── Rolling 30-day win rate ──
         const sortedAsc = signals.slice().sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
         const WINDOW = 30;
         const rolling = [];
@@ -362,7 +363,6 @@ async function getAnalyticsData(req, res) {
             rolling.reduce((acc, r) => { acc[r.day] = r; return acc; }, {})
         );
 
-        // ── Strategy Fingerprint ──
         const rrScore = Math.min(100, parseFloat(avgRR) / 3 * 100);
 
         const weekMap = {};
