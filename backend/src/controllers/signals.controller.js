@@ -17,47 +17,77 @@ function parseRR(val) {
 }
 
 // ── getAllSignals ──────────────────────────────────────────
+// refresh=true no longer blocks the request for 25-160s. It creates a
+// background job, returns { jobId } immediately, and the frontend polls
+// GET /api/signals/scan-status/:jobId for progress until status is 'done'.
 async function getAllSignals(req, res) {
     try {
         const { interval = '4h', refresh, class: assetClass } = req.query;
 
         if (refresh === 'true') {
-            const { scanAll }   = require('../services/signalGenerator.service');
-            const { scanAllYF } = require('../services/yahooFinance.service');
+            const { createJob, updateJob }   = require('../services/scanJob.service');
+            const { scanAll, CRYPTO_SYMBOLS } = require('../services/signalGenerator.service');
+            const { scanAllYF, YF_SYMBOLS }   = require('../services/yahooFinance.service');
 
-            const [cryptoResult, yfResult] = await Promise.all([
-                scanAll(interval),
-                scanAllYF(interval),
-            ]);
+            const jobId      = createJob();
+            const cryptoTotal = CRYPTO_SYMBOLS.length;
+            const forexTotal  = Object.keys(YF_SYMBOLS).length;
+            updateJob(jobId, { cryptoTotal, forexTotal });
 
-            const allSignals = [
-                ...cryptoResult.signals,
-                ...yfResult,
-            ].sort((a, b) => b.confidence - a.confidence);
+            // Respond immediately — the scan itself runs in the background below.
+            res.json({ success: true, jobId });
 
-            for (const sig of allSignals) {
-                await db.query(`
-                    INSERT INTO signals (symbol, interval, signal, confidence, price, entry, stop_loss, take_profit, risk_reward, reasoning, indicators, asset_class)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-                    ON CONFLICT DO NOTHING
-                `, [
-                    sig.symbol, interval, sig.signal, sig.confidence,
-                    sig.price,
-                    sig.entry       || sig.price,
-                    sig.stop_loss   || null,
-                    sig.take_profit || null,
-                    sig.risk_reward || null,
-                    sig.reasoning,
-                    JSON.stringify(sig.indicators),
-                    sig.asset_class || 'Crypto',
-                ]);
-            }
+            (async () => {
+                try {
+                    let cryptoCompleted = 0;
+                    let forexCompleted  = 0;
 
-            const filtered = assetClass
-                ? allSignals.filter(s => s.asset_class === assetClass)
-                : allSignals;
+                    const [cryptoResult, yfResult] = await Promise.all([
+                        scanAll(interval, () => {
+                            cryptoCompleted++;
+                            updateJob(jobId, { cryptoCompleted });
+                        }),
+                        scanAllYF(interval, () => {
+                            forexCompleted++;
+                            updateJob(jobId, { forexCompleted });
+                        }),
+                    ]);
 
-            return res.json({ success: true, signals: filtered, scannedAt: new Date().toISOString() });
+                    const allSignals = [
+                        ...cryptoResult.signals,
+                        ...yfResult,
+                    ].sort((a, b) => b.confidence - a.confidence);
+
+                    for (const sig of allSignals) {
+                        await db.query(`
+                            INSERT INTO signals (symbol, interval, signal, confidence, price, entry, stop_loss, take_profit, risk_reward, reasoning, indicators, asset_class)
+                            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                            ON CONFLICT DO NOTHING
+                        `, [
+                            sig.symbol, interval, sig.signal, sig.confidence,
+                            sig.price,
+                            sig.entry       || sig.price,
+                            sig.stop_loss   || null,
+                            sig.take_profit || null,
+                            sig.risk_reward || null,
+                            sig.reasoning,
+                            JSON.stringify(sig.indicators),
+                            sig.asset_class || 'Crypto',
+                        ]);
+                    }
+
+                    const filtered = assetClass
+                        ? allSignals.filter(s => s.asset_class === assetClass)
+                        : allSignals;
+
+                    updateJob(jobId, { status: 'done', signals: filtered });
+                } catch (err) {
+                    logger.error(`[getAllSignals] scan job ${jobId} failed: ${err.message}`);
+                    updateJob(jobId, { status: 'error', error: err.message });
+                }
+            })();
+
+            return;
         }
 
         const query = assetClass
@@ -91,6 +121,35 @@ async function getAllSignals(req, res) {
         logger.error(`[getAllSignals] ${err.message}`);
         res.status(500).json({ success: false, error: err.message });
     }
+}
+
+// ── getScanStatus ──────────────────────────────────────────
+// GET /api/signals/scan-status/:jobId
+async function getScanStatus(req, res) {
+    const { getJob } = require('../services/scanJob.service');
+    const job = getJob(req.params.jobId);
+
+    if (!job) {
+        return res.status(404).json({ success: false, error: 'Job not found or expired' });
+    }
+
+    const total     = job.cryptoTotal + job.forexTotal;
+    const completed = job.cryptoCompleted + job.forexCompleted;
+    const progress  = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+    res.json({
+        success:         true,
+        status:          job.status,
+        progress,
+        completed,
+        total,
+        cryptoCompleted: job.cryptoCompleted,
+        cryptoTotal:     job.cryptoTotal,
+        forexCompleted:  job.forexCompleted,
+        forexTotal:      job.forexTotal,
+        signals:         job.status === 'done'  ? job.signals : undefined,
+        error:           job.status === 'error' ? job.error   : undefined,
+    });
 }
 
 // ── getSignalBySymbol ─────────────────────────────────────
@@ -168,14 +227,18 @@ async function getAnalyticsData(req, res) {
             : await db.query(query);
 
         if (!signals.length) {
-            return res.json({ success: true, kpis: [], equity: [], monthly: [], trades: [], attribution: [], byDow: [], rolling: [], fingerprint: [] });
+            return res.json({
+                success: true, kpis: [], equity: [], monthly: [], trades: [],
+                attribution: [], byDow: [], rolling: [], fingerprint: [],
+                distribution: { buy: 0, sell: 0, hold: 0, total: 0 },
+            });
         }
 
-        const total   = signals.length;
-        const buys    = signals.filter(s => s.signal === 'BUY');
-        const sells   = signals.filter(s => s.signal === 'SELL');
-        const wins    = buys.length;
-        const winRate = ((wins / total) * 100).toFixed(1);
+        const total = signals.length;
+        const buys  = signals.filter(s => s.signal === 'BUY');
+        const sells = signals.filter(s => s.signal === 'SELL');
+        const holds = total - buys.length - sells.length;
+
         const avgConf = (signals.reduce((a, s) => a + (s.confidence || 0), 0) / total).toFixed(0);
 
         const rrValues = signals
@@ -198,14 +261,6 @@ async function getAnalyticsData(req, res) {
 
         const uniqueSymbols = [...new Set(signals.map(s => s.symbol))];
 
-        const kpis = [
-            { label:'Total Signals',  v: total.toString(),               sub:`${wins} BUY · ${sells.length} SELL`, color:'var(--cyan)'          },
-            { label:'Win Rate',       v: winRate + '%',                   sub:`▲ ${wins} signaux haussiers`,        color:'var(--green)'         },
-            { label:'Avg Confidence', v: avgConf + '%',                   sub:'Moyenne IA',                         color:'var(--amber)'         },
-            { label:'Avg R:R',        v: `1:${avgRR}`,                    sub:'Risk/Reward moyen',                  color:'var(--cyan)'          },
-            { label:'Actifs',         v: uniqueSymbols.length.toString(), sub:'Crypto · Forex · Commo · Indices',   color:'var(--purple-bright)' },
-        ];
-
         function calcPnlPct(s) {
             const entry  = parseFloat(s.entry)       || parseFloat(s.price) || 0;
             const sl     = parseFloat(s.stop_loss)   || 0;
@@ -224,6 +279,22 @@ async function getAnalyticsData(req, res) {
             if (rr > 0) return conf >= 55 ? rr * 0.5 : -0.5;
             return conf >= 55 ? 0.3 : -0.3;
         }
+
+        // ── Win Rate réel : basé sur le P&L calculé par signal, pas sur le nombre de BUY ──
+        const pnlPerSignal = signals.map(s => calcPnlPct(s));
+        const winningTrades = pnlPerSignal.filter(p => p > 0).length;
+        const winRate = ((winningTrades / total) * 100).toFixed(1);
+
+        const kpis = [
+            { label:'Total Signals',  v: total.toString(),               sub:`${buys.length} BUY · ${sells.length} SELL · ${holds} HOLD`, color:'var(--cyan)'          },
+            { label:'Win Rate',       v: winRate + '%',                   sub:`▲ ${winningTrades} trades gagnants`,                        color:'var(--green)'         },
+            { label:'Avg Confidence', v: avgConf + '%',                   sub:'Moyenne IA',                                                color:'var(--amber)'         },
+            { label:'Avg R:R',        v: `1:${avgRR}`,                    sub:'Risk/Reward moyen',                                         color:'var(--cyan)'          },
+            { label:'Actifs',         v: uniqueSymbols.length.toString(), sub:'Crypto · Forex · Commo · Indices',                          color:'var(--purple-bright)' },
+        ];
+
+        // ── Distribution — source de vérité unique, plus de parsing de string côté frontend ──
+        const distribution = { buy: buys.length, sell: sells.length, hold: holds, total };
 
         const sortedAscAll = signals.slice().sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
         let cumPnl = 0, cumBench = 0;
@@ -276,6 +347,12 @@ async function getAnalyticsData(req, res) {
                 rrDisplay  = `1:${rrRaw.toFixed(1)}`;
                 pnlDisplay = rrRaw >= 1 ? `+${(rrRaw * 100).toFixed(0)} pts` : `-${(100 / rrRaw).toFixed(0)} pts`;
             } else {
+                // NOTE (Bug 3 — indices identiques) : cette branche fallback ne dépend que de
+                // `confidence`. Si plusieurs signaux (ex. indices) ont la même confidence,
+                // ils produiront le même pnlPts affiché ici. La vraie cause est en amont :
+                // entry/stop_loss/take_profit ou risk_reward ne sont pas renseignés pour ces
+                // symboles au moment de l'insertion (voir yahooFinance.service.js). Cette
+                // branche reste un fallback volontaire, pas un fix — à corriger à la source.
                 const conf   = s.confidence || 60;
                 const pnlPts = s.signal === 'BUY' ? (conf - 50) * 0.5 : -(conf - 50) * 0.3;
                 pnlDisplay = pnlPts >= 0 ? `+${pnlPts.toFixed(1)} pts` : `${pnlPts.toFixed(1)} pts`;
@@ -411,7 +488,7 @@ async function getAnalyticsData(req, res) {
             { metric: 'Activité',        value: parseFloat(Math.min(100, activityScore).toFixed(1)), max: 100 },
         ];
 
-        res.json({ success: true, kpis, equity, monthly, trades, attribution, byDow, rolling: rollingDeduped, fingerprint });
+        res.json({ success: true, kpis, equity, monthly, trades, attribution, byDow, rolling: rollingDeduped, fingerprint, distribution });
 
     } catch (err) {
         logger.error(`[analytics] ${err.message}`);
@@ -421,6 +498,7 @@ async function getAnalyticsData(req, res) {
 
 module.exports = {
     getAllSignals,
+    getScanStatus,
     getSignalBySymbol,
     getSupportedSymbols,
     getAlphaEngineData,

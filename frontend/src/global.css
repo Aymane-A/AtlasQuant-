@@ -36,7 +36,8 @@ body {
     linear-gradient(180deg, #030712 0%, #06101f 48%, #030712 100%);
   color: var(--text-primary);
   font-family: Syne, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   transition: background 0.3s, color 0.3s;
 }
 

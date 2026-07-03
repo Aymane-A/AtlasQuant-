@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api, { screenerAPI } from '../services/api';
 
@@ -16,6 +16,8 @@ const DEFAULT_FILTERS = {
   priceMin: '', priceMax: '',
   confMin: '',
 };
+
+const POLL_INTERVAL_MS = 1200;
 
 const inp = {
   width:'100%', padding:'7px 10px', borderRadius:6,
@@ -79,6 +81,10 @@ export default function Screener() {
   const [scannedAt,  setScannedAt]  = useState(null);
   const [error,      setError]      = useState(null);
 
+  // ── Real scan progress, driven by polling /signals/scan-status/:jobId ──
+  const [scanProgress, setScanProgress] = useState({ pct: 0, completed: 0, total: 0 });
+  const pollTimerRef = useRef(null);
+
   const [showFilters, setShowFilters] = useState(false);
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
 
@@ -90,6 +96,9 @@ export default function Screener() {
   const [presetsLoaded, setPresetsLoaded] = useState(false);
   const [presetName, setPresetName] = useState('');
   const [showPresetInput, setShowPresetInput] = useState(false);
+
+  // Stop any in-flight polling if the component unmounts mid-scan
+  useEffect(() => () => { if (pollTimerRef.current) clearInterval(pollTimerRef.current); }, []);
 
   const ensureWatchlist = useCallback(() => {
     if (watchlistLoaded) return;
@@ -120,24 +129,56 @@ export default function Screener() {
     }
   };
 
-  // ── ONE fetch only — populates ALL asset classes at once ──
+  // ── Poll /signals/scan-status/:jobId until the job is done or errors ──
+  const pollJob = useCallback((jobId) => {
+    return new Promise((resolve, reject) => {
+      pollTimerRef.current = setInterval(async () => {
+        try {
+          const res = await api.get(`/signals/scan-status/${jobId}`);
+          const job = res.data;
+
+          setScanProgress({
+            pct:       job.progress ?? 0,
+            completed: job.completed ?? 0,
+            total:     job.total ?? 0,
+          });
+
+          if (job.status === 'done') {
+            clearInterval(pollTimerRef.current);
+            resolve(job.signals || []);
+          } else if (job.status === 'error') {
+            clearInterval(pollTimerRef.current);
+            reject(new Error(job.error || 'Scan failed'));
+          }
+        } catch (err) {
+          clearInterval(pollTimerRef.current);
+          reject(err);
+        }
+      }, POLL_INTERVAL_MS);
+    });
+  }, []);
+
+  // ── ONE fetch to kick off the job, then poll for real progress ──
   const runScan = useCallback(async () => {
     setScanning(true);
     setError(null);
+    setScanProgress({ pct: 0, completed: 0, total: 0 });
     ensureWatchlist();
     ensurePresets();
     try {
-      const res = await api.get('/signals?interval=4h&refresh=true', { timeout: 160000 });
-      const data = res.data;
-      if (!data.signals) { setError('No signals returned from backend.'); return; }
-      setAllResults(data.signals);
+      const kickoff = await api.get('/signals?interval=4h&refresh=true');
+      const jobId = kickoff.data?.jobId;
+      if (!jobId) { setError('No job id returned from backend.'); return; }
+
+      const signals = await pollJob(jobId);
+      setAllResults(signals);
       setScannedAt(new Date());
     } catch (err) {
-      setError(err?.error || err?.response?.data?.error || 'Scan failed. Is the backend running?');
+      setError(err?.message || err?.response?.data?.error || 'Scan failed. Is the backend running?');
     } finally {
       setScanning(false);
     }
-  }, [ensureWatchlist, ensurePresets]);
+  }, [ensureWatchlist, ensurePresets, pollJob]);
 
   const goToBacktest = (symbol) => navigate('/backtester', { state: { prefillSymbol: symbol } });
 
@@ -247,7 +288,9 @@ export default function Screener() {
           {scanning ? (
             <>
               <span style={{ display:'inline-block', width:12, height:12, border:'2px solid var(--cyan)', borderTopColor:'transparent', borderRadius:'50%', animation:'spin 0.8s linear infinite' }} />
-              Scanning... (~25s)
+              {scanProgress.total > 0
+                ? `Scanning... ${scanProgress.completed}/${scanProgress.total} (${scanProgress.pct}%)`
+                : 'Scanning...'}
             </>
           ) : (
             <>▶ Run Screener</>
@@ -421,18 +464,43 @@ export default function Screener() {
         </div>
       )}
 
-      {/* ── Scanning skeleton ── */}
+      {/* ── Scanning progress — real percentage, not a fake pulse ── */}
       {scanning && (
-        <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:12 }}>
-          {Array(6).fill(0).map((_,i) => (
-            <div key={i} style={{ background:'var(--surface)', border:'1px solid var(--border)', borderRadius:12, padding:20, height:160, animation:'pulse 2s infinite' }} />
-          ))}
+        <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
+          <div className="panel" style={{ padding:'20px 24px' }}>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:10 }}>
+              <span style={{ fontSize:11, fontFamily:'JetBrains Mono,monospace', color:'var(--text-secondary)', textTransform:'uppercase', letterSpacing:'.1em' }}>
+                Scan en cours — crypto + forex + commodities + indices
+              </span>
+              <span style={{ fontSize:13, fontFamily:'JetBrains Mono,monospace', color:'var(--cyan)', fontWeight:700 }}>
+                {scanProgress.pct}%
+              </span>
+            </div>
+            <div style={{ height:8, background:'rgba(255,255,255,0.06)', borderRadius:4, overflow:'hidden' }}>
+              <div style={{
+                width: `${scanProgress.pct}%`, height:'100%', borderRadius:4,
+                background:'var(--cyan)', boxShadow:'0 0 8px var(--cyan)',
+                transition:'width .3s ease',
+              }} />
+            </div>
+            <div style={{ marginTop:10, fontSize:11, fontFamily:'JetBrains Mono,monospace', color:'var(--text-muted)' }}>
+              {scanProgress.total > 0
+                ? `${scanProgress.completed} / ${scanProgress.total} actifs analysés`
+                : 'Initialisation du scan...'}
+            </div>
+          </div>
+
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:12 }}>
+            {Array(6).fill(0).map((_,i) => (
+              <div key={i} style={{ background:'var(--surface)', border:'1px solid var(--border)', borderRadius:12, padding:20, height:160, animation:'pulse 2s infinite' }} />
+            ))}
+          </div>
         </div>
       )}
 
       {/* ── Results Table ── */}
       {!scanning && filtered.length > 0 && (
-        <div className="panel" style={{ padding:0, overflow:'hidden' }}>
+        <div className="panel" style={{ padding: 0, overflowX: 'auto', overflowY: 'auto', maxHeight: 'calc(100vh - 330px)', borderRadius: 12, scrollbarWidth: 'thin',}}>
           <table style={{ width:'100%', borderCollapse:'collapse' }}>
             <thead>
               <tr>

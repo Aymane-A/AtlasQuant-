@@ -4,7 +4,7 @@ import { LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip,
 import api from '../services/api';
 
 const PERIODS = ['1M','3M','6M','1Y','All'];
-const EMPTY = { kpis:[], equity:[], monthly:[], trades:[], attribution:[], byDow:[], rolling:[], fingerprint:[] };
+const EMPTY = { kpis:[], equity:[], monthly:[], trades:[], attribution:[], byDow:[], rolling:[], fingerprint:[], distribution:{ buy:0, sell:0, hold:0, total:0 } };
 
 const tt = {
   contentStyle:{
@@ -97,6 +97,11 @@ export default function Analytics() {
           byDow:       Array.isArray(d.byDow)       ? d.byDow       : [],
           rolling:     Array.isArray(d.rolling)     ? d.rolling     : [],
           fingerprint: Array.isArray(d.fingerprint) ? d.fingerprint : [],
+          // ✅ Fix Bug 1: distribution vient directement du backend (source de vérité),
+          // plus de parsing regex sur le label texte du KPI "Total Signals".
+          distribution: d.distribution && typeof d.distribution === 'object'
+            ? d.distribution
+            : { buy: 0, sell: 0, hold: 0, total: 0 },
         });
       })
       .catch(err => { if (!cancelled) setError(err.response?.data?.error || 'Erreur analytics'); })
@@ -119,12 +124,9 @@ export default function Analytics() {
     <div style={{background:'var(--surface)',border:'1px solid rgba(248,113,113,0.25)',borderRadius:10,padding:'20px',textAlign:'center',fontFamily:'JetBrains Mono,monospace',fontSize:12,color:'var(--red)'}}>{error}</div>
   );
 
-  // Parse distribution from KPI sub
-  const total   = data.kpis[0]?.v ? parseInt(data.kpis[0].v) : 0;
-  const sub     = data.kpis[0]?.sub || '';
-  const buys    = parseInt(sub.match(/(\d+) BUY/)?.[1] || 0);
-  const sells   = parseInt(sub.match(/(\d+) SELL/)?.[1] || 0);
-  const holds   = Math.max(0, total - buys - sells);
+  // ✅ Fix Bug 1: total/buys/sells/holds viennent tous de la même source (data.distribution),
+  // garantissant que la somme des parts = le total affiché au centre du donut.
+  const { buy: buys, sell: sells, hold: holds, total } = data.distribution;
   const distItems = [
     {label:'BUY',  count:buys,  color:'var(--green)'},
     {label:'SELL', count:sells, color:'var(--red)'},

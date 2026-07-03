@@ -130,13 +130,16 @@ async function generateSignal(symbol, interval = '4h') {
 }
 
 // ── Scan all crypto symbols ───────────────────────────────
-async function scanAll(interval = '4h') {
+// onProgress(i) is called after each symbol completes (success or fail),
+// so the caller can track "X/Y done" without waiting for the whole batch.
+async function scanAll(interval = '4h', onProgress = () => {}) {
   logger.info(`[signalGen] Scanning ${CRYPTO_SYMBOLS.length} crypto symbols (${interval})...`);
 
   const results = [];
   for (const symbol of CRYPTO_SYMBOLS) {
     const sig = await generateSignal(symbol, interval);
     if (sig) results.push(sig);
+    try { onProgress(symbol); } catch { /* never let progress reporting break the scan */ }
     await new Promise(r => setTimeout(r, 400)); // rate limit
   }
 

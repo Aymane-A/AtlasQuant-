@@ -9,6 +9,9 @@ const express = require('express');
 const router  = express.Router();
 const { listPresets, savePreset, deletePreset } = require('../controllers/screener.controller');
 const { rateLimiter } = require('../middleware/rateLimit.middleware');
+const { protect } = require('../middleware/auth.middleware');
+
+router.use(protect);
 
 router.get('/presets',        rateLimiter(30), listPresets);
 router.post('/presets',       rateLimiter(15), savePreset);

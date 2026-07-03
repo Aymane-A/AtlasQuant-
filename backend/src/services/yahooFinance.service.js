@@ -132,7 +132,9 @@ async function generateYFSignal(symbol, interval = '4h') {
   };
 }
 
-async function scanAllYF(interval = '4h') {
+// onProgress(symbol) is called after each symbol completes (success or fail),
+// so the caller can track "X/Y done" without waiting for the whole batch.
+async function scanAllYF(interval = '4h', onProgress = () => {}) {
   const symbols = Object.keys(YF_SYMBOLS);
   logger.info(`[yahooFinance] Scanning ${symbols.length} forex/commodities/indices...`);
   const results = [];
@@ -141,10 +143,11 @@ async function scanAllYF(interval = '4h') {
     try {
       const sig = await generateYFSignal(symbol, interval);
       results.push(sig);
-      await new Promise(r => setTimeout(r, 300));
     } catch (err) {
       logger.error(`[yahooFinance] ${symbol} error: ${err.message}`);
     }
+    try { onProgress(symbol); } catch { /* never let progress reporting break the scan */ }
+    await new Promise(r => setTimeout(r, 300));
   }
 
   return results;
