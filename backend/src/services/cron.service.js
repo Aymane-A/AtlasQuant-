@@ -4,19 +4,52 @@
 
 const cron                          = require('node-cron');
 const { scanAll }                   = require('./signalGenerator.service');
+const { scanAllYF }                 = require('./yahooFinance.service');
 const { checkAlerts }               = require('./alertChecker.service');
 const { checkSignalAlerts }         = require('./signalAlert.service');
 const { takePortfolioSnapshot }     = require('./portfolioSnapshot.service');
+const db                            = require('../config/db');
 const logger                        = require('../utils/logger');
 
 const initCronJobs = () => {
 
-  // ── Market scan every 4 hours → AI signal alerts ───────
+  // ── Market scan every 4 hours → Crypto + Forex/Commodity/Indices → AI signal alerts ───────
   cron.schedule('0 */4 * * *', async () => {
     logger.info('[cron] Starting scheduled market scan...');
     try {
-      const results = await scanAll('4h');
-      logger.info(`[cron] Scan finished. ${results.signals.length} signals generated.`);
+      const [cryptoResult, yfSignals] = await Promise.all([
+        scanAll('4h'),
+        scanAllYF('4h'),
+      ]);
+
+      const allSignals = [
+        ...cryptoResult.signals,
+        ...yfSignals,
+      ];
+
+      // ✅ Fix Bug 4: scanAllYF() ne persiste pas en DB elle-même (contrairement à
+      // scanAll côté crypto) — sans cet insert, les signaux Forex/Commodity/Indices
+      // générés par le cron étaient calculés mais jamais sauvegardés, donc jamais
+      // visibles ni utilisés dans Analytics.
+      for (const sig of yfSignals) {
+        await db.query(`
+          INSERT INTO signals (symbol, interval, signal, confidence, price, entry, stop_loss, take_profit, risk_reward, reasoning, indicators, asset_class)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+          ON CONFLICT DO NOTHING
+        `, [
+          sig.symbol, '4h', sig.signal, sig.confidence,
+          sig.price,
+          sig.entry       || sig.price,
+          sig.stop_loss   || null,
+          sig.take_profit || null,
+          sig.risk_reward || null,
+          sig.reasoning,
+          JSON.stringify(sig.indicators),
+          sig.asset_class || 'Crypto',
+        ]);
+      }
+
+      logger.info(`[cron] Scan finished. ${cryptoResult.signals.length} crypto + ${yfSignals.length} forex/commo/indices signals generated.`);
       await checkSignalAlerts();
     } catch (err) {
       logger.error(`[cron] Scan error: ${err.message}`);

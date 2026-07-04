@@ -336,7 +336,14 @@ async function getAnalyticsData(req, res) {
 
             let rrDisplay = '—', pnlDisplay;
 
-            if (entry && sl && tp) {
+            // ✅ Fix Bug 5: un signal HOLD ne correspond à aucune position ouverte —
+            // son P&L doit être 0, cohérent avec calcPnlPct() plus haut qui fait déjà
+            // ce check. Avant ce fix, cette fonction dupliquait la logique de calcul
+            // sans ce garde-fou et traitait HOLD comme un SELL (pnlPts = -risk),
+            // affichant des pertes fictives pour des signaux qui n'ont pris aucun trade.
+            if (s.signal === 'HOLD') {
+                pnlDisplay = '0.0 pts';
+            } else if (entry && sl && tp) {
                 const risk   = Math.abs(entry - sl);
                 const reward = Math.abs(tp - entry);
                 const rrCalc = risk > 0 ? reward / risk : 0;
@@ -372,8 +379,13 @@ async function getAnalyticsData(req, res) {
         const classMap = {};
         signals.forEach(s => {
             const cls = classifyAsset(s.symbol, s.asset_class);
-            if (!classMap[cls]) classMap[cls] = { total: 0, buy: 0, sell: 0, confSum: 0, rrSum: 0, rrCount: 0 };
+            if (!classMap[cls]) classMap[cls] = { total: 0, win: 0, buy: 0, sell: 0, confSum: 0, rrSum: 0, rrCount: 0 };
             classMap[cls].total++;
+            // ✅ Fix Bug 9: même correction que le KPI Win Rate — basé sur le P&L réel
+            // (calcPnlPct), pas sur le nombre de BUY. Avant ce fix, une classe avec
+            // beaucoup de HOLD (ex. Crypto) affichait un "win rate" artificiellement
+            // bas, alors qu'un HOLD n'est ni une perte ni un gain.
+            if (calcPnlPct(s) > 0) classMap[cls].win++;
             if (s.signal === 'BUY')  classMap[cls].buy++;
             if (s.signal === 'SELL') classMap[cls].sell++;
             classMap[cls].confSum += (s.confidence || 0);
@@ -396,7 +408,7 @@ async function getAnalyticsData(req, res) {
             name,
             total:   v.total,
             pct:     parseFloat(((v.total / total) * 100).toFixed(1)),
-            winRate: parseFloat(((v.buy / v.total) * 100).toFixed(1)),
+            winRate: parseFloat(((v.win / v.total) * 100).toFixed(1)),
             avgConf: parseFloat((v.confSum / v.total).toFixed(0)),
             avgRR:   v.rrCount > 0 ? parseFloat((v.rrSum / v.rrCount).toFixed(2)) : 0,
             color:   COLORS[name] || 'var(--cyan)',
@@ -404,22 +416,24 @@ async function getAnalyticsData(req, res) {
 
         const DOW_ORDER = ['Lun','Mar','Mer','Jeu','Ven','Sam','Dim'];
         const dowMap = {};
-        DOW_ORDER.forEach(d => { dowMap[d] = { buy: 0, sell: 0, hold: 0, total: 0 }; });
+        DOW_ORDER.forEach(d => { dowMap[d] = { win: 0, sell: 0, hold: 0, total: 0 }; });
         signals.forEach(s => {
             const d = getDow(s.created_at);
             if (!dowMap[d]) return;
             dowMap[d].total++;
-            if (s.signal === 'BUY')       dowMap[d].buy++;
-            else if (s.signal === 'SELL') dowMap[d].sell++;
-            else                          dowMap[d].hold++;
+            if (calcPnlPct(s) > 0)         dowMap[d].win++;
+            if (s.signal === 'SELL')      dowMap[d].sell++;
+            else if (s.signal === 'HOLD') dowMap[d].hold++;
         });
         const byDow = DOW_ORDER.map(day => ({
             day,
             total:   dowMap[day].total,
+            // ✅ Fix Bug 7: même correction que le KPI Win Rate — basé sur le P&L réel
+            // (calcPnlPct), pas sur le nombre de BUY. Cohérent avec Win Rate Glissant.
             winRate: dowMap[day].total > 0
-                ? parseFloat(((dowMap[day].buy / dowMap[day].total) * 100).toFixed(1))
+                ? parseFloat(((dowMap[day].win / dowMap[day].total) * 100).toFixed(1))
                 : 0,
-            buy:  dowMap[day].buy,
+            buy:  dowMap[day].total - dowMap[day].sell - dowMap[day].hold,
             sell: dowMap[day].sell,
         }));
 
@@ -428,8 +442,10 @@ async function getAnalyticsData(req, res) {
         const rolling = [];
         for (let i = 0; i < sortedAsc.length; i++) {
             const windowSlice = sortedAsc.slice(Math.max(0, i - WINDOW + 1), i + 1);
-            const wBuys = windowSlice.filter(s => s.signal === 'BUY').length;
-            const wRate = windowSlice.length > 0 ? parseFloat(((wBuys / windowSlice.length) * 100).toFixed(1)) : 0;
+            // ✅ Fix Bug 6: win rate glissant basé sur le P&L réel (calcPnlPct), pas
+            // sur le nombre de BUY — cohérent avec le KPI "Win Rate" déjà corrigé.
+            const windowWins = windowSlice.filter(s => calcPnlPct(s) > 0).length;
+            const wRate = windowSlice.length > 0 ? parseFloat(((windowWins / windowSlice.length) * 100).toFixed(1)) : 0;
             rolling.push({
                 day:     new Date(sortedAsc[i].created_at).toLocaleDateString('fr-FR', { day:'2-digit', month:'short' }),
                 winRate: wRate,

@@ -25,14 +25,32 @@ function buildPoolConfig() {
   return { host, port: Number(port), database, user, password: String(password) };
 }
 
+// ✅ Fix pool exhaustion: max était à 10, ce qui suffisait à peine en usage normal
+// mais se vidait rapidement dès que le cron (scan crypto + forex/commo/indices,
+// checkAlerts toutes les minutes) tournait en même temps que le trafic frontend
+// (polling analytics/alerts/settings). Résultat : "Connection terminated due to
+// connection timeout" dès que les 10 connexions étaient toutes occupées plus de
+// 5s. On augmente la taille du pool et on garde un timeout raisonnable — la vraie
+// capacité de la base (vérifier max_connections côté PostgreSQL) doit rester
+// au-dessus de ce chiffre.
 const pool = new Pool({
   ...buildPoolConfig(),
-  max: 10,
+  max: 20,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 5000,
+  connectionTimeoutMillis: 8000,
 });
 
 pool.on('error', (err) => logger.error(`[db] Pool error: ${err.message}`));
+
+// ── Monitoring léger : alerte si le pool approche de sa capacité max ──
+// Permet de repérer une saturation avant qu'elle ne cause des timeouts, sans
+// avoir besoin d'un outil de monitoring externe.
+setInterval(() => {
+  const { totalCount, idleCount, waitingCount } = pool;
+  if (waitingCount > 0) {
+    logger.warn(`[db] Pool sous pression — total:${totalCount} idle:${idleCount} waiting:${waitingCount}`);
+  }
+}, 15000);
 
 async function query(text, params) {
   try {

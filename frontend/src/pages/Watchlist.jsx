@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
+import { useNavigate } from 'react-router-dom'; // adjust import if your router setup differs
 import api from '../services/api';
 
 const SPARKLINE = ({ data = [], up }) => {
@@ -37,23 +38,214 @@ const SignalBadge = ({ signal, confidence }) => {
   );
 };
 
-export default function Watchlist() {
-  const [stocks,  setStocks]  = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [tab,     setTab]     = useState('card');
-  const [input,   setInput]   = useState('');
-  const [adding,  setAdding]  = useState(false);
-  const [showAdd, setShowAdd] = useState(false);
+// ── Icon set (inline SVG — avoids emoji glyphs rendering as blank/white
+// boxes on systems without a color-emoji font installed) ────────────
+const BellIcon = ({ size = 13 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
+    <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+  </svg>
+);
 
-  const fetchWatchlist = () => {
-    setLoading(true);
-    api.get('/watchlist')
-      .then(res => setStocks(res.data.stocks || []))
-      .catch(err => console.error('Watchlist error:', err))
-      .finally(() => setLoading(false));
+const BoltIcon = ({ size = 13 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
+    <path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" />
+  </svg>
+);
+
+const CloseIcon = ({ size = 12 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
+    <path d="M18 6 6 18" />
+    <path d="M6 6l12 12" />
+  </svg>
+);
+
+// Small circular icon button used for card-level quick actions
+// (alert / trade / remove). Consistent bg-pill style across all three
+// instead of bare emoji glyphs that render inconsistently.
+const IconButton = ({ onClick, title, color, bg, border, children }) => (
+  <button onClick={onClick} title={title} style={{
+    width:26, height:26, borderRadius:'50%', display:'flex',
+    alignItems:'center', justifyContent:'center', cursor:'pointer',
+    background: bg, border: `1px solid ${border}`, color, flexShrink:0,
+    transition:'transform .15s, filter .15s',
+  }}
+    onMouseEnter={e => { e.currentTarget.style.transform='scale(1.08)'; e.currentTarget.style.filter='brightness(1.2)'; }}
+    onMouseLeave={e => { e.currentTarget.style.transform='scale(1)'; e.currentTarget.style.filter='none'; }}
+  >
+    {children}
+  </button>
+);
+
+// ── Quick Alert Modal ────────────────────────────────────────
+const AlertModal = ({ symbol, onClose, onCreated }) => {
+  const [condition, setCondition] = useState('above');
+  const [value,     setValue]     = useState('');
+  const [saving,    setSaving]    = useState(false);
+  const [error,     setError]     = useState('');
+
+  const submit = async () => {
+    if (!value.trim()) return;
+    setSaving(true);
+    setError('');
+    try {
+      await api.post('/alerts', {
+        symbol,
+        type: 'typePrice',
+        condition,
+        value: parseFloat(value),
+        channels: [], // in-app only by default; user can add email/telegram from Alerts page
+      });
+      onCreated();
+      onClose();
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to create alert');
+    } finally {
+      setSaving(false);
+    }
   };
 
-  useEffect(() => { fetchWatchlist(); }, []);
+  return (
+    <div style={{
+      position:'fixed', inset:0, background:'rgba(0,0,0,0.6)',
+      display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000,
+    }} onClick={onClose}>
+      <div style={{
+        background:'var(--surface)', border:'1px solid var(--border)', borderRadius:14,
+        padding:24, width:340, boxSizing:'border-box',
+      }} onClick={e => e.stopPropagation()}>
+        <div style={{ display:'flex', alignItems:'center', gap:8, fontSize:14, fontWeight:700, fontFamily:'Syne,sans-serif', color:'var(--text-primary)', marginBottom:16 }}>
+          <span style={{ color:'var(--amber)' }}><BellIcon size={16} /></span>
+          Alert on {symbol}
+        </div>
+
+        <div style={{ display:'flex', gap:8, marginBottom:14 }}>
+          {['above','below'].map(c => (
+            <button key={c} onClick={() => setCondition(c)} style={{
+              flex:1, padding:'8px 0', borderRadius:8, cursor:'pointer',
+              border: condition===c ? '1px solid var(--cyan-dim)' : '1px solid var(--border)',
+              background: condition===c ? 'var(--cyan-glow)' : 'transparent',
+              color: condition===c ? 'var(--cyan)' : 'var(--text-secondary)',
+              fontFamily:'JetBrains Mono,monospace', fontSize:12, fontWeight:600,
+            }}>
+              {c === 'above' ? '▲ Above' : '▼ Below'}
+            </button>
+          ))}
+        </div>
+
+        <input
+          type="number"
+          value={value}
+          onChange={e => setValue(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && submit()}
+          placeholder="Target price"
+          style={{
+            width:'100%', background:'rgba(255,255,255,0.04)',
+            border:'1px solid var(--border)', borderRadius:8,
+            padding:'10px 14px', color:'var(--text-primary)',
+            fontFamily:'JetBrains Mono,monospace', fontSize:13, outline:'none',
+            boxSizing:'border-box', marginBottom: error ? 8 : 16,
+          }}
+          autoFocus
+        />
+
+        {error && (
+          <div style={{ fontSize:11, color:'var(--red)', fontFamily:'JetBrains Mono,monospace', marginBottom:12 }}>
+            {error}
+          </div>
+        )}
+
+        <div style={{ display:'flex', gap:10 }}>
+          <button onClick={submit} disabled={saving || !value.trim()} style={{
+            flex:1, padding:'10px 0', borderRadius:8, border:'none',
+            background:'var(--cyan)', color:'#000', fontWeight:700,
+            fontFamily:'Syne,sans-serif', fontSize:13, cursor:'pointer',
+            opacity: (saving || !value.trim()) ? 0.6 : 1,
+          }}>
+            {saving ? '...' : 'Create Alert'}
+          </button>
+          <button onClick={onClose} style={{
+            padding:'10px 16px', borderRadius:8, border:'1px solid var(--border)',
+            background:'transparent', color:'var(--text-secondary)', cursor:'pointer',
+          }}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default function Watchlist() {
+  const navigate = useNavigate();
+
+  const [stocks,      setStocks]      = useState([]);
+  const [loading,     setLoading]     = useState(true);
+  const [refreshing,  setRefreshing]  = useState(false);
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [tab,         setTab]         = useState('card');
+  const [input,       setInput]       = useState('');
+  const [adding,      setAdding]      = useState(false);
+  const [showAdd,     setShowAdd]     = useState(false);
+  const [sortBy,      setSortBy]      = useState('none'); // 'none' | 'change-desc' | 'change-asc'
+  const [alertSymbol, setAlertSymbol] = useState(null);   // symbol currently targeted by the alert modal
+  const [flash,       setFlash]       = useState({});     // { [sym]: 'up' | 'down' } — brief price-move highlight
+
+  const prevPrices = useRef({}); // holds last-seen price per symbol, used only to detect direction of change
+
+  const fetchWatchlist = (isInitial = false) => {
+    if (isInitial) setLoading(true); else setRefreshing(true);
+    api.get('/watchlist')
+      .then(res => {
+        const newStocks = res.data.stocks || [];
+
+        // Diff against previous prices to trigger the flash animation
+        const moved = {};
+        newStocks.forEach(s => {
+          const prev = prevPrices.current[s.sym];
+          if (prev !== undefined && s.price && s.price !== prev) {
+            moved[s.sym] = s.price > prev ? 'up' : 'down';
+          }
+          prevPrices.current[s.sym] = s.price;
+        });
+
+        if (Object.keys(moved).length) {
+          setFlash(f => ({ ...f, ...moved }));
+          // Clear the flash after the animation window so the price
+          // returns to its normal color until the next tick.
+          setTimeout(() => {
+            setFlash(f => {
+              const next = { ...f };
+              Object.keys(moved).forEach(k => delete next[k]);
+              return next;
+            });
+          }, 900);
+        }
+
+        setStocks(newStocks);
+        setLastUpdated(new Date());
+      })
+      .catch(err => console.error('Watchlist error:', err))
+      .finally(() => { setLoading(false); setRefreshing(false); });
+  };
+
+  useEffect(() => {
+    fetchWatchlist(true);
+
+    // Poll every 15s — skip the tick while the tab isn't visible to
+    // avoid burning API calls/rate limits in the background.
+    const interval = setInterval(() => {
+      if (!document.hidden) fetchWatchlist(false);
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const sortedStocks = useMemo(() => {
+    if (sortBy === 'none') return stocks;
+    const sorted = [...stocks].sort((a, b) => (a.change || 0) - (b.change || 0));
+    return sortBy === 'change-desc' ? sorted.reverse() : sorted;
+  }, [stocks, sortBy]);
 
   const addSymbol = async () => {
     if (!input.trim()) return;
@@ -79,10 +271,16 @@ export default function Watchlist() {
     }
   };
 
+  const goToTrade = (sym) => {
+    // Reuses the existing Trading page form instead of duplicating
+    // order-placement UI here — prefill via query param.
+    navigate(`/trading?symbol=${encodeURIComponent(sym)}`);
+  };
+
   return (
     <>
       {/* ── Header ── */}
-      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', flexWrap:'wrap', gap:12 }}>
         <div>
           <div style={{ fontSize:11, letterSpacing:'.2em', color:'var(--text-muted)', textTransform:'uppercase', fontFamily:'JetBrains Mono,monospace', marginBottom:4 }}>
             // Watchlist
@@ -90,8 +288,34 @@ export default function Watchlist() {
           <div style={{ fontSize:11, color:'var(--text-secondary)', fontFamily:'JetBrains Mono,monospace' }}>
             {stocks.length} actifs surveillés · Prix temps réel · Signaux IA
           </div>
+          <div style={{ display:'flex', alignItems:'center', gap:6, fontSize:10, color:'var(--text-muted)', fontFamily:'JetBrains Mono,monospace', marginTop:6 }}>
+            <span style={{
+              width:6, height:6, borderRadius:'50%', background:'var(--green)',
+              boxShadow:'0 0 6px var(--green)', animation:'livePulse 1.6s infinite',
+              opacity: refreshing ? 1 : 0.7,
+            }} />
+            Live · auto-refresh 15s
+            {lastUpdated && <span style={{ opacity:0.6 }}>· updated {lastUpdated.toLocaleTimeString('en-GB')}</span>}
+          </div>
         </div>
-        <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:10, flexWrap:'wrap' }}>
+          {/* Sort control */}
+          <div style={{ display:'flex', gap:4, background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:10, padding:4 }}>
+            {[
+              ['none',        '— Default'],
+              ['change-desc', '▲ Top gainers'],
+              ['change-asc',  '▼ Top losers'],
+            ].map(([k,l]) => (
+              <button key={k} onClick={() => setSortBy(k)} style={{
+                padding:'6px 12px', borderRadius:7, border:'none',
+                fontFamily:'JetBrains Mono,monospace', fontSize:11, cursor:'pointer',
+                background: sortBy===k ? 'rgba(0,245,212,0.1)' : 'transparent',
+                color:      sortBy===k ? 'var(--cyan)' : 'var(--text-secondary)',
+                boxShadow:  sortBy===k ? 'inset 0 0 0 1px rgba(0,245,212,0.2)' : 'none',
+              }}>{l}</button>
+            ))}
+          </div>
+
           <div style={{ display:'flex', gap:4, background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:10, padding:4 }}>
             {[['card','⊞ Cards'],['table','≡ Table']].map(([k,l]) => (
               <button key={k} onClick={() => setTab(k)} style={{
@@ -177,7 +401,7 @@ export default function Watchlist() {
       {/* ── Card View ── */}
       {!loading && tab === 'card' && stocks.length > 0 && (
         <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:12 }}>
-          {stocks.map(s => {
+          {sortedStocks.map(s => {
             const up    = (s.change || 0) >= 0;
             const spark = s.sparkline || s.history || [];
             return (
@@ -189,21 +413,38 @@ export default function Watchlist() {
                 onMouseEnter={e => e.currentTarget.style.borderColor='rgba(0,245,212,0.2)'}
                 onMouseLeave={e => e.currentTarget.style.borderColor='var(--border)'}
               >
-                {/* Remove */}
-                <button onClick={() => removeSymbol(s.sym)} style={{
-                  position:'absolute', top:12, right:12, background:'transparent',
-                  border:'none', color:'var(--text-muted)', cursor:'pointer', fontSize:14,
-                }}>✕</button>
+                {/* Top-right action icons */}
+                <div style={{ position:'absolute', top:12, right:12, display:'flex', gap:8 }}>
+                  <IconButton
+                    onClick={() => setAlertSymbol(s.sym)}
+                    title="Set price alert"
+                    color="var(--amber)" bg="rgba(251,191,36,0.1)" border="rgba(251,191,36,0.25)"
+                  ><BellIcon /></IconButton>
+                  <IconButton
+                    onClick={() => goToTrade(s.sym)}
+                    title="Quick trade"
+                    color="var(--cyan)" bg="rgba(0,245,212,0.1)" border="rgba(0,245,212,0.25)"
+                  ><BoltIcon /></IconButton>
+                  <IconButton
+                    onClick={() => removeSymbol(s.sym)}
+                    title="Remove from watchlist"
+                    color="var(--red)" bg="rgba(248,113,113,0.1)" border="rgba(248,113,113,0.25)"
+                  ><CloseIcon /></IconButton>
+                </div>
 
                 {/* Symbol + Signal */}
-                <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:10, flexWrap:'wrap' }}>
+                <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:10, flexWrap:'wrap', paddingRight:96 }}>
                   <div style={{ width:8, height:8, borderRadius:'50%', flexShrink:0, background: up?'var(--green)':'var(--red)', boxShadow: up?'0 0 8px var(--green)':'0 0 8px var(--red)' }} />
                   <span style={{ fontSize:13, fontWeight:700, fontFamily:'JetBrains Mono,monospace', color:'var(--text-primary)' }}>{s.sym}</span>
                   <SignalBadge signal={s.signal} confidence={s.confidence} />
                 </div>
 
                 {/* Price */}
-                <div style={{ fontSize:22, fontWeight:700, color:'var(--text-primary)', marginBottom:4 }}>
+                <div style={{
+                  fontSize:22, fontWeight:700, marginBottom:4,
+                  color: flash[s.sym] === 'up' ? 'var(--green)' : flash[s.sym] === 'down' ? 'var(--red)' : 'var(--text-primary)',
+                  transition:'color .5s ease',
+                }}>
                   ${parseFloat(s.price || 0).toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:4 })}
                 </div>
 
@@ -239,13 +480,13 @@ export default function Watchlist() {
           <table style={{ width:'100%', borderCollapse:'collapse' }}>
             <thead>
               <tr>
-                {['Symbole','Prix','24h %','H/L 24h','Volume','Signal IA','Action'].map(h => (
+                {['Symbole','Prix','24h %','H/L 24h','Volume','Signal IA','Actions'].map(h => (
                   <th key={h} style={{ textAlign:'left', padding:'14px 18px', fontSize:10, letterSpacing:'.15em', color:'var(--text-muted)', textTransform:'uppercase', fontFamily:'JetBrains Mono,monospace', borderBottom:'1px solid var(--border)', fontWeight:400 }}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {stocks.map(s => {
+              {sortedStocks.map(s => {
                 const up = (s.change || 0) >= 0;
                 return (
                   <tr key={s.sym}
@@ -259,7 +500,11 @@ export default function Watchlist() {
                         <span style={{ fontSize:13, fontWeight:700, fontFamily:'JetBrains Mono,monospace' }}>{s.sym}</span>
                       </div>
                     </td>
-                    <td style={{ padding:'14px 18px', fontSize:13, fontFamily:'JetBrains Mono,monospace', color:'var(--text-primary)' }}>
+                    <td style={{
+                      padding:'14px 18px', fontSize:13, fontFamily:'JetBrains Mono,monospace',
+                      color: flash[s.sym] === 'up' ? 'var(--green)' : flash[s.sym] === 'down' ? 'var(--red)' : 'var(--text-primary)',
+                      transition:'color .5s ease',
+                    }}>
                       ${parseFloat(s.price || 0).toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:4 })}
                     </td>
                     <td style={{ padding:'14px 18px', fontSize:12, fontFamily:'JetBrains Mono,monospace', color: up?'var(--green)':'var(--red)', fontWeight:600 }}>
@@ -277,11 +522,23 @@ export default function Watchlist() {
                       <SignalBadge signal={s.signal} confidence={s.confidence} />
                     </td>
                     <td style={{ padding:'14px 18px' }}>
-                      <button onClick={() => removeSymbol(s.sym)} style={{
-                        background:'rgba(248,113,113,0.08)', border:'1px solid rgba(248,113,113,0.2)',
-                        color:'var(--red)', borderRadius:6, padding:'4px 10px',
-                        fontSize:11, fontFamily:'JetBrains Mono,monospace', cursor:'pointer',
-                      }}>Remove</button>
+                      <div style={{ display:'flex', gap:8 }}>
+                        <IconButton
+                          onClick={() => setAlertSymbol(s.sym)}
+                          title="Set price alert"
+                          color="var(--amber)" bg="rgba(251,191,36,0.1)" border="rgba(251,191,36,0.25)"
+                        ><BellIcon size={12} /></IconButton>
+                        <IconButton
+                          onClick={() => goToTrade(s.sym)}
+                          title="Quick trade"
+                          color="var(--cyan)" bg="rgba(0,245,212,0.1)" border="rgba(0,245,212,0.25)"
+                        ><BoltIcon size={12} /></IconButton>
+                        <button onClick={() => removeSymbol(s.sym)} style={{
+                          background:'rgba(248,113,113,0.08)', border:'1px solid rgba(248,113,113,0.2)',
+                          color:'var(--red)', borderRadius:6, padding:'4px 10px',
+                          fontSize:11, fontFamily:'JetBrains Mono,monospace', cursor:'pointer',
+                        }}>Remove</button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -291,7 +548,18 @@ export default function Watchlist() {
         </div>
       )}
 
-      <style>{`@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }`}</style>
+      {alertSymbol && (
+        <AlertModal
+          symbol={alertSymbol}
+          onClose={() => setAlertSymbol(null)}
+          onCreated={() => { /* alert list lives on the Alerts page — nothing to refresh here */ }}
+        />
+      )}
+
+      <style>{`
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+        @keyframes livePulse { 0%,100%{opacity:0.4; transform:scale(0.85)} 50%{opacity:1; transform:scale(1.15)} }
+      `}</style>
     </>
   );
 }

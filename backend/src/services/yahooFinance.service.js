@@ -44,6 +44,9 @@ const INTERVAL_MAP = {
   '1d': '1d',
 };
 
+// Reward:Risk multiple appliqué au SL/TP calculé via ATR
+const RR_MULTIPLE = 2;
+
 async function getYFData(symbol, interval = '4h', limit = 100) {
   const yfInterval = INTERVAL_MAP[interval] || '1h';
 
@@ -84,6 +87,54 @@ async function getYFData(symbol, interval = '4h', limit = 100) {
   return { candles, price };
 }
 
+// ── ATR (Average True Range) — mesure de volatilité réelle par symbole ──
+// Utilisé pour calculer stop_loss/take_profit spécifiques à chaque actif,
+// au lieu de laisser ces champs vides (ce qui faisait tomber tous les
+// signaux Forex/Commodity/Indices dans le même fallback basé uniquement
+// sur la confidence — cause du bug des valeurs identiques en Journal).
+function computeATR(candles, period = 14) {
+  if (!candles || candles.length < period + 1) return null;
+
+  const trueRanges = [];
+  for (let i = 1; i < candles.length; i++) {
+    const cur  = candles[i];
+    const prev = candles[i - 1];
+    const tr = Math.max(
+      cur.high - cur.low,
+      Math.abs(cur.high - prev.close),
+      Math.abs(cur.low  - prev.close)
+    );
+    trueRanges.push(tr);
+  }
+
+  const recent = trueRanges.slice(-period);
+  const atr = recent.reduce((a, b) => a + b, 0) / recent.length;
+  return atr > 0 ? atr : null;
+}
+
+// Calcule entry/stop_loss/take_profit à partir de l'ATR. Fallback à 1% du
+// prix si l'ATR ne peut pas être calculé (historique trop court).
+function calcRiskLevels(price, candles, signal) {
+  const atr = computeATR(candles) || price * 0.01;
+
+  if (signal === 'BUY') {
+    return {
+      entry:       price,
+      stop_loss:   price - atr,
+      take_profit: price + atr * RR_MULTIPLE,
+    };
+  }
+  if (signal === 'SELL') {
+    return {
+      entry:       price,
+      stop_loss:   price + atr,
+      take_profit: price - atr * RR_MULTIPLE,
+    };
+  }
+  // HOLD — pas de position, pas de niveaux de risque
+  return { entry: price, stop_loss: null, take_profit: null };
+}
+
 async function generateYFSignal(symbol, interval = '4h') {
   logger.info(`[yahooFinance] Processing ${symbol} (${interval})...`);
 
@@ -116,6 +167,8 @@ async function generateYFSignal(symbol, interval = '4h') {
 
   logger.info(`[yahooFinance] ${meta.display} → ${ai.signal} (${ai.confidence}%)`);
 
+  const { entry, stop_loss, take_profit } = calcRiskLevels(price, candles, ai.signal);
+
   return {
     id:          `${symbol}_${Date.now()}`,
     symbol:      meta.display,
@@ -129,25 +182,49 @@ async function generateYFSignal(symbol, interval = '4h') {
     reasoning:   ai.reasoning,
     score:       { bullish: bull, bearish: bear },
     indicators,
+    // ✅ Fix Bug 3: entry/SL/TP calculés via ATR (volatilité réelle du symbole),
+    // plus jamais null pour un signal BUY/SELL — chaque actif a désormais ses
+    // propres niveaux de risque au lieu de retomber sur le fallback confidence-only.
+    entry,
+    stop_loss,
+    take_profit,
+    risk_reward: ai.signal !== 'HOLD' ? `1:${RR_MULTIPLE}` : null,
   };
 }
 
 // onProgress(symbol) is called after each symbol completes (success or fail),
 // so the caller can track "X/Y done" without waiting for the whole batch.
+//
+// ✅ Fix Bug 8: les 16 symboles étaient traités un par un (300ms d'attente +
+// un appel Groq de 15s de timeout potentiel CHACUN), ce qui pouvait faire
+// durer le scan complet plusieurs minutes et provoquer les "missed execution"
+// du cron toutes les minutes (checkAlerts). On traite maintenant par petits
+// lots parallèles (BATCH_SIZE symboles en même temps) — le total attendu
+// passe de ~16×(fetch+Groq) à ~(16/BATCH_SIZE)×(fetch+Groq).
+const YF_BATCH_SIZE = 4;
+
 async function scanAllYF(interval = '4h', onProgress = () => {}) {
   const symbols = Object.keys(YF_SYMBOLS);
   logger.info(`[yahooFinance] Scanning ${symbols.length} forex/commodities/indices...`);
   const results = [];
 
-  for (const symbol of symbols) {
-    try {
-      const sig = await generateYFSignal(symbol, interval);
-      results.push(sig);
-    } catch (err) {
-      logger.error(`[yahooFinance] ${symbol} error: ${err.message}`);
+  for (let i = 0; i < symbols.length; i += YF_BATCH_SIZE) {
+    const batch = symbols.slice(i, i + YF_BATCH_SIZE);
+    const settled = await Promise.allSettled(batch.map(symbol => generateYFSignal(symbol, interval)));
+
+    settled.forEach((outcome, idx) => {
+      const symbol = batch[idx];
+      if (outcome.status === 'fulfilled') {
+        results.push(outcome.value);
+      } else {
+        logger.error(`[yahooFinance] ${symbol} error: ${outcome.reason?.message}`);
+      }
+      try { onProgress(symbol); } catch { /* never let progress reporting break the scan */ }
+    });
+
+    if (i + YF_BATCH_SIZE < symbols.length) {
+      await new Promise(r => setTimeout(r, 300));
     }
-    try { onProgress(symbol); } catch { /* never let progress reporting break the scan */ }
-    await new Promise(r => setTimeout(r, 300));
   }
 
   return results;

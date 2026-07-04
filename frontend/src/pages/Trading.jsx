@@ -164,6 +164,55 @@ function ConfirmModal({ order, exchange, onConfirm, onCancel }) {
   );
 }
 
+// ── Cancel Order Confirmation Modal ───────────────────────
+// Smaller sibling of ConfirmModal, specifically for cancelling an
+// existing order — prevents a stray click from killing a live order
+// with no way back.
+function CancelConfirmModal({ order, onConfirm, onCancel }) {
+  const [loading, setLoading] = useState(false);
+  const isLive = order.mode === 'live';
+
+  const handle = async () => {
+    setLoading(true);
+    await onConfirm();
+    setLoading(false);
+  };
+
+  return (
+    <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.8)', backdropFilter:'blur(12px)', zIndex:650, display:'flex', alignItems:'center', justifyContent:'center', padding:20 }}
+      onClick={e => e.target === e.currentTarget && onCancel()}>
+      <div style={{
+        background:'#080f1e', borderRadius:18, padding:26, width:340,
+        border:'1px solid rgba(244,63,94,0.3)',
+        boxShadow:'0 0 50px rgba(244,63,94,0.08), 0 28px 56px rgba(0,0,0,0.7)',
+        animation:'aq-slidein .2s ease',
+      }} onClick={e => e.stopPropagation()}>
+        <div style={{ fontSize:15, fontWeight:800, color:'var(--text)', marginBottom:10, textAlign:'center' }}>
+          Cancel this order?
+        </div>
+        <div style={{ background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:10, padding:14, marginBottom:18, ...mono, fontSize:11, color:T.slate, textAlign:'center' }}>
+          <span style={{ color: order.side==='buy'?T.green:T.red, fontWeight:700 }}>{(order.side||'').toUpperCase()}</span>
+          {' '}{order.symbol} × {parseFloat(order.quantity).toFixed(6)}
+          {isLive && <div style={{ color:T.red, marginTop:6 }}>⚡ Live order</div>}
+        </div>
+        <div style={{ display:'flex', gap:10 }}>
+          <button onClick={handle} disabled={loading} style={{
+            flex:1, padding:11, borderRadius:9, cursor: loading ? 'not-allowed' : 'pointer',
+            border:'1px solid rgba(244,63,94,0.4)', background:'rgba(244,63,94,0.12)',
+            color:T.red, fontFamily:'Syne,sans-serif', fontSize:13, fontWeight:800,
+            opacity: loading ? 0.7 : 1,
+          }}>
+            {loading ? '⟳ Cancelling...' : 'Yes, Cancel'}
+          </button>
+          <button onClick={onCancel} style={{ padding:'11px 18px', borderRadius:9, border:'1px solid var(--border)', background:'transparent', color:T.slate, fontFamily:'Syne,sans-serif', fontSize:12, cursor:'pointer' }}>
+            Keep Order
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── TradingView Chart Widget ──────────────────────────────
 function TradingViewChart({ symbol, exchange }) {
   const containerRef = useRef(null);
@@ -544,32 +593,58 @@ function OrderForm({ exchange, symbol, ticker, balance, onOrderPlaced }) {
 
 // ── Orders Panel ──────────────────────────────────────────
 function OrdersPanel({ exchangeId, refresh }) {
-  const [orders,  setOrders]  = useState([]);
-  const [tab,     setTab]     = useState('open');
-  const [loading, setLoading] = useState(true);
+  const [orders,        setOrders]        = useState([]);
+  const [tab,           setTab]           = useState('open');
+  const [loading,       setLoading]       = useState(true);
+  const [pendingCancel, setPendingCancel] = useState(null); // order awaiting cancel confirmation
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (silent = false) => {
     if (!exchangeId) return;
-    setLoading(true);
+    if (!silent) setLoading(true);
     try {
       const res = await api.get(`/trading/orders?exchangeId=${exchangeId}&status=${tab}`);
       if (res.data.success) setOrders(res.data.orders || []);
-    } catch {} finally { setLoading(false); }
+    } catch {} finally { if (!silent) setLoading(false); }
   }, [exchangeId, tab]);
 
   useEffect(() => { load(); }, [load, refresh]);
 
-  const cancel = async (order) => {
+  // Auto-poll open orders every 10s so fills/status changes on the
+  // exchange side show up without a manual refresh click. Closed
+  // orders are historical — no need to poll those repeatedly.
+  useEffect(() => {
+    if (tab !== 'open') return;
+    const iv = setInterval(() => {
+      if (!document.hidden) load(true); // silent = don't flash the skeleton
+    }, 10000);
+    return () => clearInterval(iv);
+  }, [tab, load]);
+
+  const requestCancel = (order) => setPendingCancel(order);
+
+  const confirmCancel = async () => {
+    const order = pendingCancel;
+    if (!order) return;
     try {
       await api.delete(`/trading/orders/${order.id || order.exchange_order_id}?exchangeId=${exchangeId}&mode=${order.mode}`);
       load();
-    } catch {}
+    } catch {} finally {
+      setPendingCancel(null);
+    }
   };
 
   const sideColor = s => s === 'buy' ? T.green : T.red;
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:0 }}>
+      {pendingCancel && (
+        <CancelConfirmModal
+          order={pendingCancel}
+          onConfirm={confirmCancel}
+          onCancel={() => setPendingCancel(null)}
+        />
+      )}
+
       <div style={{ display:'flex', borderBottom:'1px solid rgba(255,255,255,0.05)', marginBottom:14 }}>
         {['open','closed'].map(t => (
           <button key={t} onClick={() => setTab(t)} style={{
@@ -580,6 +655,12 @@ function OrdersPanel({ exchangeId, refresh }) {
             marginBottom:-1, fontWeight: tab===t ? 700 : 400,
           }}>{t}</button>
         ))}
+        {tab === 'open' && (
+          <span style={{ marginLeft:'auto', display:'flex', alignItems:'center', gap:5, ...mono, fontSize:8, color:T.slate, opacity:.6 }}>
+            <span style={{ width:5, height:5, borderRadius:'50%', background:T.green, animation:'aq-pulse 1.6s infinite' }} />
+            live
+          </span>
+        )}
       </div>
 
       {loading ? (
@@ -611,7 +692,7 @@ function OrdersPanel({ exchangeId, refresh }) {
                   {o.price ? ` · $${parseFloat(o.price).toLocaleString()}` : ' · Market'}
                 </span>
                 {tab === 'open' ? (
-                  <button onClick={() => cancel(o)} style={{ ...mono, fontSize:9, padding:'3px 10px', borderRadius:5, cursor:'pointer', border:'1px solid rgba(244,63,94,0.2)', background:'rgba(244,63,94,0.06)', color:T.red }}>
+                  <button onClick={() => requestCancel(o)} style={{ ...mono, fontSize:9, padding:'3px 10px', borderRadius:5, cursor:'pointer', border:'1px solid rgba(244,63,94,0.2)', background:'rgba(244,63,94,0.06)', color:T.red }}>
                     Cancel
                   </button>
                 ) : (

@@ -6,6 +6,11 @@
 const db     = require('../config/db');
 const logger = require('../utils/logger');
 
+// yahoo-finance2 v3+ requires explicit instantiation — instance kept
+// at module scope instead of re-created on every fetchPrice() call.
+const YahooFinance = require('yahoo-finance2').default;
+const yahooFinance  = new YahooFinance({ suppressNotices: ['yahooSurvey'] });
+
 const TYPE_MAP = {
   typePrice:  'price',
   typeRsi:    'rsi',
@@ -30,18 +35,65 @@ const COLORS = {
   percent: 'var(--red)',
 };
 
+// ── Forex/Commodity symbol → Yahoo Finance ticker map ───────
+// Same mapping as watchlist.controller.js — kept in sync manually
+// for now (see refactor note at the bottom of this file).
+const YF_MAP = {
+  'XAU/USD': 'GC=F',     'XAG/USD': 'SI=F',
+  'OIL/USD': 'CL=F',     'EUR/USD':  'EURUSD=X',
+  'GBP/USD': 'GBPUSD=X', 'USD/JPY':  'JPY=X',
+  'USD/CHF': 'CHF=X',    'AUD/USD':  'AUDUSD=X',
+  'SPY':     'SPY',       'QQQ':      'QQQ',
+  'NGAS':    'NG=F',
+};
+
+// Handles symbols stored without a slash (e.g. "EURUSD" → "EUR/USD")
+// so YF_MAP lookups don't silently miss and fall through to an
+// invalid raw ticker (this was causing forex/commodity alerts to
+// always show "—" for current price).
+function normalizeForexSymbol(sym) {
+  if (!sym) return sym;
+  const clean = sym.toUpperCase().trim();
+
+  if (clean.includes('/')) return clean;
+
+  const KNOWN_PAIRS = ['EURUSD', 'GBPUSD', 'USDJPY', 'USDCHF', 'AUDUSD'];
+  if (KNOWN_PAIRS.includes(clean)) {
+    return clean.slice(0, 3) + '/' + clean.slice(3);
+  }
+
+  const COMMODITY_ALIASES = {
+    'XAUUSD': 'XAU/USD',
+    'XAGUSD': 'XAG/USD',
+    'OILUSD': 'OIL/USD',
+    'GOLD':   'XAU/USD',
+    'SILVER': 'XAG/USD',
+  };
+  if (COMMODITY_ALIASES[clean]) return COMMODITY_ALIASES[clean];
+
+  return clean;
+}
+
 async function fetchPrice(symbol) {
+  // Try Yahoo Finance first (forex/commodities/indices/stocks)
   try {
-    const YahooFinance = require('yahoo-finance2').default;
-    const yf    = new YahooFinance({ suppressNotices: ['yahooSurvey'] });
-    const quote = await yf.quote(symbol);
+    const normalized = normalizeForexSymbol(symbol);
+    const yfSym       = YF_MAP[normalized] || YF_MAP[symbol] || normalized;
+    const quote       = await yahooFinance.quote(yfSym);
     if (quote?.regularMarketPrice) return quote.regularMarketPrice;
-  } catch {}
+  } catch (err) {
+    logger.error(`[alerts] fetchPrice yahoo(${symbol}): ${err.message}`);
+  }
+
+  // Fallback: Binance (crypto)
   try {
     const res  = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}USDT`);
     const data = await res.json();
     if (data?.price) return parseFloat(data.price);
-  } catch {}
+  } catch (err) {
+    logger.error(`[alerts] fetchPrice binance(${symbol}): ${err.message}`);
+  }
+
   return null;
 }
 
@@ -265,3 +317,9 @@ async function resetAlert(req, res) {
 }
 
 module.exports = { getAlerts, getHistory, createAlert, deleteAlert, togglePause, resetAlert };
+
+// ── Refactor note ─────────────────────────────────────────
+// YF_MAP + normalizeForexSymbol are now duplicated in both
+// watchlist.controller.js and this file. Worth extracting to a
+// shared services/symbolMap.service.js next time either one
+// needs a new symbol added, so both stay in sync automatically.

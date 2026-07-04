@@ -18,22 +18,18 @@ const cmcClient = axios.create({
 const blockchainClient = axios.create({ baseURL: env.BLOCKCHAIN_URL, timeout: 20000 });
 
 // ── Shared Binance exchange instance (singleton-promise pattern) ──
-// ccxt is NOT required at the top level — it's ~50MB and crashes
-// the heap if loaded at startup. It's required lazily here instead.
-// Using a shared in-flight promise prevents concurrent requests from
-// racing to create multiple instances or reading a half-reset `null`.
 let _exchange        = null;
 let _exchangePromise = null;
 
 async function createBinanceExchange() {
-  const ccxt = require("ccxt"); // ← lazy: only loaded on first actual use
+  const ccxt = require("ccxt");
   const ex = new ccxt.binance({
     apiKey: env.BINANCE_API_KEY,
     secret: env.BINANCE_API_SECRET,
     options: {
       defaultType:             "spot",
       adjustForTimeDifference: true,
-      recvWindow:              60000, // wider window — tolerates clock drift
+      recvWindow:              60000,
     },
     enableRateLimit: true,
   });
@@ -47,7 +43,7 @@ async function createBinanceExchange() {
 
 async function getBinanceExchange() {
   if (_exchange) return _exchange;
-  if (_exchangePromise) return _exchangePromise; // already being created — wait on it
+  if (_exchangePromise) return _exchangePromise;
 
   _exchangePromise = createBinanceExchange()
     .then(ex => {
@@ -109,11 +105,10 @@ const fetchTicker = async (symbol = "BTC/USDT") => {
 };
 
 // ── Batch ticker fetch (single round-trip instead of N) ────
-// Retries once automatically on clock-drift (-1021) errors.
 const fetchMultipleTickers = async (symbols, _isRetry = false) => {
   try {
     const exchange = await getBinanceExchange();
-    const tickers  = await exchange.fetchTickers(symbols); // ← single batch call
+    const tickers  = await exchange.fetchTickers(symbols);
     const results  = {};
     for (const [sym, ticker] of Object.entries(tickers)) {
       results[sym] = {
@@ -132,7 +127,7 @@ const fetchMultipleTickers = async (symbols, _isRetry = false) => {
       resetBinanceExchange();
       if (!_isRetry) {
         await new Promise(r => setTimeout(r, 300));
-        return fetchMultipleTickers(symbols, true); // retry once after resync
+        return fetchMultipleTickers(symbols, true);
       }
     }
     return {};
@@ -275,11 +270,29 @@ const fetchTrendingCMC = async (limit = 10) => {
   }
 };
 
+// ✅ Fix: fetchFearGreedIndex n'avait aucun cache — chaque appel à
+// fetchAllMarkets() (déclenché en boucle par le polling websocket) refaisait
+// un appel réseau vers alternative.me. Quand cette API externe est down/rate-
+// limited (502), ça spamme les logs à chaque cycle de poll et ça ajoute une
+// latence réseau inutile pour une donnée qui ne change qu'une fois par jour.
+// On ajoute : (1) un cache TTL de 30 min (largement suffisant, l'index F&G
+// est mis à jour ~1×/jour), (2) un fallback sur la dernière valeur connue si
+// l'API échoue (mieux qu'un widget vide), (3) un throttle des logs d'erreur
+// pour ne pas noyer la console si l'API reste down longtemps.
+const FNG_TTL = 30 * 60 * 1000; // 30 min
+let fngCache        = null;
+let fngCacheStamp   = 0;
+let fngLastErrorLog = 0;
+const FNG_ERROR_LOG_INTERVAL = 5 * 60 * 1000; // ne log l'erreur qu'une fois toutes les 5 min
+
 const fetchFearGreedIndex = async () => {
+  const isFresh = fngCache && (Date.now() - fngCacheStamp < FNG_TTL);
+  if (isFresh) return fngCache;
+
   try {
-    const { data } = await axios.get("https://api.alternative.me/fng/?limit=7");
+    const { data } = await axios.get("https://api.alternative.me/fng/?limit=7", { timeout: 10000 });
     const latest = data.data[0];
-    return {
+    const result = {
       value:   parseInt(latest.value),
       label:   latest.value_classification,
       history: data.data.map(d => ({
@@ -288,9 +301,16 @@ const fetchFearGreedIndex = async () => {
         date:  new Date(parseInt(d.timestamp) * 1000).toISOString().split("T")[0],
       })),
     };
+    fngCache      = result;
+    fngCacheStamp = Date.now();
+    return result;
   } catch (error) {
-    logger.error(`❌ Fear & Greed error: ${error.message}`);
-    return null;
+    if (Date.now() - fngLastErrorLog > FNG_ERROR_LOG_INTERVAL) {
+      logger.error(`❌ Fear & Greed error: ${error.message} (silencié ${FNG_ERROR_LOG_INTERVAL / 60000}min)`);
+      fngLastErrorLog = Date.now();
+    }
+    // Fallback : mieux vaut une valeur périmée qu'un widget vide
+    return fngCache || null;
   }
 };
 
@@ -324,14 +344,14 @@ const FOREX_PAIRS = {
 };
 
 const COMMODITY_PAIRS = {
-  XAUUSD:  "GC=F",  // Gold
-  XAGUSD:  "SI=F",  // Silver
-  WTI:     "CL=F",  // Crude Oil WTI
-  BRENT:   "BZ=F",  // Brent Crude
-  NATGAS:  "NG=F",  // Natural Gas
+  XAUUSD:  "GC=F",
+  XAGUSD:  "SI=F",
+  WTI:     "CL=F",
+  BRENT:   "BZ=F",
+  NATGAS:  "NG=F",
   COPPER:  "HG=F",
-  XPTUSD:  "PL=F",  // Platinum
-  XPDUSD:  "PA=F",  // Palladium
+  XPTUSD:  "PL=F",
+  XPDUSD:  "PA=F",
   CORN:    "ZC=F",
   WHEAT:   "ZW=F",
   SOYBEAN: "ZS=F",
@@ -360,9 +380,9 @@ const fetchYahooTicker = async (displaySymbol, yahooSymbol) => {
 // ── Batch Yahoo fetch (single round-trip instead of N) ─────
 const fetchMultipleYahooTickers = async (pairMap) => {
   try {
-    const entries      = Object.entries(pairMap); // [[displaySymbol, yahooSymbol], ...]
+    const entries      = Object.entries(pairMap);
     const yahooSymbols = entries.map(([, ySym]) => ySym);
-    const quotes       = await yahooFinance.quote(yahooSymbols); // ← single batch call
+    const quotes       = await yahooFinance.quote(yahooSymbols);
     const quoteArr     = Array.isArray(quotes) ? quotes : [quotes];
 
     const bySymbol = Object.fromEntries(quoteArr.filter(Boolean).map(q => [q.symbol, q]));
@@ -390,8 +410,6 @@ const fetchMultipleYahooTickers = async (pairMap) => {
 const getForexPrices      = () => fetchMultipleYahooTickers(FOREX_PAIRS);
 const getCommodityPrices  = () => fetchMultipleYahooTickers(COMMODITY_PAIRS);
 
-// Yahoo intraday history is capped (~7 days), so 4h candles are
-// aggregated client-side from 60m candles.
 const YAHOO_INTERVAL_MAP = { "15m": "15m", "1h": "60m", "4h": "60m", "1d": "1d" };
 
 const aggregateTo4h = (hourly) => {
@@ -497,7 +515,6 @@ module.exports = {
   fetchLowCapGems, fetchGlobalMarket,
   fetchTrendingCMC, fetchFearGreedIndex,
   fetchBitcoinOnChain, fetchAllMarkets,
-  // forex / commodities
   FOREX_PAIRS, COMMODITY_PAIRS,
   getForexPrices, getCommodityPrices,
   detectAssetType, getUnifiedCandles, getUnifiedStats,
