@@ -1,10 +1,15 @@
 import { useState, useEffect } from 'react';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip,
-         ResponsiveContainer, CartesianGrid, ReferenceLine, Cell } from 'recharts';
+         ResponsiveContainer, CartesianGrid, ReferenceLine, Cell,
+         ScatterChart, Scatter } from 'recharts';
 import api from '../services/api';
 
 const PERIODS = ['1M','3M','6M','1Y','All'];
-const EMPTY = { kpis:[], equity:[], monthly:[], trades:[], attribution:[], byDow:[], rolling:[], fingerprint:[], distribution:{ buy:0, sell:0, hold:0, total:0 } };
+const EMPTY = {
+  kpis:[], equity:[], monthly:[], trades:[], attribution:[], byDow:[], rolling:[], fingerprint:[],
+  distribution:{ buy:0, sell:0, hold:0, total:0 },
+  confidenceOutcome: [], confidenceCorrelation: 0,
+};
 
 const tt = {
   contentStyle:{
@@ -76,6 +81,9 @@ function MiniRadar({ data }) {
 
 export default function Analytics() {
   const [period, setPeriod] = useState('1M');
+  // ✅ Drill-down: classe sélectionnée via clic sur une ligne Attribution.
+  // null = aucun filtre, toutes les métriques portent sur l'ensemble des signaux.
+  const [selectedClass, setSelectedClass] = useState(null);
   const [data,   setData]   = useState(EMPTY);
   const [loading,setLoading]= useState(true);
   const [error,  setError]  = useState(null);
@@ -84,6 +92,7 @@ export default function Analytics() {
     let cancelled = false;
     setLoading(true); setError(null);
     const params = period === 'All' ? {} : { period };
+    if (selectedClass) params.class = selectedClass;
     api.get('/signals/analytics', { params })
       .then(res => {
         if (cancelled) return;
@@ -102,12 +111,20 @@ export default function Analytics() {
           distribution: d.distribution && typeof d.distribution === 'object'
             ? d.distribution
             : { buy: 0, sell: 0, hold: 0, total: 0 },
+          // ✅ Feature: Confidence vs Outcome — nuage de points confidence IA / P&L réel.
+          confidenceOutcome:     Array.isArray(d.confidenceOutcome) ? d.confidenceOutcome : [],
+          confidenceCorrelation: typeof d.confidenceCorrelation === 'number' ? d.confidenceCorrelation : 0,
         });
       })
       .catch(err => { if (!cancelled) setError(err.response?.data?.error || 'Erreur analytics'); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [period]);
+  }, [period, selectedClass]);
+
+  // ✅ Drill-down: clic sur une ligne Attribution → filtre, ou déselectionne si déjà active
+  const toggleClassFilter = (name) => {
+    setSelectedClass(prev => (prev === name ? null : name));
+  };
 
   if (loading) return (
     <div style={{display:'flex',flexDirection:'column',gap:12}}>
@@ -139,7 +156,23 @@ export default function Analytics() {
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:4}}>
         <div>
           <div style={{fontSize:10,letterSpacing:'.18em',color:'var(--text-muted)',textTransform:'uppercase',fontFamily:'JetBrains Mono,monospace',marginBottom:2}}>// Performance Analytics</div>
-          <div style={{fontSize:10,color:'var(--text-secondary)',fontFamily:'JetBrains Mono,monospace'}}>Métriques temps réel · Signals · R:R</div>
+          <div style={{fontSize:10,color:'var(--text-secondary)',fontFamily:'JetBrains Mono,monospace',display:'flex',alignItems:'center',gap:8}}>
+            Métriques temps réel · Signals · R:R
+            {selectedClass && (
+              <span style={{
+                display:'inline-flex', alignItems:'center', gap:6,
+                background:'rgba(0,245,212,0.08)', border:'1px solid rgba(0,245,212,0.25)',
+                borderRadius:6, padding:'2px 8px', color:'var(--cyan)', fontSize:9,
+              }}>
+                Filtré: {selectedClass}
+                <span
+                  onClick={() => setSelectedClass(null)}
+                  style={{cursor:'pointer', opacity:0.7, fontWeight:700}}
+                  title="Retirer le filtre"
+                >✕</span>
+              </span>
+            )}
+          </div>
         </div>
         <div style={{display:'flex',gap:3,background:'rgba(255,255,255,0.02)',border:'1px solid var(--border)',borderRadius:9,padding:3}}>
           {PERIODS.map(p=>(
@@ -157,7 +190,9 @@ export default function Analytics() {
 
       {data.kpis.length === 0 ? (
         <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,padding:'32px',textAlign:'center',fontFamily:'JetBrains Mono,monospace',fontSize:12,color:'var(--text-muted)'}}>
-          Aucun signal. Lancez un scan pour générer des données.
+          {selectedClass
+            ? <>Aucun signal pour <strong style={{color:'var(--cyan)'}}>{selectedClass}</strong> sur cette période. <span onClick={() => setSelectedClass(null)} style={{color:'var(--cyan)', cursor:'pointer', textDecoration:'underline'}}>Retirer le filtre</span></>
+            : 'Aucun signal. Lancez un scan pour générer des données.'}
         </div>
       ) : (
         <>
@@ -450,12 +485,13 @@ export default function Analytics() {
             </div>
           </div>
 
-          {/* ── Row 4: Attribution — compact table ── */}
+          {/* ── Row 4: Attribution — compact table, cliquable (drill-down) ── */}
           {data.attribution.length > 0 && (
             <div className="panel" style={{padding:18}}>
               <div style={{fontSize:12,fontWeight:600,marginBottom:14,display:'flex',alignItems:'center',gap:7}}>
                 <div style={{width:5,height:5,borderRadius:'50%',background:'var(--amber)'}}/>
                 Attribution P&L · Classe d'Actifs
+                <span style={{fontSize:9,color:'var(--text-muted)',fontWeight:400,marginLeft:4}}>— cliquez une ligne pour filtrer</span>
               </div>
               <table style={{width:'100%',borderCollapse:'collapse'}}>
                 <thead>
@@ -466,21 +502,29 @@ export default function Analytics() {
                   </tr>
                 </thead>
                 <tbody>
-                  {data.attribution.map((a,i)=>(
+                  {data.attribution.map((a,i)=>{
+                    const isSelected = selectedClass === a.name;
+                    return (
                     <tr key={a.name}
-                      onMouseEnter={e=>e.currentTarget.style.background='rgba(255,255,255,0.02)'}
-                      onMouseLeave={e=>e.currentTarget.style.background='transparent'}
-                      style={{transition:'background .1s'}}
+                      onClick={() => toggleClassFilter(a.name)}
+                      onMouseEnter={e=>{ if (!isSelected) e.currentTarget.style.background='rgba(255,255,255,0.02)'; }}
+                      onMouseLeave={e=>{ if (!isSelected) e.currentTarget.style.background='transparent'; }}
+                      style={{
+                        transition:'background .1s', cursor:'pointer',
+                        background: isSelected ? 'rgba(0,245,212,0.06)' : 'transparent',
+                      }}
+                      title={isSelected ? `Retirer le filtre ${a.name}` : `Filtrer sur ${a.name}`}
                     >
                       {/* Classe */}
-                      <td style={{padding:'10px',borderBottom:'1px solid rgba(255,255,255,0.03)'}}>
+                      <td style={{padding:'10px',borderBottom: isSelected ? '1px solid rgba(0,245,212,0.2)' : '1px solid rgba(255,255,255,0.03)'}}>
                         <div style={{display:'flex',alignItems:'center',gap:8}}>
-                          <div style={{width:3,height:20,borderRadius:2,background:a.color,opacity:0.8,flexShrink:0}}/>
+                          <div style={{width:3,height:20,borderRadius:2,background:a.color,opacity: isSelected ? 1 : 0.8,flexShrink:0}}/>
                           <span style={{fontSize:11,fontWeight:700,color:a.color,fontFamily:'JetBrains Mono,monospace'}}>{a.name}</span>
+                          {isSelected && <span style={{fontSize:8,color:'var(--cyan)'}}>●</span>}
                         </div>
                       </td>
                       {/* Allocation bar */}
-                      <td style={{padding:'10px',borderBottom:'1px solid rgba(255,255,255,0.03)',width:160}}>
+                      <td style={{padding:'10px',borderBottom: isSelected ? '1px solid rgba(0,245,212,0.2)' : '1px solid rgba(255,255,255,0.03)',width:160}}>
                         <div style={{display:'flex',alignItems:'center',gap:8}}>
                           <div style={{flex:1,height:4,background:'rgba(255,255,255,0.05)',borderRadius:2,overflow:'hidden'}}>
                             <div style={{height:'100%',width:`${a.pct}%`,background:a.color,borderRadius:2,opacity:0.7,transition:'width .6s'}}/>
@@ -492,11 +536,11 @@ export default function Analytics() {
                       {[a.total, (Math.round(a.winRate*10)/10)+'%', (Math.round(a.avgConf))+'%', a.avgRR > 0 ? `1:${a.avgRR}` : '—'].map((v,j)=>(
                         <td key={j} style={{padding:'10px',textAlign:'center',fontSize:11,fontWeight:600,fontFamily:'JetBrains Mono,monospace',
                           color: j===1 ? (a.winRate>=60?'var(--green)':a.winRate>=45?'var(--amber)':'var(--red)') : 'var(--text-primary)',
-                          borderBottom:'1px solid rgba(255,255,255,0.03)'
+                          borderBottom: isSelected ? '1px solid rgba(0,245,212,0.2)' : '1px solid rgba(255,255,255,0.03)'
                         }}>{v}</td>
                       ))}
                     </tr>
-                  ))}
+                  );})}
                 </tbody>
               </table>
             </div>
@@ -588,7 +632,96 @@ export default function Analytics() {
             </div>
           )}
 
-          {/* ── Row 6: Strategy Fingerprint — compact horizontal ── */}
+          {/* ── Row 6: Confidence vs Outcome — la confidence IA est-elle fiable ? ── */}
+          {data.confidenceOutcome.length > 0 && (() => {
+            const corr = data.confidenceCorrelation;
+            const absCorr = Math.abs(corr);
+            const corrLabel = absCorr >= 0.5 ? 'forte' : absCorr >= 0.25 ? 'modérée' : 'faible';
+            const corrColor = absCorr >= 0.5 ? 'var(--green)' : absCorr >= 0.25 ? 'var(--amber)' : 'var(--red)';
+
+            // ✅ Fix: plusieurs signaux partagent souvent la même confidence/pnl exacts
+            // (calculs basés sur des formules à valeurs discrètes), ce qui les empile
+            // visuellement au même endroit sur le nuage de points. On ajoute un jitter
+            // déterministe (basé sur un hash du symbole, pas Math.random — sinon les
+            // points sauteraient à chaque re-render) pour les séparer visuellement.
+            // Les valeurs réelles restent affichées telles quelles dans le tooltip.
+            function seededJitter(str, range) {
+              let hash = 0;
+              for (let i = 0; i < str.length; i++) {
+                hash = (hash << 5) - hash + str.charCodeAt(i);
+                hash |= 0;
+              }
+              const normalized = (Math.abs(hash) % 1000) / 1000; // 0..1
+              return (normalized - 0.5) * 2 * range; // -range..range
+            }
+            const withJitter = (p, idx) => {
+              const seed = `${p.symbol}-${p.confidence}-${p.pnl}-${idx}`;
+              const jitteredConfidence = Math.max(0, Math.min(100, p.confidence + seededJitter(seed, 1.8)));
+              const jitteredPnl = p.pnl + seededJitter(seed + 'y', Math.max(0.3, Math.abs(p.pnl) * 0.06));
+              return { ...p, confidence: jitteredConfidence, pnl: jitteredPnl, realConfidence: p.confidence, realPnl: p.pnl };
+            };
+            const buyPoints  = data.confidenceOutcome.filter(p => p.signal === 'BUY').map(withJitter);
+            const sellPoints = data.confidenceOutcome.filter(p => p.signal === 'SELL').map(withJitter);
+
+            return (
+              <div className="panel" style={{padding:18}}>
+                <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:4}}>
+                  <div style={{fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:7}}>
+                    <div style={{width:5,height:5,borderRadius:'50%',background:'var(--cyan)'}}/>
+                    Confidence vs Outcome
+                    <span style={{fontSize:9,color:'var(--text-muted)',fontWeight:400}}>— confidence IA vs résultat réel (BUY/SELL uniquement)</span>
+                  </div>
+                  <div style={{display:'flex',gap:12,fontSize:9,fontFamily:'JetBrains Mono,monospace'}}>
+                    <span style={{display:'flex',alignItems:'center',gap:4}}>
+                      <span style={{width:7,height:7,borderRadius:'50%',background:'var(--green)',display:'inline-block'}}/>
+                      <span style={{color:'var(--green)'}}>BUY</span>
+                    </span>
+                    <span style={{display:'flex',alignItems:'center',gap:4}}>
+                      <span style={{width:7,height:7,borderRadius:'50%',background:'var(--red)',display:'inline-block'}}/>
+                      <span style={{color:'var(--red)'}}>SELL</span>
+                    </span>
+                  </div>
+                </div>
+                <ResponsiveContainer width="100%" height={220}>
+                  <ScatterChart margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.03)"/>
+                    <XAxis type="number" dataKey="confidence" name="Confidence" unit="%" domain={[0,100]}
+                      tick={{fontSize:8,fill:'#475569',fontFamily:'JetBrains Mono,monospace'}}/>
+                    <YAxis type="number" dataKey="pnl" name="P&L" unit="%"
+                      tick={{fontSize:8,fill:'#475569',fontFamily:'JetBrains Mono,monospace'}}/>
+                    <ReferenceLine y={0} stroke="rgba(255,255,255,0.12)" strokeWidth={1}/>
+                    <Tooltip {...tt} cursor={{ strokeDasharray: '3 3' }}
+                      content={({ active, payload }) => {
+                        if (!active || !payload?.length) return null;
+                        const p = payload[0].payload;
+                        return (
+                          <div style={tt.contentStyle}>
+                            <div style={{padding:'6px 10px'}}>
+                              <div style={{color:'var(--cyan)',fontWeight:700,marginBottom:2}}>{p.symbol} · {p.signal}</div>
+                              <div>Confidence: {p.realConfidence}%</div>
+                              <div style={{color: p.realPnl >= 0 ? 'var(--green)' : 'var(--red)'}}>P&L: {p.realPnl >= 0 ? '+' : ''}{p.realPnl}%</div>
+                            </div>
+                          </div>
+                        );
+                      }}
+                    />
+                    <Scatter data={buyPoints}  fill="var(--green)" opacity={0.55} r={3}/>
+                    <Scatter data={sellPoints} fill="var(--red)"   opacity={0.55} r={3}/>
+                  </ScatterChart>
+                </ResponsiveContainer>
+                <div style={{marginTop:10,padding:'8px 12px',background:'rgba(0,245,212,0.04)',border:'1px solid rgba(0,245,212,0.1)',borderRadius:7,fontSize:10,color:'var(--text-secondary)',lineHeight:1.5}}>
+                  Corrélation confidence/résultat : <span style={{color:corrColor,fontWeight:700}}>r = {corr}</span> ({corrLabel}).{' '}
+                  {absCorr < 0.25
+                    ? 'La confidence IA ne prédit pas bien le résultat réel sur cette période — à surveiller.'
+                    : corr > 0
+                      ? 'Plus la confidence est haute, meilleur est le résultat — cohérent.'
+                      : 'Corrélation négative inattendue — la confidence élevée coïncide avec de moins bons résultats.'}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* ── Row 7: Strategy Fingerprint — compact horizontal ── */}
           {data.fingerprint.length > 0 && (
             <div className="panel" style={{padding:18}}>
               <div style={{fontSize:12,fontWeight:600,marginBottom:14,display:'flex',alignItems:'center',gap:7}}>

@@ -77,6 +77,33 @@ const IconButton = ({ onClick, title, color, bg, border, children }) => (
   </button>
 );
 
+// ── Toast notification (lightweight, no external deps) ──────
+const Toast = ({ message, type = 'success', onDone }) => {
+  useEffect(() => {
+    const t = setTimeout(onDone, 3000);
+    return () => clearTimeout(t);
+  }, [onDone]);
+
+  const cfg = {
+    success: { bg:'rgba(52,211,153,0.12)', border:'rgba(52,211,153,0.3)', color:'var(--green)', icon:'✓' },
+    error:   { bg:'rgba(248,113,113,0.12)', border:'rgba(248,113,113,0.3)', color:'var(--red)',  icon:'✕' },
+  }[type];
+
+  return (
+    <div style={{
+      position:'fixed', bottom:24, right:24, zIndex:1100,
+      display:'flex', alignItems:'center', gap:10,
+      background:'var(--surface)', border:`1px solid ${cfg.border}`,
+      borderRadius:10, padding:'12px 18px', boxShadow:'0 8px 24px rgba(0,0,0,0.4)',
+    }}>
+      <span style={{ color:cfg.color, fontSize:14, fontWeight:700 }}>{cfg.icon}</span>
+      <span style={{ fontSize:12, fontFamily:'JetBrains Mono,monospace', color:'var(--text-primary)' }}>
+        {message}
+      </span>
+    </div>
+  );
+};
+
 // ── Quick Alert Modal ────────────────────────────────────────
 const AlertModal = ({ symbol, onClose, onCreated }) => {
   const [condition, setCondition] = useState('above');
@@ -189,6 +216,7 @@ export default function Watchlist() {
   const [showAdd,     setShowAdd]     = useState(false);
   const [sortBy,      setSortBy]      = useState('none'); // 'none' | 'change-desc' | 'change-asc'
   const [alertSymbol, setAlertSymbol] = useState(null);   // symbol currently targeted by the alert modal
+  const [toast,       setToast]       = useState(null);   // { message, type } | null
   const [flash,       setFlash]       = useState({});     // { [sym]: 'up' | 'down' } — brief price-move highlight
 
   const prevPrices = useRef({}); // holds last-seen price per symbol, used only to detect direction of change
@@ -274,7 +302,9 @@ export default function Watchlist() {
   const goToTrade = (sym) => {
     // Reuses the existing Trading page form instead of duplicating
     // order-placement UI here — prefill via query param.
-    navigate(`/trading?symbol=${encodeURIComponent(sym)}`);
+    // Trading.jsx appends "USDT" itself, so strip it here to avoid "BTCUSDTUSDT".
+    const cleanSymbol = sym.replace(/USDT$/, '');
+    navigate(`/trading?symbol=${encodeURIComponent(cleanSymbol)}`);
   };
 
   return (
@@ -420,11 +450,14 @@ export default function Watchlist() {
                     title="Set price alert"
                     color="var(--amber)" bg="rgba(251,191,36,0.1)" border="rgba(251,191,36,0.25)"
                   ><BellIcon /></IconButton>
-                  <IconButton
-                    onClick={() => goToTrade(s.sym)}
-                    title="Quick trade"
-                    color="var(--cyan)" bg="rgba(0,245,212,0.1)" border="rgba(0,245,212,0.25)"
-                  ><BoltIcon /></IconButton>
+                  {/* Quick trade only supports crypto — Trading page order form is Binance/ccxt based */}
+                  {!s.sym.includes('/') && (
+                    <IconButton
+                      onClick={() => goToTrade(s.sym)}
+                      title="Quick trade"
+                      color="var(--cyan)" bg="rgba(0,245,212,0.1)" border="rgba(0,245,212,0.25)"
+                    ><BoltIcon /></IconButton>
+                  )}
                   <IconButton
                     onClick={() => removeSymbol(s.sym)}
                     title="Remove from watchlist"
@@ -528,11 +561,13 @@ export default function Watchlist() {
                           title="Set price alert"
                           color="var(--amber)" bg="rgba(251,191,36,0.1)" border="rgba(251,191,36,0.25)"
                         ><BellIcon size={12} /></IconButton>
-                        <IconButton
-                          onClick={() => goToTrade(s.sym)}
-                          title="Quick trade"
-                          color="var(--cyan)" bg="rgba(0,245,212,0.1)" border="rgba(0,245,212,0.25)"
-                        ><BoltIcon size={12} /></IconButton>
+                        {!s.sym.includes('/') && (
+                          <IconButton
+                            onClick={() => goToTrade(s.sym)}
+                            title="Quick trade"
+                            color="var(--cyan)" bg="rgba(0,245,212,0.1)" border="rgba(0,245,212,0.25)"
+                          ><BoltIcon size={12} /></IconButton>
+                        )}
                         <button onClick={() => removeSymbol(s.sym)} style={{
                           background:'rgba(248,113,113,0.08)', border:'1px solid rgba(248,113,113,0.2)',
                           color:'var(--red)', borderRadius:6, padding:'4px 10px',
@@ -552,8 +587,12 @@ export default function Watchlist() {
         <AlertModal
           symbol={alertSymbol}
           onClose={() => setAlertSymbol(null)}
-          onCreated={() => { /* alert list lives on the Alerts page — nothing to refresh here */ }}
+          onCreated={() => setToast({ message: `Alert created for ${alertSymbol}`, type: 'success' })}
         />
+      )}
+
+      {toast && (
+        <Toast message={toast.message} type={toast.type} onDone={() => setToast(null)} />
       )}
 
       <style>{`

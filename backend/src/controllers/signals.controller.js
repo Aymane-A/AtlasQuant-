@@ -209,7 +209,7 @@ function getDow(dateStr) {
 // ── getAnalyticsData ──────────────────────────────────────
 async function getAnalyticsData(req, res) {
     try {
-        const { period } = req.query;
+        const { period, class: filterClass } = req.query;
         const days = PERIOD_DAYS[period];
 
         const query = days
@@ -222,15 +222,36 @@ async function getAnalyticsData(req, res) {
                       stop_loss, take_profit, risk_reward, created_at, asset_class
                FROM signals ORDER BY created_at DESC`;
 
-        const { rows: signals } = days
+        const { rows: allSignals } = days
             ? await db.query(query, [days])
             : await db.query(query);
+
+        if (!allSignals.length) {
+            return res.json({
+                success: true, kpis: [], equity: [], monthly: [], trades: [],
+                attribution: [], byDow: [], rolling: [], fingerprint: [],
+                distribution: { buy: 0, sell: 0, hold: 0, total: 0 },
+                confidenceOutcome: [], confidenceCorrelation: 0,
+                selectedClass: filterClass || null,
+            });
+        }
+
+        // ✅ Drill-down: si une classe est sélectionnée (clic sur une ligne Attribution
+        // côté frontend), on filtre le jeu de données utilisé pour TOUTES les métriques
+        // principales (KPIs, equity, journal, fingerprint, etc). L'Attribution elle-même
+        // reste calculée sur `allSignals` (voir plus bas) pour rester utilisable comme
+        // "menu" de navigation même quand un filtre est actif.
+        const signals = filterClass
+            ? allSignals.filter(s => classifyAsset(s.symbol, s.asset_class) === filterClass)
+            : allSignals;
 
         if (!signals.length) {
             return res.json({
                 success: true, kpis: [], equity: [], monthly: [], trades: [],
                 attribution: [], byDow: [], rolling: [], fingerprint: [],
                 distribution: { buy: 0, sell: 0, hold: 0, total: 0 },
+                confidenceOutcome: [], confidenceCorrelation: 0,
+                selectedClass: filterClass || null,
             });
         }
 
@@ -376,8 +397,11 @@ async function getAnalyticsData(req, res) {
         });
 
         // ── P&L Attribution by asset class (utilise asset_class réel, fallback si null) ──
+        // ✅ Drill-down: calculée sur allSignals (jamais filtrée) pour que la table reste
+        // un menu de navigation complet, même quand `signals` est restreint à une classe.
+        const allTotal = allSignals.length;
         const classMap = {};
-        signals.forEach(s => {
+        allSignals.forEach(s => {
             const cls = classifyAsset(s.symbol, s.asset_class);
             if (!classMap[cls]) classMap[cls] = { total: 0, win: 0, buy: 0, sell: 0, confSum: 0, rrSum: 0, rrCount: 0 };
             classMap[cls].total++;
@@ -407,7 +431,7 @@ async function getAnalyticsData(req, res) {
         const attribution = Object.entries(classMap).map(([name, v]) => ({
             name,
             total:   v.total,
-            pct:     parseFloat(((v.total / total) * 100).toFixed(1)),
+            pct:     parseFloat(((v.total / allTotal) * 100).toFixed(1)),
             winRate: parseFloat(((v.win / v.total) * 100).toFixed(1)),
             avgConf: parseFloat((v.confSum / v.total).toFixed(0)),
             avgRR:   v.rrCount > 0 ? parseFloat((v.rrSum / v.rrCount).toFixed(2)) : 0,
@@ -504,7 +528,44 @@ async function getAnalyticsData(req, res) {
             { metric: 'Activité',        value: parseFloat(Math.min(100, activityScore).toFixed(1)), max: 100 },
         ];
 
-        res.json({ success: true, kpis, equity, monthly, trades, attribution, byDow, rolling: rollingDeduped, fingerprint, distribution });
+        // ── Confidence vs Outcome — l'IA a-t-elle raison d'être confiante ? ──
+        // On exclut les HOLD : calcPnlPct() renvoie toujours 0 pour un HOLD (pas de
+        // position prise), donc les inclure écraserait le nuage de points sur une
+        // ligne plate à y=0 sans rien dire sur la fiabilité de la confidence.
+        const confidenceOutcome = signals
+            .filter(s => s.signal !== 'HOLD')
+            .map(s => ({
+                confidence: s.confidence || 0,
+                pnl:        parseFloat(calcPnlPct(s).toFixed(2)),
+                signal:     s.signal,
+                symbol:     s.symbol,
+            }));
+
+        function pearsonCorrelation(points) {
+            const n = points.length;
+            if (n < 2) return 0;
+            const xs = points.map(p => p.confidence);
+            const ys = points.map(p => p.pnl);
+            const meanX = xs.reduce((a, b) => a + b, 0) / n;
+            const meanY = ys.reduce((a, b) => a + b, 0) / n;
+            let num = 0, denX = 0, denY = 0;
+            for (let i = 0; i < n; i++) {
+                const dx = xs[i] - meanX, dy = ys[i] - meanY;
+                num  += dx * dy;
+                denX += dx * dx;
+                denY += dy * dy;
+            }
+            const den = Math.sqrt(denX * denY);
+            return den > 0 ? num / den : 0;
+        }
+        const confidenceCorrelation = parseFloat(pearsonCorrelation(confidenceOutcome).toFixed(2));
+
+        res.json({
+            success: true, kpis, equity, monthly, trades, attribution, byDow,
+            rolling: rollingDeduped, fingerprint, distribution,
+            confidenceOutcome, confidenceCorrelation,
+            selectedClass: filterClass || null,
+        });
 
     } catch (err) {
         logger.error(`[analytics] ${err.message}`);

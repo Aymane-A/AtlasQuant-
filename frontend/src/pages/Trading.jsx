@@ -165,9 +165,6 @@ function ConfirmModal({ order, exchange, onConfirm, onCancel }) {
 }
 
 // ── Cancel Order Confirmation Modal ───────────────────────
-// Smaller sibling of ConfirmModal, specifically for cancelling an
-// existing order — prevents a stray click from killing a live order
-// with no way back.
 function CancelConfirmModal({ order, onConfirm, onCancel }) {
   const [loading, setLoading] = useState(false);
   const isLive = order.mode === 'live';
@@ -218,7 +215,6 @@ function TradingViewChart({ symbol, exchange }) {
   const containerRef = useRef(null);
   const widgetRef    = useRef(null);
 
-  // Map exchange id to TradingView exchange prefix
   const TV_EXCHANGE_MAP = {
     binance:'BINANCE', bybit:'BYBIT', okx:'OKX', kucoin:'KUCOIN',
     kraken:'KRAKEN', mexc:'MEXC', gate:'GATEIO', htx:'HUOBI',
@@ -230,10 +226,8 @@ function TradingViewChart({ symbol, exchange }) {
   useEffect(() => {
     if (!containerRef.current) return;
 
-    // Clear previous widget
     containerRef.current.innerHTML = '';
 
-    // Load TradingView widget script
     const script = document.createElement('script');
     script.src   = 'https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js';
     script.type  = 'text/javascript';
@@ -286,7 +280,7 @@ function TradingViewChart({ symbol, exchange }) {
   );
 }
 
-// ── Fallback mini chart (ila TV machi load) ───────────────
+// ── Fallback mini chart ────────────────────────────────────
 function MiniChart({ candles, change24h }) {
   if (!candles?.length) return (
     <div style={{ height:'100%', display:'flex', alignItems:'center', justifyContent:'center', ...mono, fontSize:11, color:T.slate, opacity:.5 }}>
@@ -358,7 +352,7 @@ function OrderForm({ exchange, symbol, ticker, balance, onOrderPlaced }) {
   const [loading,   setLoading]   = useState(false);
   const [result,    setResult]    = useState(null);
   const [error,     setError]     = useState('');
-  const [confirm,   setConfirm]   = useState(null); // pending order for confirmation
+  const [confirm,   setConfirm]   = useState(null);
 
   const curPrice    = ticker?.price || 0;
   const qty         = parseFloat(quantity) || 0;
@@ -423,7 +417,6 @@ function OrderForm({ exchange, symbol, ticker, balance, onOrderPlaced }) {
 
   return (
     <>
-      {/* Confirmation modal */}
       {confirm && (
         <ConfirmModal
           order={confirm}
@@ -435,7 +428,6 @@ function OrderForm({ exchange, symbol, ticker, balance, onOrderPlaced }) {
 
       <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
 
-        {/* Buy / Sell */}
         <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:6 }}>
           {['buy','sell'].map(s => (
             <button key={s} onClick={() => { setSide(s); setPct(null); setQuantity(''); }} style={{
@@ -451,7 +443,6 @@ function OrderForm({ exchange, symbol, ticker, balance, onOrderPlaced }) {
           ))}
         </div>
 
-        {/* Order type */}
         <div style={{ display:'flex', background:'rgba(255,255,255,0.03)', borderRadius:8, padding:3, gap:2 }}>
           {ORDER_TYPES.map(t => (
             <button key={t} onClick={() => setOrderType(t)} style={{
@@ -465,7 +456,6 @@ function OrderForm({ exchange, symbol, ticker, balance, onOrderPlaced }) {
           ))}
         </div>
 
-        {/* Stop price */}
         {orderType === 'stop_limit' && (
           <div>
             <Label style={{ marginBottom:7 }}>Stop Price (USDT)</Label>
@@ -476,7 +466,6 @@ function OrderForm({ exchange, symbol, ticker, balance, onOrderPlaced }) {
           </div>
         )}
 
-        {/* Limit price */}
         {orderType !== 'market' && (
           <div>
             <Label style={{ marginBottom:7 }}>{orderType==='stop_limit'?'Limit Price':'Price'} (USDT)</Label>
@@ -487,7 +476,6 @@ function OrderForm({ exchange, symbol, ticker, balance, onOrderPlaced }) {
           </div>
         )}
 
-        {/* Market price display */}
         {orderType === 'market' && curPrice > 0 && (
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', background:'rgba(255,255,255,0.02)', borderRadius:8, padding:'8px 12px' }}>
             <Label>Market Price</Label>
@@ -497,7 +485,6 @@ function OrderForm({ exchange, symbol, ticker, balance, onOrderPlaced }) {
           </div>
         )}
 
-        {/* Quantity */}
         <div>
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:7 }}>
             <Label>Amount ({symbol})</Label>
@@ -517,7 +504,6 @@ function OrderForm({ exchange, symbol, ticker, balance, onOrderPlaced }) {
             placeholder="0.00000000" style={inputStyle} />
         </div>
 
-        {/* % buttons */}
         <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:5 }}>
           {[25,50,75,100].map(p => (
             <button key={p} onClick={() => applyPct(p)} style={{
@@ -532,7 +518,6 @@ function OrderForm({ exchange, symbol, ticker, balance, onOrderPlaced }) {
           ))}
         </div>
 
-        {/* Total */}
         {qty > 0 && (
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center',
             background: side==='buy' ? 'rgba(52,211,153,0.04)' : 'rgba(244,63,94,0.04)',
@@ -545,21 +530,18 @@ function OrderForm({ exchange, symbol, ticker, balance, onOrderPlaced }) {
           </div>
         )}
 
-        {/* Error */}
         {error && (
           <div style={{ ...mono, fontSize:10, color:T.red, background:'rgba(244,63,94,0.06)', border:'1px solid rgba(244,63,94,0.2)', borderRadius:8, padding:'9px 12px', animation:'aq-shake .3s ease' }}>
             ✕ {error}
           </div>
         )}
 
-        {/* Success */}
         {result && (
           <div className="aq-order-flash" style={{ ...mono, fontSize:10, color:T.green, background:'rgba(52,211,153,0.06)', border:'1px solid rgba(52,211,153,0.2)', borderRadius:8, padding:'9px 12px' }}>
             ✓ {result.mode === 'paper' ? '📄 Paper' : '⚡ Live'} order placed — {result.order?.symbol || symbol}
           </div>
         )}
 
-        {/* Submit */}
         <button onClick={handlePreSubmit} disabled={loading || isReadonly} style={{
           width:'100%', padding:14, borderRadius:10,
           cursor: (loading || isReadonly) ? 'not-allowed' : 'pointer',
@@ -575,7 +557,6 @@ function OrderForm({ exchange, symbol, ticker, balance, onOrderPlaced }) {
           {isReadonly ? '🔒 Read-Only Mode' : loading ? '⟳ Placing...' : `${side==='buy'?'↑ Buy':'↓ Sell'} ${symbol}`}
         </button>
 
-        {/* Mode indicator */}
         {exchange && (
           <div style={{ textAlign:'center', ...mono, fontSize:9, color:T.slate }}>
             {exchange.name} ·{' '}
@@ -596,7 +577,7 @@ function OrdersPanel({ exchangeId, refresh }) {
   const [orders,        setOrders]        = useState([]);
   const [tab,           setTab]           = useState('open');
   const [loading,       setLoading]       = useState(true);
-  const [pendingCancel, setPendingCancel] = useState(null); // order awaiting cancel confirmation
+  const [pendingCancel, setPendingCancel] = useState(null);
 
   const load = useCallback(async (silent = false) => {
     if (!exchangeId) return;
@@ -609,13 +590,10 @@ function OrdersPanel({ exchangeId, refresh }) {
 
   useEffect(() => { load(); }, [load, refresh]);
 
-  // Auto-poll open orders every 10s so fills/status changes on the
-  // exchange side show up without a manual refresh click. Closed
-  // orders are historical — no need to poll those repeatedly.
   useEffect(() => {
     if (tab !== 'open') return;
     const iv = setInterval(() => {
-      if (!document.hidden) load(true); // silent = don't flash the skeleton
+      if (!document.hidden) load(true);
     }, 10000);
     return () => clearInterval(iv);
   }, [tab, load]);
@@ -720,9 +698,32 @@ export default function Trading() {
   const [balance,       setBalance]       = useState([]);
   const [tickerLoading, setTickerLoading] = useState(false);
   const [ordersRefresh, setOrdersRefresh] = useState(0);
-  const [chartMode,     setChartMode]     = useState('tradingview'); // 'tradingview' | 'simple'
+  const [chartMode,     setChartMode]     = useState('tradingview');
 
   useEffect(() => { injectStyles(); }, []);
+
+  // ── Prefill symbol from ?symbol= query param ──────────────
+  // Lets the Watchlist page's "quick trade" button (⚡) deep-link
+  // straight into a symbol here instead of the default BTC.
+  // Only crypto symbols are supported (order form is Binance/ccxt
+  // based) — Watchlist only shows the ⚡ button for crypto rows,
+  // but we still defensively strip a slash if one sneaks through.
+  useEffect(() => {
+    const params  = new URLSearchParams(window.location.search);
+    const prefill = params.get('symbol');
+    if (!prefill) return;
+
+    const clean = prefill
+      .toUpperCase()
+      .replace('/', '')
+      .replace(/USDT$/, '')
+      .replace(/[^A-Z0-9]/g, '');
+
+    if (clean) {
+      setSymbol(clean);
+      setSymbolInput(clean);
+    }
+  }, []);
 
   // Load connections
   useEffect(() => {
@@ -775,7 +776,6 @@ export default function Trading() {
     background:'var(--surface)', border:'1px solid var(--border)', borderRadius:16,
   };
 
-  // No exchanges connected
   if (Object.keys(connections).length === 0) return (
     <div style={{ ...panel, padding:64, textAlign:'center', animation:'aq-fadein .4s ease' }}>
       <div style={{ fontSize:36, marginBottom:16, opacity:.3 }}>◈</div>
@@ -790,10 +790,8 @@ export default function Trading() {
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:14, animation:'aq-fadein .35s ease' }}>
 
-      {/* ── Readonly warning ── */}
       {isReadonly && <ReadonlyBanner exchangeName={selectedEx?.name} />}
 
-      {/* ── Header ── */}
       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', flexWrap:'wrap', gap:12 }}>
         <div>
           <div style={{ ...mono, fontSize:10, letterSpacing:'.2em', textTransform:'uppercase', color:T.slate, marginBottom:4 }}>// Live Trading</div>
@@ -802,7 +800,6 @@ export default function Trading() {
           </div>
         </div>
 
-        {/* Exchange selector */}
         <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
           {connectedExchanges.map(ex => {
             const isSelected = selectedExId === ex.id;
@@ -825,13 +822,10 @@ export default function Trading() {
         </div>
       </div>
 
-      {/* ── 3-col layout ── */}
       <div style={{ display:'grid', gridTemplateColumns:'300px 1fr 270px', gap:14, alignItems:'start' }}>
 
-        {/* ══ LEFT: Order Form ══ */}
         <div style={{ ...panel, padding:22, display:'flex', flexDirection:'column', gap:14 }}>
 
-          {/* Symbol search */}
           <div>
             <Label style={{ marginBottom:8 }}>Symbol</Label>
             <div style={{ position:'relative' }}>
@@ -875,10 +869,8 @@ export default function Trading() {
           )}
         </div>
 
-        {/* ══ CENTER: Chart ══ */}
         <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
 
-          {/* Ticker */}
           <div style={{ ...panel, padding:'18px 22px' }}>
             <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:14 }}>
               <div style={{ display:'flex', alignItems:'center', gap:10 }}>
@@ -886,7 +878,6 @@ export default function Trading() {
                 <div style={{ ...mono, fontSize:11, color:T.slate }}>/USDT</div>
               </div>
               <div style={{ display:'flex', gap:6 }}>
-                {/* Chart mode toggle */}
                 {['tradingview','simple'].map(m => (
                   <button key={m} onClick={() => setChartMode(m)} style={{
                     ...mono, fontSize:9, padding:'4px 10px', borderRadius:6, cursor:'pointer',
@@ -902,7 +893,6 @@ export default function Trading() {
             <PriceTicker ticker={ticker} loading={tickerLoading && !ticker}/>
           </div>
 
-          {/* Chart */}
           <div style={{ ...panel, padding: chartMode==='tradingview' ? 0 : '18px 22px', overflow:'hidden', height: chartMode==='tradingview' ? 520 : 280 }}>
             {chartMode === 'tradingview' ? (
               <TradingViewChart symbol={symbol} exchange={selectedExId} />
@@ -921,7 +911,6 @@ export default function Trading() {
             )}
           </div>
 
-          {/* Balance */}
           {balance.filter(b => b.total > 0).length > 0 && (
             <div style={{ ...panel, padding:'16px 22px' }}>
               <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:12 }}>
@@ -949,7 +938,6 @@ export default function Trading() {
           )}
         </div>
 
-        {/* ══ RIGHT: Orders ══ */}
         <div style={{ ...panel, padding:'18px 20px' }}>
           <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:14 }}>
             <Label>Orders</Label>

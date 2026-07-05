@@ -10,12 +10,17 @@ const exchangesSvc = require('../services/exchanges.service');
 
 // ── POST /api/trading/order ───────────────────────────────────────────────────
 // body: { exchangeId, symbol, side, orderType, quantity, price?, stopPrice? }
+// For crypto exchanges, `symbol` is the base asset (e.g. "BTC") and gets
+// "USDT" appended. For OANDA, `symbol` is already the full instrument
+// (e.g. "EUR_USD") and is used as-is.
 async function placeOrder(req, res) {
   const userId = req.user.id;
   const { exchangeId, symbol, side, orderType = 'market', quantity, price, stopPrice } = req.body;
 
   if (!exchangeId || !symbol || !side || !quantity)
     return res.status(400).json({ success:false, error:'exchangeId, symbol, side, quantity required' });
+
+  const isOanda = exchangeId === 'oanda';
 
   try {
     const creds = await exchangesSvc.getDecryptedCredentials(userId, exchangeId);
@@ -27,11 +32,16 @@ async function placeOrder(req, res) {
       let fillPrice = price;
       if (!fillPrice || orderType === 'market') {
         try {
-          const r = await axios.get(
-            `https://api.binance.com/api/v3/ticker/price?symbol=${symbol.toUpperCase()}USDT`,
-            { timeout: 5000 }
-          );
-          fillPrice = parseFloat(r.data.price);
+          if (isOanda) {
+            const { mid } = await exchangesSvc.getOandaPrice(creds.apiKey, creds.apiSecret, creds.mode, symbol.toUpperCase());
+            fillPrice = mid;
+          } else {
+            const r = await axios.get(
+              `https://api.binance.com/api/v3/ticker/price?symbol=${symbol.toUpperCase()}USDT`,
+              { timeout: 5000 }
+            );
+            fillPrice = parseFloat(r.data.price);
+          }
         } catch { fillPrice = price || 0; }
       }
 
@@ -155,12 +165,76 @@ async function cancelOrder(req, res) {
 }
 
 // ── GET /api/trading/ticker/:symbol ──────────────────────────────────────────
+// ?exchangeId=oanda — routes forex/commodity instruments to OANDA's
+// pricing + candles endpoints instead of Binance. OANDA pricing requires
+// an authenticated account (unlike Binance's public ticker), so this
+// path needs the connected credentials.
 async function getTicker(req, res) {
-  const { symbol } = req.params;
+  const { symbol }     = req.params;
+  const { exchangeId } = req.query;
+  const userId          = req.user.id;
+
+  if (exchangeId === 'oanda') {
+    try {
+      const creds = await exchangesSvc.getDecryptedCredentials(userId, 'oanda');
+      if (!creds) return res.status(404).json({ success:false, error:'OANDA not connected' });
+
+      const instrument = symbol.toUpperCase();
+      const base        = exchangesSvc.getOandaBaseUrl(creds.mode);
+      const authHeaders = { Authorization: `Bearer ${creds.apiSecret}` };
+
+      const [priceRes, candlesRes] = await Promise.allSettled([
+        axios.get(`${base}/v3/accounts/${creds.apiKey}/pricing`, {
+          headers: authHeaders, params: { instruments: instrument }, timeout: 8000,
+        }),
+        axios.get(`${base}/v3/instruments/${instrument}/candles`, {
+          headers: authHeaders, params: { granularity: 'H1', count: 24 }, timeout: 8000,
+        }),
+      ]);
+
+      let ticker = null;
+      if (priceRes.status === 'fulfilled') {
+        const p = priceRes.value.data?.prices?.[0];
+        if (p) {
+          const bid = parseFloat(p.bids?.[0]?.price);
+          const ask = parseFloat(p.asks?.[0]?.price);
+          ticker = {
+            symbol: instrument, price: (bid + ask) / 2, change24h: 0,
+            high24h: null, low24h: null, volume24h: null, quoteVol: null, bid, ask,
+          };
+        }
+      }
+
+      let candles = [];
+      if (candlesRes.status === 'fulfilled') {
+        const raw = candlesRes.value.data?.candles || [];
+        candles = raw.filter(c => c.complete).map(c => ({
+          t:     new Date(c.time).getTime(),
+          open:  parseFloat(c.mid.o), high: parseFloat(c.mid.h),
+          low:   parseFloat(c.mid.l), close: parseFloat(c.mid.c),
+          vol:   c.volume,
+        }));
+        if (ticker && candles.length >= 2) {
+          const first = candles[0].close, last = candles[candles.length - 1].close;
+          ticker.change24h = ((last - first) / first) * 100;
+          ticker.high24h   = Math.max(...candles.map(c => c.high));
+          ticker.low24h    = Math.min(...candles.map(c => c.low));
+        }
+      }
+
+      if (!ticker) return res.status(404).json({ success:false, error:'Instrument not found on OANDA' });
+      return res.json({ success:true, ticker, candles });
+
+    } catch (err) {
+      logger.error(`[trading.getTicker] oanda(${symbol}): ${err.message}`);
+      return res.status(500).json({ success:false, error: err.message });
+    }
+  }
+
+  // ── Crypto (Binance) — default path ──
   const sym = symbol.toUpperCase().replace(/[^A-Z0-9]/g, '');
 
   try {
-    // Try Binance first (fastest, no auth needed)
     const [tickerRes, klinesRes] = await Promise.allSettled([
       axios.get(`https://api.binance.com/api/v3/ticker/24hr?symbol=${sym}USDT`, { timeout: 5000 }),
       axios.get(`https://api.binance.com/api/v3/klines?symbol=${sym}USDT&interval=1h&limit=24`, { timeout: 5000 }),
@@ -216,6 +290,17 @@ async function getBalance(req, res) {
     if (!creds) return res.status(404).json({ success:false, error:'Exchange not connected' });
 
     if (creds.mode === 'paper') {
+      // OANDA paper: still hit the free practice API for a realistic
+      // simulated balance instead of a hardcoded crypto-style fixture.
+      if (exchangeId === 'oanda') {
+        try {
+          const balances = await exchangesSvc.fetchPortfolio('oanda', creds);
+          return res.json({ success:true, mode:'paper', balances });
+        } catch (err) {
+          logger.error(`[trading.getBalance] oanda paper: ${err.message}`);
+          return res.json({ success:true, mode:'paper', balances: [{ symbol:'USD', free:10000, locked:0, total:10000 }] });
+        }
+      }
       // Return simulated $10,000 paper balance
       return res.json({
         success: true, mode:'paper',
@@ -269,6 +354,15 @@ async function cancelLiveOrder(exchange, credentials, orderId) {
         headers:{ 'X-BAPI-API-KEY':credentials.apiKey, 'X-BAPI-SIGN':sig,
                   'X-BAPI-TIMESTAMP':ts, 'X-BAPI-RECV-WINDOW':rw }, timeout:8000
       });
+      break;
+    }
+    case 'oanda': {
+      const base = exchangesSvc.getOandaBaseUrl(credentials.mode);
+      await axios.put(
+        `${base}/v3/accounts/${credentials.apiKey}/orders/${orderId}/cancel`,
+        {},
+        { headers: { Authorization: `Bearer ${credentials.apiSecret}` }, timeout: 8000 }
+      );
       break;
     }
     default: throw new Error(`Cancel not implemented for ${exchange}`);

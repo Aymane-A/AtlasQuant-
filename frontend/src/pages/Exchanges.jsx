@@ -16,6 +16,9 @@ const EXCHANGES = [
   { id:'htx',      name:'HTX (Huobi)',       type:'CEX', region:'Global', logo:'◎', color:'#2196F3', desc:'Legacy exchange, deep liquidity, 500+ pairs',      features:['Spot','Futures','Swap','Options'], fields:[{key:'apiKey',label:'Access Key',placeholder:'HTX access key...'},{key:'apiSecret',label:'Secret Key',placeholder:'HTX secret key...',secret:true}] },
   { id:'phemex',   name:'Phemex',            type:'CEX', region:'Global', logo:'⬢', color:'#9B59B6', desc:'Ultra-low latency, institutional-grade API',       features:['Spot','Perpetuals','Options','WebSocket'], fields:[{key:'apiKey',label:'API Key',placeholder:'Phemex API key...'},{key:'apiSecret',label:'API Secret',placeholder:'Phemex secret key...',secret:true}] },
   { id:'bitmex',   name:'BitMEX',            type:'CEX', region:'Global', logo:'⬣', color:'#FF4757', desc:'OG derivatives exchange, perpetual swaps',         features:['Perpetuals','Futures','Options','REST'], fields:[{key:'apiKey',label:'API Key',placeholder:'BitMEX API key...'},{key:'apiSecret',label:'API Secret',placeholder:'BitMEX secret key...',secret:true}] },
+  // ── OANDA — forex + metals/commodities broker (free REST v20 API,
+  // practice/demo accounts free, live requires a funded account) ──
+  { id:'oanda',    name:'OANDA',             type:'Forex/CFD', region:'Global', logo:'⬢', color:'#0090D4', desc:'Forex majors, gold & silver — free demo + live API', features:['Forex','Metals','Indices','REST'], fields:[{key:'apiKey',label:'Account ID',placeholder:'e.g. 101-004-12345678-001'},{key:'apiSecret',label:'Personal Access Token',placeholder:'OANDA API token...',secret:true}] },
 ];
 
 const MODES = [
@@ -60,7 +63,7 @@ function ModeBadge({ mode }) {
   );
 }
 
-function ModeSelector({ selected, onChange }) {
+function ModeSelector({ selected, onChange, isOanda }) {
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
       {MODES.map(m => (
@@ -87,7 +90,10 @@ function ModeSelector({ selected, onChange }) {
             <div style={{ ...mono, fontSize:11, fontWeight:700, color: selected === m.id ? m.color : 'var(--text-secondary)', marginBottom:2 }}>
               {m.icon} {m.label}
             </div>
-            <div style={{ fontSize:11, color:'var(--text-muted)' }}>{m.desc}</div>
+            <div style={{ fontSize:11, color:'var(--text-muted)' }}>
+              {isOanda && m.id === 'paper' ? 'Free OANDA practice account — virtual funds, real live prices.' : m.desc}
+              {isOanda && m.id === 'live'  ? ' Requires a funded OANDA live account.' : ''}
+            </div>
           </div>
         </div>
       ))}
@@ -109,6 +115,7 @@ function ConnectModal({ exchange, onClose, onConnected }) {
   const [error,    setError]    = useState('');
   const [success,  setSuccess]  = useState(false);
 
+  const isOanda = exchange.id === 'oanda';
   const set = (k, v) => setValues(p => ({ ...p, [k]: v }));
   const allFilled = exchange.fields.every(f => (values[f.key] || '').trim());
 
@@ -157,8 +164,10 @@ function ConnectModal({ exchange, onClose, onConnected }) {
             <div style={{ display:'flex', gap:10, alignItems:'flex-start', background:'rgba(0,245,212,0.04)', border:'1px solid rgba(0,245,212,0.1)', borderRadius:10, padding:'10px 14px', marginBottom:20 }}>
               <span style={{ color:'var(--cyan)', fontSize:12, flexShrink:0 }}>⚡</span>
               <p style={{ ...mono, fontSize:10, color:'var(--text-muted)', margin:0, lineHeight:1.6 }}>
-                Enable <span style={{ color:'var(--cyan)' }}>Read + Trade</span> only — never withdrawals.
-                Keys encrypted AES-256.
+                {isOanda
+                  ? <>Generate a token from <span style={{ color:'var(--cyan)' }}>My Account → Manage API Access</span> on your OANDA account. Use a practice (demo) account ID/token for risk-free testing. Keys encrypted AES-256.</>
+                  : <>Enable <span style={{ color:'var(--cyan)' }}>Read + Trade</span> only — never withdrawals. Keys encrypted AES-256.</>
+                }
               </p>
             </div>
 
@@ -189,6 +198,12 @@ function ConnectModal({ exchange, onClose, onConnected }) {
               ))}
             </div>
 
+            {isOanda && (
+              <div style={{ ...mono, fontSize:9, color:'var(--text-muted)', marginBottom:16, lineHeight:1.6 }}>
+                Don't have an account? <a href="https://www.oanda.com" target="_blank" rel="noreferrer" style={{ color:'var(--cyan)' }}>Sign up for free at oanda.com</a> — demo accounts are instant and free.
+              </div>
+            )}
+
             <div style={{ display:'flex', gap:10 }}>
               <button onClick={() => setStep(2)} disabled={!allFilled}
                 style={{ flex:1, padding:12, borderRadius:9, border:`1px solid ${exchange.color}50`, background:`${exchange.color}12`, color:exchange.color, fontFamily:'Syne,sans-serif', fontSize:13, fontWeight:700, cursor: allFilled ? 'pointer' : 'not-allowed', opacity: allFilled ? 1 : 0.4 }}>
@@ -204,7 +219,7 @@ function ConnectModal({ exchange, onClose, onConnected }) {
             {/* Mode selector */}
             <div style={{ ...mono, fontSize:9, letterSpacing:'.15em', textTransform:'uppercase', color:'var(--text-muted)', marginBottom:12 }}>Select Mode</div>
             <div style={{ marginBottom:22 }}>
-              <ModeSelector selected={mode} onChange={setMode} />
+              <ModeSelector selected={mode} onChange={setMode} isOanda={isOanda} />
             </div>
 
             {error && (
@@ -258,7 +273,7 @@ function ChangeModeModal({ exchange, currentMode, onClose, onChanged }) {
         <div style={{ fontSize:15, fontWeight:700, color:'var(--text-primary)', marginBottom:20 }}>
           Change Mode — {exchange.name}
         </div>
-        <ModeSelector selected={mode} onChange={setMode} />
+        <ModeSelector selected={mode} onChange={setMode} isOanda={exchange.id === 'oanda'} />
         <div style={{ display:'flex', gap:10, marginTop:22 }}>
           <button onClick={handleSave} disabled={loading}
             style={{ flex:1, padding:12, borderRadius:9, border:'1px solid var(--cyan-dim)', background:'var(--cyan-glow)', color:'var(--cyan)', fontFamily:'Syne,sans-serif', fontSize:13, fontWeight:700, cursor:'pointer' }}>

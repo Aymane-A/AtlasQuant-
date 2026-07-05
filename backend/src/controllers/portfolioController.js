@@ -158,14 +158,23 @@ async function fetchExchangeBalances(userId) {
 }
 
 // ── Merge DB positions + exchange balances ────────────────────────────────────
+// ✅ Fix: la clé de fusion était `symbol` seul. Le schéma DB autorise pourtant
+// UNIQUE(user_id, symbol, side) — un utilisateur peut avoir un LONG et un SHORT
+// sur le même symbole. Avec l'ancienne clé, la deuxième position DB écrasait
+// silencieusement la première (aucune erreur, juste une position qui disparaît
+// de l'affichage). La clé inclut maintenant le side. Les balances d'exchange
+// (spot, toujours "long" par nature) ne peuvent matcher qu'une position DB
+// elle-même "long", pas une position "short" du même symbole.
 function mergePositions(dbPositions, exchangeBalances) {
   const STABLES = ['USDT','USDC','BUSD','DAI','TUSD','FDUSD'];
   const merged  = {};
+  const keyOf   = (symbol, side) => `${symbol}::${side}`;
 
   for (const p of dbPositions) {
-    merged[p.symbol] = {
+    const side = p.side || 'long';
+    merged[keyOf(p.symbol, side)] = {
       symbol:        p.symbol,
-      side:          p.side || 'long',
+      side,
       amount:        parseFloat(p.amount),
       average_entry: parseFloat(p.average_entry),
       current_price: parseFloat(p.current_price),
@@ -177,13 +186,14 @@ function mergePositions(dbPositions, exchangeBalances) {
 
   for (const b of exchangeBalances) {
     if (STABLES.includes(b.symbol)) continue;
+    const key = keyOf(b.symbol, 'long'); // exchange spot balances are always long holdings
 
-    if (merged[b.symbol]) {
-      merged[b.symbol].amount = b.amount;
-      merged[b.symbol].source = 'exchange';
-      merged[b.symbol].exchanges.push(b.exchange);
+    if (merged[key]) {
+      merged[key].amount = b.amount;
+      merged[key].source = 'exchange';
+      merged[key].exchanges.push(b.exchange);
     } else {
-      merged[b.symbol] = {
+      merged[key] = {
         symbol:        b.symbol,
         side:          'long',
         amount:        b.amount,
@@ -321,9 +331,13 @@ async function getPortfolioData(req, res) {
     };
 
     // 10. Allocations
+    // ✅ Fix: positions et Cash utilisaient deux denominateurs différents
+    // (investedValue pour les positions, totalValue pour Cash), ce qui faisait
+    // que la somme des parts du donut ne totalisait jamais 100%. Tout le monde
+    // utilise maintenant `totalValue` (positions + cash) comme référence commune.
     const allocations = processedPositions.map(p => ({
       name:  p.sym,
-      pct:   investedValue > 0 ? (p.curVal / investedValue) * 100 : 0,
+      pct:   totalValue > 0 ? (p.curVal / totalValue) * 100 : 0,
       color: p.color,
     }));
     if (cash > 0 && totalValue > 0) {
@@ -331,6 +345,9 @@ async function getPortfolioData(req, res) {
     }
 
     // 11. Holdings strip (top 5 by value)
+    // Note: "% of portfolio" ici reste volontairement basé sur investedValue
+    // (composition des positions entre elles, cash exclu) — différent du donut
+    // ci-dessus qui montre la répartition du portefeuille total.
     const holdings = [...processedPositions]
       .sort((a, b) => b.curVal - a.curVal)
       .slice(0, 5)
@@ -360,7 +377,14 @@ async function getPortfolioData(req, res) {
     }));
 
     // 13. Risk badges
-    const maxPct = allocations.length > 0 ? Math.max(...allocations.map(a => a.pct)) : 0;
+    // ✅ Fix: maxPct était calculé sur `allocations`, qui inclut la part "Cash".
+    // Une grosse réserve de cash se retrouvait donc comptée comme "la plus
+    // grosse position", faisant afficher Concentration = Cash Ratio (même
+    // valeur exacte) au lieu de refléter la vraie position la plus concentrée.
+    const positionAllocations = allocations.filter(a => a.name !== 'Cash');
+    const maxPct = positionAllocations.length > 0
+      ? Math.max(...positionAllocations.map(a => a.pct))
+      : 0;
     const risks = [
       { label:'Concentration',  value:maxPct.toFixed(1)+'%',  note:'Largest single position', warn:maxPct > 30 },
       { label:'Unrealised P&L', value:fmtUSD(totalPnLRaw),    note:'vs cost basis',           warn:totalPnLRaw < 0 },

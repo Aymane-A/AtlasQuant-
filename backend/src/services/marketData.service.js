@@ -28,6 +28,14 @@ async function createBinanceExchange() {
     secret: env.BINANCE_API_SECRET,
     options: {
       defaultType:             "spot",
+      // ✅ Fix: ccxt's Binance loadMarkets() fetches spot AND futures (fapi/dapi)
+      // exchangeInfo by default, regardless of defaultType — unless fetchMarkets
+      // is restricted explicitly. This app only ever uses spot data, and the
+      // dapi.binance.com (coin-margined futures) endpoint was timing out on every
+      // call (10s each), spamming logs and slowing down every ticker fetch that
+      // triggered a market reload. Restricting to spot avoids contacting fapi/dapi
+      // entirely.
+      fetchMarkets:            ["spot"],
       adjustForTimeDifference: true,
       recvWindow:              60000,
     },
