@@ -139,8 +139,20 @@ function Divider({ style={} }) {
 }
 
 // ── Add Position Modal ────────────────────────────────────────────────────────
-function AddPositionModal({ onClose, onAdded }) {
-  const [form, setForm] = useState({ symbol:'', side:'long', amount:'', averageEntry:'', sector:'Crypto' });
+// ✅ Feature: accepte maintenant un `prefill` optionnel — { symbol, side, mode,
+// existingAmount, avgEntry } — utilisé quand la modale est ouverte depuis une
+// recommandation IA (BUY/TRIM/HEDGE) au lieu du bouton "+ Add Position" standard.
+// En mode 'trim', un bandeau rappelle la position actuelle pour guider la
+// nouvelle quantité à saisir (le endpoint fait un upsert, donc entrer un
+// montant plus bas réduit effectivement la position).
+function AddPositionModal({ onClose, onAdded, prefill }) {
+  const [form, setForm] = useState({
+    symbol:       prefill?.symbol || '',
+    side:         prefill?.side   || 'long',
+    amount:       '',
+    averageEntry: '',
+    sector:       'Crypto',
+  });
   const [loading, setLoading] = useState(false);
   const [error,   setError]   = useState('');
 
@@ -174,16 +186,28 @@ function AddPositionModal({ onClose, onAdded }) {
   };
   const labelStyle = { ...mono, fontSize:9, letterSpacing:'.15em', textTransform:'uppercase', color:T.slate, marginBottom:7, display:'block' };
 
+  const isTrim  = prefill?.mode === 'trim';
+  const modalTitle = isTrim ? `Adjust ${prefill.symbol} Position` : prefill?.symbol ? `Open ${prefill.symbol} Position` : 'Add Position';
+
   return (
     <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.8)', backdropFilter:'blur(14px)', zIndex:500, display:'flex', alignItems:'center', justifyContent:'center', padding:20 }}
       onClick={e => e.target === e.currentTarget && onClose()}>
       <div style={{ background:'#080f1e', border:'1px solid rgba(0,245,212,0.2)', borderRadius:20, padding:32, width:460, boxShadow:'0 0 60px rgba(0,245,212,0.08), 0 32px 64px rgba(0,0,0,0.7)' }}>
 
         {/* Header */}
-        <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:24 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:isTrim ? 12 : 24 }}>
           <div style={{ width:8, height:8, borderRadius:'50%', background:T.cyan }} />
-          <span style={{ fontSize:15, fontWeight:700, color:'var(--text)' }}>Add Position</span>
+          <span style={{ fontSize:15, fontWeight:700, color:'var(--text)' }}>{modalTitle}</span>
         </div>
+
+        {/* Trim context banner */}
+        {isTrim && (
+          <div style={{ background:'rgba(245,158,11,0.06)', border:'1px solid rgba(245,158,11,0.2)', borderRadius:9, padding:'10px 14px', marginBottom:20 }}>
+            <div style={{ ...mono, fontSize:10, color:T.amber, lineHeight:1.6 }}>
+              Current: {prefill.existingAmount} {prefill.symbol} @ {prefill.avgEntry}. Enter a new (lower) amount below to trim the position, or use <strong>Close</strong> on the position row to exit fully.
+            </div>
+          </div>
+        )}
 
         <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
 
@@ -192,7 +216,8 @@ function AddPositionModal({ onClose, onAdded }) {
             <div>
               <label style={labelStyle}>Symbol</label>
               <input className="aq-input" value={form.symbol} onChange={e => set('symbol', e.target.value.toUpperCase())}
-                placeholder="BTC, ETH, AAPL..." style={inputStyle} autoFocus />
+                placeholder="BTC, ETH, AAPL..." style={inputStyle} autoFocus={!prefill?.symbol}
+                readOnly={!!prefill?.symbol} />
             </div>
             <div>
               <label style={labelStyle}>Side</label>
@@ -216,9 +241,9 @@ function AddPositionModal({ onClose, onAdded }) {
           {/* Amount + Avg Entry row */}
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
             <div>
-              <label style={labelStyle}>Amount</label>
+              <label style={labelStyle}>{isTrim ? 'New Amount' : 'Amount'}</label>
               <input className="aq-input" type="number" value={form.amount} onChange={e => set('amount', e.target.value)}
-                placeholder="0.5" style={inputStyle} />
+                placeholder={isTrim ? `< ${prefill.existingAmount}` : '0.5'} style={inputStyle} autoFocus={!!prefill?.symbol} />
             </div>
             <div>
               <label style={labelStyle}>Avg Entry ($)</label>
@@ -262,7 +287,7 @@ function AddPositionModal({ onClose, onAdded }) {
             color:T.cyan, fontFamily:'Syne,sans-serif', fontSize:13, fontWeight:700,
             cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.7 : 1,
           }}>
-            {loading ? '⟳ Adding...' : '+ Add Position'}
+            {loading ? '⟳ Saving...' : isTrim ? '↓ Adjust Position' : '+ Add Position'}
           </button>
           <button onClick={onClose} style={{
             padding:'12px 20px', borderRadius:9, border:'1px solid var(--border)',
@@ -371,6 +396,7 @@ export default function Portfolio() {
 
   // Modals
   const [showAddModal,    setShowAddModal]    = useState(false);
+  const [addPrefill,      setAddPrefill]      = useState(null); // ✅ pre-fill for recommendation-triggered Add/Trim
   const [closeTarget,     setCloseTarget]     = useState(null); // position to close
 
   useEffect(() => { injectStyles(); }, []);
@@ -416,6 +442,40 @@ export default function Portfolio() {
   const pnlUp    = !isNeg(hero.totalPnL);
   const dayUp    = !isNeg(hero.dayReturn);
 
+  // ✅ Feature: route chaque recommandation IA vers la modale d'action adaptée.
+  // - SELL sur une position existante → ClosePositionModal (sortie complète)
+  // - TRIM sur une position existante → AddPositionModal en mode 'trim'
+  //   (upsert : entrer un montant plus bas réduit la position)
+  // - BUY / HEDGE → AddPositionModal pré-rempli avec le symbole suggéré
+  //   (HEDGE pré-sélectionne le côté "short", cohérent avec l'idée de hedge)
+  // - REBALANCE sur une position existante → traité comme TRIM (ajuster le poids)
+  const handleApplyRecommendation = (rec) => {
+    const existing = allPositionsData.find(p => p.sym === rec.symbol);
+
+    if (rec.action === 'SELL' && existing) {
+      setCloseTarget(existing);
+      return;
+    }
+
+    if ((rec.action === 'TRIM' || rec.action === 'REBALANCE') && existing) {
+      setAddPrefill({
+        symbol: rec.symbol, side: existing.side, mode: 'trim',
+        existingAmount: existing.amount, avgEntry: existing.avgEntry,
+      });
+      setShowAddModal(true);
+      return;
+    }
+
+    if (rec.action === 'BUY' || rec.action === 'HEDGE' || (rec.action === 'REBALANCE' && !existing)) {
+      setAddPrefill({ symbol: rec.symbol, side: rec.action === 'HEDGE' ? 'short' : 'long' });
+      setShowAddModal(true);
+      return;
+    }
+    // SELL without a matching position (shouldn't normally happen) — no-op.
+  };
+
+  const closeAddModal = () => { setShowAddModal(false); setAddPrefill(null); };
+
   // ── Error ──
   if (!loading && error) return (
     <div style={{ background:T.surface, border:'1px solid rgba(244,63,94,0.2)', borderRadius:16, padding:56, textAlign:'center', animation:'aq-fadein .4s ease' }}>
@@ -447,8 +507,9 @@ export default function Portfolio() {
       {/* Modals */}
       {showAddModal && (
         <AddPositionModal
-          onClose={() => setShowAddModal(false)}
+          onClose={closeAddModal}
           onAdded={() => fetchPortfolioData(true)}
+          prefill={addPrefill}
         />
       )}
       {closeTarget && (
@@ -620,7 +681,7 @@ export default function Portfolio() {
             )}
 
             {/* Add Position button */}
-            <button onClick={() => setShowAddModal(true)} style={{
+            <button onClick={() => { setAddPrefill(null); setShowAddModal(true); }} style={{
               display:'flex', alignItems:'center', gap:6,
               padding:'6px 14px', borderRadius:8, cursor:'pointer',
               border:'1px solid rgba(0,245,212,0.25)', background:'rgba(0,245,212,0.06)',
@@ -638,7 +699,7 @@ export default function Portfolio() {
           filtered.length === 0 ? (
             <div style={{ textAlign:'center', padding:'48px 0', color:T.slate, ...mono, fontSize:12, opacity:.6 }}>
               <div style={{ marginBottom:16 }}>No {sideFilter !== 'all' ? sideFilter : ''} positions</div>
-              <button onClick={() => setShowAddModal(true)} style={{ padding:'8px 20px', borderRadius:8, border:'1px solid rgba(0,245,212,0.25)', background:'rgba(0,245,212,0.06)', color:T.cyan, ...mono, fontSize:10, cursor:'pointer' }}>
+              <button onClick={() => { setAddPrefill(null); setShowAddModal(true); }} style={{ padding:'8px 20px', borderRadius:8, border:'1px solid rgba(0,245,212,0.25)', background:'rgba(0,245,212,0.06)', color:T.cyan, ...mono, fontSize:10, cursor:'pointer' }}>
                 + Add your first position
               </button>
             </div>
@@ -745,7 +806,7 @@ export default function Portfolio() {
       )}
 
       {/* ══ AI ANALYZER ══ */}
-      <PortfolioAnalyzer />
+      <PortfolioAnalyzer positions={allPositionsData} onApply={handleApplyRecommendation} />
 
     </div>
   );

@@ -21,10 +21,14 @@ const EXCHANGES = [
   { id:'bitget',  name:'Bitget',  color:'#00CED1' },
   { id:'phemex',  name:'Phemex',  color:'#9B59B6' },
   { id:'bitmex',  name:'BitMEX',  color:'#FF4757' },
+  // OANDA — forex + metals/commodities broker, not a crypto exchange.
+  { id:'oanda',   name:'OANDA',   color:'#0090D4' },
 ];
 
 const ORDER_TYPES     = ['market','limit','stop_limit'];
 const POPULAR_SYMBOLS = ['BTC','ETH','SOL','BNB','XRP','DOGE','ADA','AVAX','DOT','LINK','UNI','MATIC'];
+// OANDA instrument names (underscore format, e.g. "EUR_USD").
+const FOREX_SYMBOLS   = ['EUR_USD','GBP_USD','USD_JPY','AUD_USD','USD_CAD','USD_CHF','NZD_USD','EUR_GBP','XAU_USD','XAG_USD'];
 
 // ── Style injection ───────────────────────────────────────
 function injectStyles() {
@@ -131,9 +135,9 @@ function ConfirmModal({ order, exchange, onConfirm, onCancel }) {
               { label:'Symbol',   value: order.symbol },
               { label:'Side',     value: side?.toUpperCase(), color: side==='buy' ? T.green : T.red },
               { label:'Type',     value: order.orderType?.replace('_',' ').toUpperCase() },
-              { label:'Amount',   value: `${parseFloat(order.quantity).toFixed(6)} ${order.baseSymbol}` },
-              { label:'Price',    value: order.orderType === 'market' ? 'Market' : `$${parseFloat(order.price).toLocaleString()}` },
-              { label:'Total',    value: `≈ $${order.total?.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 })}`, color: side==='buy'?T.green:T.red },
+              { label: order.isForex ? 'Units' : 'Amount', value: `${parseFloat(order.quantity).toFixed(order.isForex ? 0 : 6)} ${order.baseSymbol}` },
+              { label:'Price',    value: order.orderType === 'market' ? 'Market' : `${order.quoteCcy === 'USDT' ? '$' : ''}${parseFloat(order.price).toLocaleString()}${order.quoteCcy !== 'USDT' ? ` ${order.quoteCcy}` : ''}` },
+              { label:'Total',    value: `≈ ${order.quoteCcy === 'USDT' ? '$' : ''}${order.total?.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 })}${order.quoteCcy !== 'USDT' ? ` ${order.quoteCcy}` : ''}`, color: side==='buy'?T.green:T.red },
             ].map(({ label, value, color }) => (
               <div key={label}>
                 <div style={{ ...mono, fontSize:9, color:T.slate, textTransform:'uppercase', letterSpacing:'.12em', marginBottom:3 }}>{label}</div>
@@ -211,7 +215,7 @@ function CancelConfirmModal({ order, onConfirm, onCancel }) {
 }
 
 // ── TradingView Chart Widget ──────────────────────────────
-function TradingViewChart({ symbol, exchange }) {
+function TradingViewChart({ symbol, exchange, isForex }) {
   const containerRef = useRef(null);
   const widgetRef    = useRef(null);
 
@@ -220,8 +224,10 @@ function TradingViewChart({ symbol, exchange }) {
     kraken:'KRAKEN', mexc:'MEXC', gate:'GATEIO', htx:'HUOBI',
     bitget:'BITGET', phemex:'PHEMEX', bitmex:'BITMEX',
   };
-  const tvExchange = TV_EXCHANGE_MAP[exchange] || 'BINANCE';
-  const tvSymbol   = `${tvExchange}:${symbol}USDT`;
+  // OANDA/TradingView symbols drop the underscore: "EUR_USD" → "OANDA:EURUSD"
+  const tvSymbol = isForex
+    ? `OANDA:${symbol.replace('_', '')}`
+    : `${TV_EXCHANGE_MAP[exchange] || 'BINANCE'}:${symbol}USDT`;
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -301,7 +307,7 @@ function MiniChart({ candles, change24h }) {
         <XAxis dataKey="t" hide/>
         <YAxis hide domain={['auto','auto']}/>
         <Tooltip contentStyle={{ background:'rgba(3,7,18,0.97)', border:`1px solid ${color}30`, borderRadius:6, ...mono, fontSize:10 }}
-          formatter={v => [`$${parseFloat(v).toLocaleString()}`, 'Price']} labelFormatter={() => ''}/>
+          formatter={v => [`${parseFloat(v).toLocaleString(undefined,{maximumFractionDigits:5})}`, 'Price']} labelFormatter={() => ''}/>
         <Area type="monotone" dataKey="close" stroke={color} strokeWidth={1.5}
           fill="url(#trd-grad)" dot={false}
           activeDot={{ r:3, fill:color, stroke:'var(--surface)', strokeWidth:2 }}/>
@@ -311,7 +317,7 @@ function MiniChart({ candles, change24h }) {
 }
 
 // ── Price Ticker ──────────────────────────────────────────
-function PriceTicker({ ticker, loading }) {
+function PriceTicker({ ticker, loading, isForex }) {
   const up = ticker?.change24h >= 0;
   if (loading && !ticker) return (
     <div style={{ display:'flex', gap:20, alignItems:'center' }}>
@@ -319,30 +325,42 @@ function PriceTicker({ ticker, loading }) {
     </div>
   );
   if (!ticker) return null;
+  // Forex needs more decimal precision (e.g. 1.08432) than crypto's $/¢ display.
+  const priceDecimals = isForex ? 5 : (ticker.price > 1 ? 2 : 6);
   return (
     <div style={{ display:'flex', alignItems:'center', gap:24, flexWrap:'wrap' }}>
       <div style={{ ...mono, fontSize:34, fontWeight:800, color:T.cyan, letterSpacing:'-1px' }}>
-        ${ticker.price?.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:ticker.price > 1 ? 2 : 6 })}
+        {isForex ? '' : '$'}{ticker.price?.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:priceDecimals })}
       </div>
       <div style={{ display:'flex', flexDirection:'column', gap:2 }}>
         <span style={{ ...mono, fontSize:13, fontWeight:700, color: up ? T.green : T.red }}>
           {up?'+':''}{ticker.change24h?.toFixed(2)}% 24h
         </span>
-        <span style={{ ...mono, fontSize:10, color:T.slate }}>
-          H: ${ticker.high24h?.toLocaleString()} · L: ${ticker.low24h?.toLocaleString()}
-        </span>
+        {(ticker.high24h != null && ticker.low24h != null) && (
+          <span style={{ ...mono, fontSize:10, color:T.slate }}>
+            H: {isForex ? '' : '$'}{ticker.high24h?.toLocaleString(undefined,{maximumFractionDigits:priceDecimals})} · L: {isForex ? '' : '$'}{ticker.low24h?.toLocaleString(undefined,{maximumFractionDigits:priceDecimals})}
+          </span>
+        )}
       </div>
-      <div style={{ display:'flex', gap:20, ...mono, fontSize:10, color:T.slate }}>
-        <span>Vol: <span style={{ color:'var(--text)' }}>${(ticker.quoteVol/1e6)?.toFixed(1)}M</span></span>
-        <span>Bid: <span style={{ color:T.green }}>${ticker.bid?.toLocaleString()}</span></span>
-        <span>Ask: <span style={{ color:T.red  }}>${ticker.ask?.toLocaleString()}</span></span>
-      </div>
+      {!isForex && (
+        <div style={{ display:'flex', gap:20, ...mono, fontSize:10, color:T.slate }}>
+          <span>Vol: <span style={{ color:'var(--text)' }}>${(ticker.quoteVol/1e6)?.toFixed(1)}M</span></span>
+          <span>Bid: <span style={{ color:T.green }}>${ticker.bid?.toLocaleString()}</span></span>
+          <span>Ask: <span style={{ color:T.red  }}>${ticker.ask?.toLocaleString()}</span></span>
+        </div>
+      )}
+      {isForex && ticker.bid != null && (
+        <div style={{ display:'flex', gap:20, ...mono, fontSize:10, color:T.slate }}>
+          <span>Bid: <span style={{ color:T.green }}>{ticker.bid?.toFixed(priceDecimals)}</span></span>
+          <span>Ask: <span style={{ color:T.red  }}>{ticker.ask?.toFixed(priceDecimals)}</span></span>
+        </div>
+      )}
     </div>
   );
 }
 
 // ── Order Form ────────────────────────────────────────────
-function OrderForm({ exchange, symbol, ticker, balance, onOrderPlaced }) {
+function OrderForm({ exchange, symbol, ticker, balance, isForex, quoteCcy, onOrderPlaced }) {
   const [side,      setSide]      = useState('buy');
   const [orderType, setOrderType] = useState('market');
   const [quantity,  setQuantity]  = useState('');
@@ -358,13 +376,20 @@ function OrderForm({ exchange, symbol, ticker, balance, onOrderPlaced }) {
   const qty         = parseFloat(quantity) || 0;
   const lim         = parseFloat(price) || curPrice;
   const total       = qty * (orderType === 'market' ? curPrice : lim);
-  const usdtBalance = balance?.find(b => b.symbol === 'USDT')?.free || 0;
-  const symBalance  = balance?.find(b => b.symbol === symbol)?.free || 0;
+  // Forex/OANDA has no per-instrument spot balance — quick-% buttons use
+  // the account's available balance/margin for both directions instead.
+  const quoteBalance = balance?.find(b => b.symbol === quoteCcy)?.free || 0;
+  const symBalance   = balance?.find(b => b.symbol === symbol)?.free || 0;
 
   const applyPct = (p) => {
     setPct(p);
+    if (isForex) {
+      const amt = (quoteBalance * p / 100) / (lim || curPrice || 1);
+      setQuantity(Math.max(Math.round(amt), 0).toString());
+      return;
+    }
     if (side === 'buy') {
-      const amt = (usdtBalance * p / 100) / (lim || curPrice || 1);
+      const amt = (quoteBalance * p / 100) / (lim || curPrice || 1);
       setQuantity(amt.toFixed(6));
     } else {
       setQuantity((symBalance * p / 100).toFixed(6));
@@ -373,19 +398,19 @@ function OrderForm({ exchange, symbol, ticker, balance, onOrderPlaced }) {
 
   const handlePreSubmit = () => {
     setError('');
-    if (!quantity || parseFloat(quantity) <= 0) { setError('Enter quantity'); return; }
+    if (!quantity || parseFloat(quantity) <= 0) { setError(isForex ? 'Enter units' : 'Enter quantity'); return; }
     if (orderType !== 'market' && !price)        { setError('Enter limit price'); return; }
     if (orderType === 'stop_limit' && !stopPrice){ setError('Enter stop price'); return; }
 
     setConfirm({
       exchangeId: exchange.id,
-      symbol:     `${symbol}USDT`,
+      symbol:     isForex ? symbol : `${symbol}USDT`,
       baseSymbol: symbol,
       side, orderType,
       quantity:   parseFloat(quantity),
       price:      orderType !== 'market' ? parseFloat(price) : undefined,
       stopPrice:  orderType === 'stop_limit' ? parseFloat(stopPrice) : undefined,
-      total,
+      total, isForex, quoteCcy,
     });
   };
 
@@ -458,20 +483,20 @@ function OrderForm({ exchange, symbol, ticker, balance, onOrderPlaced }) {
 
         {orderType === 'stop_limit' && (
           <div>
-            <Label style={{ marginBottom:7 }}>Stop Price (USDT)</Label>
+            <Label style={{ marginBottom:7 }}>Stop Price ({quoteCcy})</Label>
             <input className="aq-t-input" type="number" value={stopPrice}
               onChange={e => setStopPrice(e.target.value)}
-              placeholder={curPrice ? (curPrice * 0.97).toFixed(2) : '0.00'}
+              placeholder={curPrice ? (curPrice * 0.97).toFixed(isForex ? 5 : 2) : '0.00'}
               style={inputStyle} />
           </div>
         )}
 
         {orderType !== 'market' && (
           <div>
-            <Label style={{ marginBottom:7 }}>{orderType==='stop_limit'?'Limit Price':'Price'} (USDT)</Label>
+            <Label style={{ marginBottom:7 }}>{orderType==='stop_limit'?'Limit Price':'Price'} ({quoteCcy})</Label>
             <input className="aq-t-input" type="number" value={price}
               onChange={e => setPrice(e.target.value)}
-              placeholder={curPrice?.toFixed(2) || '0.00'}
+              placeholder={curPrice?.toFixed(isForex ? 5 : 2) || '0.00'}
               style={inputStyle} />
           </div>
         )}
@@ -480,28 +505,28 @@ function OrderForm({ exchange, symbol, ticker, balance, onOrderPlaced }) {
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', background:'rgba(255,255,255,0.02)', borderRadius:8, padding:'8px 12px' }}>
             <Label>Market Price</Label>
             <span style={{ ...mono, fontSize:13, color:T.cyan, fontWeight:700 }}>
-              ${curPrice.toLocaleString('en-US', { minimumFractionDigits:2 })}
+              {isForex ? '' : '$'}{curPrice.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits: isForex ? 5 : 2 })}
             </span>
           </div>
         )}
 
         <div>
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:7 }}>
-            <Label>Amount ({symbol})</Label>
-            {side==='sell' && symBalance > 0 && (
+            <Label>{isForex ? `Units (${symbol})` : `Amount (${symbol})`}</Label>
+            {!isForex && side==='sell' && symBalance > 0 && (
               <span style={{ ...mono, fontSize:9, color:T.slate }}>
                 Avail: <span style={{ color:'var(--text)', cursor:'pointer' }} onClick={() => applyPct(100)}>{symBalance.toFixed(6)} {symbol}</span>
               </span>
             )}
-            {side==='buy' && usdtBalance > 0 && (
+            {(isForex || side==='buy') && quoteBalance > 0 && (
               <span style={{ ...mono, fontSize:9, color:T.slate }}>
-                Avail: <span style={{ color:'var(--text)' }}>${usdtBalance.toLocaleString('en-US', { maximumFractionDigits:2 })}</span>
+                Avail: <span style={{ color:'var(--text)' }}>{quoteBalance.toLocaleString('en-US', { maximumFractionDigits:2 })} {quoteCcy}</span>
               </span>
             )}
           </div>
           <input className="aq-t-input" type="number" value={quantity}
             onChange={e => { setQuantity(e.target.value); setPct(null); }}
-            placeholder="0.00000000" style={inputStyle} />
+            placeholder={isForex ? '1000' : '0.00000000'} style={inputStyle} />
         </div>
 
         <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:5 }}>
@@ -525,7 +550,7 @@ function OrderForm({ exchange, symbol, ticker, balance, onOrderPlaced }) {
             borderRadius:8, padding:'10px 14px' }}>
             <Label>Total</Label>
             <span style={{ ...mono, fontSize:14, fontWeight:800, color: side==='buy'?T.green:T.red }}>
-              ${total.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 })}
+              {isForex ? '' : '$'}{total.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 })}{isForex ? ` ${quoteCcy}` : ''}
             </span>
           </div>
         )}
@@ -563,7 +588,7 @@ function OrderForm({ exchange, symbol, ticker, balance, onOrderPlaced }) {
             <span style={{ color: exchange.mode==='live' ? T.red : exchange.mode==='paper' ? T.cyan : T.slate, fontWeight:700 }}>
               {(exchange.mode || 'readonly').toUpperCase()}
             </span>
-            {exchange.mode === 'paper' && <span style={{ color:T.slate }}> — Simulated</span>}
+            {exchange.mode === 'paper' && <span style={{ color:T.slate }}> — Simulated{isForex ? ' (OANDA practice)' : ''}</span>}
             {exchange.mode === 'live'  && <span style={{ color:T.red   }}> — Real funds</span>}
           </div>
         )}
@@ -700,14 +725,17 @@ export default function Trading() {
   const [ordersRefresh, setOrdersRefresh] = useState(0);
   const [chartMode,     setChartMode]     = useState('tradingview');
 
+  const isForex  = selectedExId === 'oanda';
+  const quoteCcy = isForex ? (balance?.[0]?.symbol || 'USD') : 'USDT';
+
   useEffect(() => { injectStyles(); }, []);
 
   // ── Prefill symbol from ?symbol= query param ──────────────
   // Lets the Watchlist page's "quick trade" button (⚡) deep-link
   // straight into a symbol here instead of the default BTC.
-  // Only crypto symbols are supported (order form is Binance/ccxt
-  // based) — Watchlist only shows the ⚡ button for crypto rows,
-  // but we still defensively strip a slash if one sneaks through.
+  // Watchlist only shows ⚡ for crypto rows, so this only ever
+  // receives crypto symbols — forex/commodity deep-linking would
+  // need a separate query param if that's wired up later.
   useEffect(() => {
     const params  = new URLSearchParams(window.location.search);
     const prefill = params.get('symbol');
@@ -725,6 +753,20 @@ export default function Trading() {
     }
   }, []);
 
+  // ── Reset symbol to a sensible default when switching between
+  // a crypto exchange and OANDA (forex instrument names contain "_",
+  // crypto tickers don't) ──
+  useEffect(() => {
+    if (!selectedExId) return;
+    const symbolLooksForex = symbol.includes('_');
+    if (isForex && !symbolLooksForex) {
+      setSymbol('EUR_USD'); setSymbolInput('EUR_USD');
+    } else if (!isForex && symbolLooksForex) {
+      setSymbol('BTC'); setSymbolInput('BTC');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedExId]);
+
   // Load connections
   useEffect(() => {
     api.get('/exchanges/connections')
@@ -736,12 +778,14 @@ export default function Trading() {
       }).catch(() => {});
   }, []);
 
-  // Fetch ticker
-  const fetchTicker = useCallback(async (sym) => {
+  // Fetch ticker — OANDA needs exchangeId so the backend knows to
+  // route to OANDA's authenticated pricing/candles instead of Binance.
+  const fetchTicker = useCallback(async (sym, exId) => {
     if (!sym) return;
     setTickerLoading(true);
     try {
-      const res = await api.get(`/trading/ticker/${sym}`);
+      const qs  = exId === 'oanda' ? '?exchangeId=oanda' : '';
+      const res = await api.get(`/trading/ticker/${sym}${qs}`);
       if (res.data.success) {
         setTicker(res.data.ticker);
         setCandles(res.data.candles || []);
@@ -751,10 +795,10 @@ export default function Trading() {
   }, []);
 
   useEffect(() => {
-    fetchTicker(symbol);
-    const iv = setInterval(() => fetchTicker(symbol), 15000);
+    fetchTicker(symbol, selectedExId);
+    const iv = setInterval(() => fetchTicker(symbol, selectedExId), 15000);
     return () => clearInterval(iv);
-  }, [symbol, fetchTicker]);
+  }, [symbol, selectedExId, fetchTicker]);
 
   // Fetch balance
   useEffect(() => {
@@ -780,7 +824,7 @@ export default function Trading() {
     <div style={{ ...panel, padding:64, textAlign:'center', animation:'aq-fadein .4s ease' }}>
       <div style={{ fontSize:36, marginBottom:16, opacity:.3 }}>◈</div>
       <div style={{ fontSize:16, fontWeight:700, color:'var(--text)', marginBottom:8 }}>No exchanges connected</div>
-      <div style={{ ...mono, fontSize:11, color:T.slate, marginBottom:24 }}>Connect an exchange to start trading</div>
+      <div style={{ ...mono, fontSize:11, color:T.slate, marginBottom:24 }}>Connect a crypto exchange or OANDA (forex/commodities) to start trading</div>
       <a href="/exchanges" style={{ ...mono, fontSize:11, padding:'8px 20px', borderRadius:8, border:'1px solid rgba(0,245,212,0.3)', background:'rgba(0,245,212,0.06)', color:T.cyan, textDecoration:'none' }}>
         Go to Exchanges →
       </a>
@@ -827,22 +871,22 @@ export default function Trading() {
         <div style={{ ...panel, padding:22, display:'flex', flexDirection:'column', gap:14 }}>
 
           <div>
-            <Label style={{ marginBottom:8 }}>Symbol</Label>
+            <Label style={{ marginBottom:8 }}>{isForex ? 'Instrument' : 'Symbol'}</Label>
             <div style={{ position:'relative' }}>
               <input className="aq-t-input" value={symbolInput}
                 onChange={e => setSymbolInput(e.target.value.toUpperCase())}
-                onKeyDown={e => { if (e.key==='Enter') { const s=symbolInput.toUpperCase().replace(/[^A-Z0-9]/g,''); if(s){setSymbol(s);} }}}
-                placeholder="BTC, ETH, SOL..."
+                onKeyDown={e => { if (e.key==='Enter') { const s = isForex ? symbolInput.toUpperCase().replace(/[^A-Z0-9_]/g,'') : symbolInput.toUpperCase().replace(/[^A-Z0-9]/g,''); if(s){setSymbol(s);} }}}
+                placeholder={isForex ? 'EUR_USD, XAU_USD...' : 'BTC, ETH, SOL...'}
                 style={{ width:'100%', boxSizing:'border-box', background:'rgba(255,255,255,0.03)', border:'1px solid var(--border)', borderRadius:8, padding:'9px 50px 9px 36px', color:'var(--text)', ...mono, fontSize:13 }}
               />
               <span style={{ position:'absolute', left:12, top:'50%', transform:'translateY(-50%)', ...mono, fontSize:12, color:T.slate }}>⌕</span>
-              <button onClick={() => { const s=symbolInput.toUpperCase().replace(/[^A-Z0-9]/g,''); if(s) setSymbol(s); }}
+              <button onClick={() => { const s = isForex ? symbolInput.toUpperCase().replace(/[^A-Z0-9_]/g,'') : symbolInput.toUpperCase().replace(/[^A-Z0-9]/g,''); if(s) setSymbol(s); }}
                 style={{ position:'absolute', right:8, top:'50%', transform:'translateY(-50%)', ...mono, fontSize:9, padding:'3px 8px', borderRadius:5, border:'1px solid rgba(0,245,212,0.2)', background:'rgba(0,245,212,0.06)', color:T.cyan, cursor:'pointer' }}>
                 GO
               </button>
             </div>
             <div style={{ display:'flex', flexWrap:'wrap', gap:5, marginTop:8 }}>
-              {POPULAR_SYMBOLS.slice(0,8).map(s => (
+              {(isForex ? FOREX_SYMBOLS : POPULAR_SYMBOLS).slice(0,10).map(s => (
                 <button key={s} className="aq-sym-pill" onClick={() => { setSymbol(s); setSymbolInput(s); }}
                   style={{ ...mono, fontSize:9, padding:'2px 8px', borderRadius:4, cursor:'pointer', transition:'all .15s',
                     border:`1px solid ${symbol===s?'rgba(0,245,212,0.35)':'var(--border)'}`,
@@ -862,6 +906,8 @@ export default function Trading() {
               symbol={symbol}
               ticker={ticker}
               balance={balance}
+              isForex={isForex}
+              quoteCcy={quoteCcy}
               onOrderPlaced={() => setOrdersRefresh(r => r+1)}
             />
           ) : (
@@ -874,8 +920,10 @@ export default function Trading() {
           <div style={{ ...panel, padding:'18px 22px' }}>
             <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:14 }}>
               <div style={{ display:'flex', alignItems:'center', gap:10 }}>
-                <div style={{ ...mono, fontSize:22, fontWeight:800, color:'var(--text)' }}>{symbol}</div>
-                <div style={{ ...mono, fontSize:11, color:T.slate }}>/USDT</div>
+                <div style={{ ...mono, fontSize:22, fontWeight:800, color:'var(--text)' }}>
+                  {isForex ? symbol.replace('_','/') : symbol}
+                </div>
+                {!isForex && <div style={{ ...mono, fontSize:11, color:T.slate }}>/USDT</div>}
               </div>
               <div style={{ display:'flex', gap:6 }}>
                 {['tradingview','simple'].map(m => (
@@ -890,17 +938,17 @@ export default function Trading() {
                 ))}
               </div>
             </div>
-            <PriceTicker ticker={ticker} loading={tickerLoading && !ticker}/>
+            <PriceTicker ticker={ticker} loading={tickerLoading && !ticker} isForex={isForex}/>
           </div>
 
           <div style={{ ...panel, padding: chartMode==='tradingview' ? 0 : '18px 22px', overflow:'hidden', height: chartMode==='tradingview' ? 520 : 280 }}>
             {chartMode === 'tradingview' ? (
-              <TradingViewChart symbol={symbol} exchange={selectedExId} />
+              <TradingViewChart symbol={symbol} exchange={selectedExId} isForex={isForex} />
             ) : (
               <>
                 <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:14 }}>
                   <Label>Price Chart (1h · 24 candles)</Label>
-                  <button onClick={() => fetchTicker(symbol)} style={{ ...mono, fontSize:9, padding:'3px 10px', borderRadius:5, border:'1px solid var(--border)', background:'transparent', color:T.slate, cursor:'pointer' }}>
+                  <button onClick={() => fetchTicker(symbol, selectedExId)} style={{ ...mono, fontSize:9, padding:'3px 10px', borderRadius:5, border:'1px solid var(--border)', background:'transparent', color:T.slate, cursor:'pointer' }}>
                     ↻ Refresh
                   </button>
                 </div>
@@ -917,7 +965,7 @@ export default function Trading() {
                 <Label>Balance — {selectedEx?.name}</Label>
                 {selectedEx?.mode === 'paper' && (
                   <span style={{ ...mono, fontSize:9, color:T.cyan, background:'rgba(0,245,212,0.08)', border:'1px solid rgba(0,245,212,0.15)', padding:'2px 8px', borderRadius:4 }}>
-                    📄 Simulated
+                    📄 Simulated{isForex ? ' (OANDA practice)' : ''}
                   </span>
                 )}
               </div>

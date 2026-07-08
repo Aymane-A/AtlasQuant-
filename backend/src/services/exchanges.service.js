@@ -22,6 +22,12 @@ function decrypt(stored) {
 }
 
 // ── Supported exchanges ───────────────────────────────────
+// 'oanda' reuses the generic apiKey/apiSecret credential slots:
+//   apiKey    → OANDA Account ID   (e.g. "101-004-12345678-001")
+//   apiSecret → OANDA Personal Access Token
+// This avoids any schema/encryption changes — OANDA is a forex/CFD
+// broker (majors + metals/commodities via CFD), free REST v20 API,
+// works with both practice (demo/paper) and live accounts.
 const SUPPORTED = {
   binance:  { requiredFields: ['apiKey','apiSecret'] },
   bybit:    { requiredFields: ['apiKey','apiSecret'] },
@@ -35,6 +41,7 @@ const SUPPORTED = {
   htx:      { requiredFields: ['apiKey','apiSecret'] },
   phemex:   { requiredFields: ['apiKey','apiSecret'] },
   bitmex:   { requiredFields: ['apiKey','apiSecret'] },
+  oanda:    { requiredFields: ['apiKey','apiSecret'] },
 };
 
 const VALID_MODES = ['readonly', 'paper', 'live'];
@@ -45,6 +52,33 @@ function validateCredentials(exchange, credentials) {
   for (const f of cfg.requiredFields) {
     if (!credentials[f]?.trim()) { const e = new Error(`Missing field: ${f}`); e.status = 400; throw e; }
   }
+}
+
+// ── OANDA helpers ──────────────────────────────────────────
+// mode 'paper' → OANDA practice (demo) environment — free, virtual funds.
+// mode 'live'  → OANDA live environment — requires a funded account.
+// mode 'readonly' also uses the live pricing/account-info endpoints
+// (read-only doesn't place orders either way).
+function getOandaBaseUrl(mode) {
+  return mode === 'live'
+    ? 'https://api-fxtrade.oanda.com'
+    : 'https://api-fxpractice.oanda.com';
+}
+
+// Fetches bid/ask/mid for a single OANDA instrument (e.g. "EUR_USD").
+// Exported so trading.controller.js can reuse it for paper-fill pricing.
+async function getOandaPrice(accountId, token, mode, instrument) {
+  const base = getOandaBaseUrl(mode);
+  const res  = await axios.get(`${base}/v3/accounts/${accountId}/pricing`, {
+    headers: { Authorization: `Bearer ${token}` },
+    params:  { instruments: instrument },
+    timeout: 8000,
+  });
+  const p = res.data?.prices?.[0];
+  if (!p) throw new Error(`No OANDA price for ${instrument}`);
+  const bid = parseFloat(p.bids?.[0]?.price);
+  const ask = parseFloat(p.asks?.[0]?.price);
+  return { bid, ask, mid: (bid + ask) / 2 };
 }
 
 // ── Binance timestamp sync ────────────────────────────────
@@ -67,7 +101,11 @@ async function getBinanceTimestamp() {
 }
 
 // ── Live key verification ─────────────────────────────────
-async function verifyWithExchange(exchange, credentials) {
+// `mode` param: explicit mode passed at connect-time (connectExchange
+// doesn't yet have it persisted). When called via testConnection,
+// credentials.mode is already populated from the DB and takes priority.
+async function verifyWithExchange(exchange, credentials, mode) {
+  const effMode = credentials.mode || mode || 'live';
   try {
     switch (exchange) {
 
@@ -117,6 +155,15 @@ async function verifyWithExchange(exchange, credentials) {
                      'KC-API-TIMESTAMP': ts, 'KC-API-PASSPHRASE': passSig,
                      'KC-API-KEY-VERSION': '2' }, timeout: 8000,
         });
+        break;
+      }
+
+      case 'oanda': {
+        const base = getOandaBaseUrl(effMode);
+        const res  = await axios.get(`${base}/v3/accounts/${credentials.apiKey}`, {
+          headers: { Authorization: `Bearer ${credentials.apiSecret}` }, timeout: 8000,
+        });
+        console.log('[oanda] verify ok — account:', res.data?.account?.alias || credentials.apiKey);
         break;
       }
 
@@ -363,6 +410,29 @@ async function fetchPortfolio(exchange, credentials) {
       return amount > 0 ? [{ symbol:'BTC', free:amount, locked:0, total:amount }] : [];
     }
 
+    case 'oanda': {
+      // OANDA is margin/CFD-based — there's no per-instrument "spot balance"
+      // like crypto exchanges. We surface the account's home currency
+      // balance instead, split into free (available) vs locked (margin used).
+      const effMode = credentials.mode || 'practice';
+      const base    = getOandaBaseUrl(effMode);
+      const res     = await axios.get(`${base}/v3/accounts/${credentials.apiKey}/summary`, {
+        headers: { Authorization: `Bearer ${credentials.apiSecret}` }, timeout: 10000,
+      });
+      const acc = res.data?.account;
+      if (!acc) return [];
+      const currency    = acc.currency || 'USD';
+      const balance     = parseFloat(acc.balance);
+      const marginUsed  = parseFloat(acc.marginUsed || 0);
+      console.log(`[oanda] balance=${balance} ${currency}, marginUsed=${marginUsed}`);
+      return [{
+        symbol: currency,
+        free:   Math.max(balance - marginUsed, 0),
+        locked: marginUsed,
+        total:  balance,
+      }];
+    }
+
     default:
       console.warn(`[fetchPortfolio] ${exchange} not implemented`);
       return [];
@@ -419,6 +489,46 @@ async function placeLiveOrder(exchange, credentials, { symbol, side, type, quant
       return { exchangeOrderId: res.data?.data?.[0]?.ordId, status: res.data?.data?.[0]?.sCode, raw: res.data };
     }
 
+    case 'oanda': {
+      // `symbol` here is the OANDA instrument, e.g. "EUR_USD" or "XAU_USD".
+      // `quantity` is treated as whole units (OANDA doesn't fraction units);
+      // negative units = sell, positive = buy.
+      const effMode = credentials.mode || 'practice';
+      const base    = getOandaBaseUrl(effMode);
+      const units   = side === 'buy' ? Math.abs(Math.round(quantity)) : -Math.abs(Math.round(quantity));
+
+      const body = {
+        order: {
+          type:         type === 'limit' ? 'LIMIT' : 'MARKET',
+          instrument:   symbol,
+          units:        String(units),
+          timeInForce:  type === 'limit' ? 'GTC' : 'FOK',
+          positionFill: 'DEFAULT',
+          ...(type === 'limit' && { price: String(price) }),
+        },
+      };
+
+      const res = await axios.post(`${base}/v3/accounts/${credentials.apiKey}/orders`, body, {
+        headers: { Authorization: `Bearer ${credentials.apiSecret}`, 'Content-Type': 'application/json' },
+        timeout: 10000,
+      });
+
+      const fillTxn   = res.data?.orderFillTransaction;
+      const createTxn = res.data?.orderCreateTransaction;
+      const cancelTxn = res.data?.orderCancelTransaction;
+
+      if (cancelTxn) {
+        const e = new Error(`OANDA rejected order: ${cancelTxn.reason || 'unknown reason'}`);
+        e.status = 400; throw e;
+      }
+
+      return {
+        exchangeOrderId: fillTxn?.id || createTxn?.id,
+        status:          fillTxn ? 'FILLED' : 'PENDING',
+        raw:             res.data,
+      };
+    }
+
     default: {
       const e = new Error(`Live orders not yet implemented for ${exchange}`);
       e.status = 501; throw e;
@@ -452,7 +562,7 @@ async function connectExchange(userId, exchange, credentials, mode = 'readonly')
     const e = new Error(`Invalid mode: ${mode}`); e.status = 400; throw e;
   }
   validateCredentials(exchange, credentials);
-  if (mode !== 'paper') await verifyWithExchange(exchange, credentials);
+  if (mode !== 'paper') await verifyWithExchange(exchange, credentials, mode);
   const encKey    = encrypt(credentials.apiKey.trim());
   const encSecret = encrypt(credentials.apiSecret.trim());
   const encPass   = credentials.passphrase ? encrypt(credentials.passphrase.trim()) : null;
@@ -568,4 +678,6 @@ module.exports = {
   openPaperTrade,
   closePaperTrade,
   getPaperTrades,
+  getOandaBaseUrl,
+  getOandaPrice,
 };
