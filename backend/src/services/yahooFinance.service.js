@@ -8,7 +8,7 @@
  */
 
 const YahooFinance = require('yahoo-finance2').default;
-const yahooFinance  = new YahooFinance();
+const yahooFinance  = new YahooFinance({ suppressNotices: ['yahooSurvey'] });
 const logger        = require('../utils/logger');
 
 // asset_class doit matcher: 'Commodity' | 'Forex' | 'Indices'
@@ -32,10 +32,10 @@ const YF_SYMBOLS = {
   'EURGBP=X': { display: 'EUR/GBP', asset_class: 'Forex', category: 'Forex' },
 
   // ── Indices ──
-  '^GSPC':    { display: 'SPX500',  asset_class: 'Indices', category: 'US Index' },
-  '^NDX':     { display: 'NAS100',  asset_class: 'Indices', category: 'US Index' },
-  '^DJI':     { display: 'US30',    asset_class: 'Indices', category: 'US Index' },
-  '^VIX':     { display: 'VIX',     asset_class: 'Indices', category: 'Volatility' },
+  '^GSPC':    { display: 'SPX500',  asset_class: 'Indices', category: 'US Index'    },
+  '^NDX':     { display: 'NAS100',  asset_class: 'Indices', category: 'US Index'    },
+  '^DJI':     { display: 'US30',    asset_class: 'Indices', category: 'US Index'    },
+  '^VIX':     { display: 'VIX',     asset_class: 'Indices', category: 'Volatility'  },
 };
 
 const INTERVAL_MAP = {
@@ -50,7 +50,7 @@ const RR_MULTIPLE = 2;
 async function getYFData(symbol, interval = '4h', limit = 100) {
   const yfInterval = INTERVAL_MAP[interval] || '1h';
 
-  const now    = new Date();
+  const now     = new Date();
   const period1 = new Date(now);
   if (yfInterval === '1h') {
     period1.setDate(period1.getDate() - 7);
@@ -87,11 +87,7 @@ async function getYFData(symbol, interval = '4h', limit = 100) {
   return { candles, price };
 }
 
-// ── ATR (Average True Range) — mesure de volatilité réelle par symbole ──
-// Utilisé pour calculer stop_loss/take_profit spécifiques à chaque actif,
-// au lieu de laisser ces champs vides (ce qui faisait tomber tous les
-// signaux Forex/Commodity/Indices dans le même fallback basé uniquement
-// sur la confidence — cause du bug des valeurs identiques en Journal).
+// ── ATR (Average True Range) ──────────────────────────────
 function computeATR(candles, period = 14) {
   if (!candles || candles.length < period + 1) return null;
 
@@ -112,8 +108,6 @@ function computeATR(candles, period = 14) {
   return atr > 0 ? atr : null;
 }
 
-// Calcule entry/stop_loss/take_profit à partir de l'ATR. Fallback à 1% du
-// prix si l'ATR ne peut pas être calculé (historique trop court).
 function calcRiskLevels(price, candles, signal) {
   const atr = computeATR(candles) || price * 0.01;
 
@@ -131,8 +125,48 @@ function calcRiskLevels(price, candles, signal) {
       take_profit: price - atr * RR_MULTIPLE,
     };
   }
-  // HOLD — pas de position, pas de niveaux de risque
   return { entry: price, stop_loss: null, take_profit: null };
+}
+
+// ── Local reasoning (no Groq) ─────────────────────────────
+// Mirrors exactly what signalGenerator.service.js does for crypto — keeps
+// YF signals fast and consistent. Groq was being called per-symbol here
+// before, which caused the "generateReasoning is not a function" crash
+// whenever ai.service export names drifted, and added ~15s latency per
+// symbol during the batch scan.
+function buildLocalSignal(display, price, indicators, bull, bear) {
+  const total      = bull + bear;
+  const bullPct    = total > 0 ? bull / total : 0.5;
+  const confidence = Math.min(Math.round(50 + Math.abs(bullPct - 0.5) * 80), 95);
+
+  let signal;
+  if      (bull > bear + 2) signal = 'BUY';
+  else if (bear > bull + 2) signal = 'SELL';
+  else                      signal = 'HOLD';
+
+  // Reasoning built from indicators — same pattern as signalGenerator.service.js
+  const { rsi, macd, ema, bollinger, fibonacci } = indicators;
+  const parts = [];
+
+  if (macd?.crossover && macd.crossover !== 'NONE')
+    parts.push(`MACD histogram at ${macd.histogram?.toFixed(4)}, indicating a ${macd.crossover.toLowerCase().replace(/_/g,' ')}.`);
+
+  if (rsi?.value != null && (rsi.value < 40 || rsi.value > 60))
+    parts.push(`RSI(14) at ${rsi.value.toFixed(2)} — ${rsi.value < 40 ? 'oversold' : 'overbought'} territory.`);
+
+  if (ema?.ema20 != null && ema?.ema50 != null)
+    parts.push(`EMA20 (${ema.ema20.toFixed(4)}) is ${(ema.position || '').toLowerCase().replace(/_/g,' ')} EMA50 (${ema.ema50.toFixed(4)}).`);
+
+  if (bollinger?.signal && bollinger.signal !== 'NORMAL')
+    parts.push(`Bollinger Bands signal: ${bollinger.signal.toLowerCase().replace(/_/g,' ')}.`);
+
+  if (fibonacci?.nearestLevel != null)
+    parts.push(`Nearest Fibonacci level at ${fibonacci.nearestLevel.toFixed(4)} — ${fibonacci.interpretation || ''}.`);
+
+  if (!parts.length)
+    parts.push(`${display} is trading at ${price.toFixed(4)} with mixed signals.`);
+
+  return { signal, confidence, reasoning: parts.join(' ') };
 }
 
 async function generateYFSignal(symbol, interval = '4h') {
@@ -142,7 +176,6 @@ async function generateYFSignal(symbol, interval = '4h') {
   if (!meta) throw new Error(`Unknown YF symbol: ${symbol}`);
 
   const { computeAllIndicators } = require('./indicators.service');
-  const { generateReasoning }    = require('./ai.service');
 
   const { candles, price } = await getYFData(symbol, interval, 100);
   const indicators = computeAllIndicators(candles);
@@ -163,11 +196,14 @@ async function generateYFSignal(symbol, interval = '4h') {
   if (bollinger.signal === 'OVERBOUGHT')  bear++;
   if (volume.ratio >= 1.5) { bull > bear ? bull++ : bear++; }
 
-  const ai = await generateReasoning(meta.display, price, indicators);
+  // Local reasoning — no Groq, no external call, no crash risk.
+  const { signal, confidence, reasoning } = buildLocalSignal(
+    meta.display, price, indicators, bull, bear
+  );
 
-  logger.info(`[yahooFinance] ${meta.display} → ${ai.signal} (${ai.confidence}%)`);
+  logger.info(`[yahooFinance] ${meta.display} → ${signal} (${confidence}%)`);
 
-  const { entry, stop_loss, take_profit } = calcRiskLevels(price, candles, ai.signal);
+  const { entry, stop_loss, take_profit } = calcRiskLevels(price, candles, signal);
 
   return {
     id:          `${symbol}_${Date.now()}`,
@@ -177,30 +213,21 @@ async function generateYFSignal(symbol, interval = '4h') {
     category:    meta.category,
     timestamp:   new Date().toISOString(),
     price,
-    signal:      ai.signal,
-    confidence:  ai.confidence,
-    reasoning:   ai.reasoning,
+    signal,
+    confidence,
+    reasoning,
     score:       { bullish: bull, bearish: bear },
     indicators,
-    // ✅ Fix Bug 3: entry/SL/TP calculés via ATR (volatilité réelle du symbole),
-    // plus jamais null pour un signal BUY/SELL — chaque actif a désormais ses
-    // propres niveaux de risque au lieu de retomber sur le fallback confidence-only.
     entry,
     stop_loss,
     take_profit,
-    risk_reward: ai.signal !== 'HOLD' ? `1:${RR_MULTIPLE}` : null,
+    risk_reward: signal !== 'HOLD' ? `1:${RR_MULTIPLE}` : null,
   };
 }
 
-// onProgress(symbol) is called after each symbol completes (success or fail),
-// so the caller can track "X/Y done" without waiting for the whole batch.
-//
-// ✅ Fix Bug 8: les 16 symboles étaient traités un par un (300ms d'attente +
-// un appel Groq de 15s de timeout potentiel CHACUN), ce qui pouvait faire
-// durer le scan complet plusieurs minutes et provoquer les "missed execution"
-// du cron toutes les minutes (checkAlerts). On traite maintenant par petits
-// lots parallèles (BATCH_SIZE symboles en même temps) — le total attendu
-// passe de ~16×(fetch+Groq) à ~(16/BATCH_SIZE)×(fetch+Groq).
+// onProgress(symbol) is called after each symbol completes (success or fail).
+// ✅ Fix Bug 8: traitement par petits lots parallèles (BATCH_SIZE symboles
+// en même temps) au lieu de séquentiel — total attendu divisé par BATCH_SIZE.
 const YF_BATCH_SIZE = 4;
 
 async function scanAllYF(interval = '4h', onProgress = () => {}) {
@@ -209,7 +236,7 @@ async function scanAllYF(interval = '4h', onProgress = () => {}) {
   const results = [];
 
   for (let i = 0; i < symbols.length; i += YF_BATCH_SIZE) {
-    const batch = symbols.slice(i, i + YF_BATCH_SIZE);
+    const batch   = symbols.slice(i, i + YF_BATCH_SIZE);
     const settled = await Promise.allSettled(batch.map(symbol => generateYFSignal(symbol, interval)));
 
     settled.forEach((outcome, idx) => {
@@ -230,7 +257,7 @@ async function scanAllYF(interval = '4h', onProgress = () => {}) {
   return results;
 }
 
-// ── EXTENSION BACKTESTER ────────────────────────────────────
+// ── EXTENSION BACKTESTER ──────────────────────────────────
 const STOCK_INTERVAL_MAP = {
   '15M':  '15m',
   '1H':   '60m',
@@ -260,7 +287,7 @@ async function getStockCandles(symbol, timeframe, startDate, endDate) {
   const isIntraday = interval !== '1d';
 
   let effectiveStart = new Date(startDate);
-  let effectiveEnd = new Date(endDate);
+  let effectiveEnd   = new Date(endDate);
 
   if (isIntraday) {
     const maxLookback = new Date();
@@ -298,11 +325,11 @@ async function getStockCandles(symbol, timeframe, startDate, endDate) {
     let candles = raw.quotes
       .filter(q => q.open && q.high && q.low && q.close)
       .map(q => ({
-        date: q.date,
-        open: q.open,
-        high: q.high,
-        low: q.low,
-        close: q.close,
+        date:   q.date,
+        open:   q.open,
+        high:   q.high,
+        low:    q.low,
+        close:  q.close,
         volume: q.volume || 0,
       }));
 

@@ -287,6 +287,24 @@ async function migrate() {
     CREATE INDEX IF NOT EXISTS idx_signals_asset_class ON signals(asset_class);
   `);
 
+  // ✅ Stop-Loss / Take-Profit bracket support (Trading page — SL/TP fields
+  // on the order form, paper-trade monitor cron auto-closes at target).
+  // close_reason distinguishes manual cancels from stop_loss/take_profit
+  // auto-closes in the Orders panel / history.
+  await pool.query(`
+    ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS stop_loss    NUMERIC(20, 8);
+    ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS take_profit  NUMERIC(20, 8);
+    ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS close_reason TEXT;
+
+    ALTER TABLE live_orders  ADD COLUMN IF NOT EXISTS stop_loss    NUMERIC(20, 8);
+    ALTER TABLE live_orders  ADD COLUMN IF NOT EXISTS take_profit  NUMERIC(20, 8);
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_paper_trades_open_bracket
+      ON paper_trades (status)
+      WHERE status = 'open' AND (stop_loss IS NOT NULL OR take_profit IS NOT NULL);
+  `);
+
   logger.info('[db] ✅ Tables PostgreSQL prêtes');
 }
 

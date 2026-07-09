@@ -8,10 +8,18 @@ const { scanAllYF }                 = require('./yahooFinance.service');
 const { checkAlerts }               = require('./alertChecker.service');
 const { checkSignalAlerts }         = require('./signalAlert.service');
 const { takePortfolioSnapshot }     = require('./portfolioSnapshot.service');
+const paperTradeMonitor             = require('./paperTradeMonitor.service');
 const db                            = require('../config/db');
 const logger                        = require('../utils/logger');
 
 const initCronJobs = () => {
+
+  // ── Paper trade SL/TP monitor ─────────────────────────
+  // Checks every 60s — auto-closes paper trades when stop_loss or
+  // take_profit price is hit. start() is idempotent (won't double-schedule
+  // on hot reload). Runs inside cron.service so it shares the same process
+  // and pool as the rest of the background engine.
+  paperTradeMonitor.start(60_000);
 
   // ── Market scan every 4 hours → Crypto + Forex/Commodity/Indices → AI signal alerts ───────
   cron.schedule('0 */4 * * *', async () => {

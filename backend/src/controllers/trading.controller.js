@@ -2,23 +2,43 @@
  * trading.controller.js — AtlasQuant AI
  * Handles live + paper order execution, order history, balance, ticker
  */
-const crypto       = require('crypto');
-const axios        = require('axios');
-const db           = require('../config/db');
-const logger       = require('../utils/logger');
-const exchangesSvc = require('../services/exchanges.service');
+const axios         = require('axios');
+const db            = require('../config/db');
+const logger        = require('../utils/logger');
+const exchangesSvc  = require('../services/exchanges.service');
 
 // ── POST /api/trading/order ───────────────────────────────────────────────────
-// body: { exchangeId, symbol, side, orderType, quantity, price?, stopPrice? }
+// body: { exchangeId, symbol, side, orderType, quantity, price?, stopPrice?,
+//         stopLoss?, takeProfit? }
+// stopLoss / takeProfit are optional trigger prices for a bracket order.
 // For crypto exchanges, `symbol` is the base asset (e.g. "BTC") and gets
 // "USDT" appended. For OANDA, `symbol` is already the full instrument
 // (e.g. "EUR_USD") and is used as-is.
 async function placeOrder(req, res) {
   const userId = req.user.id;
-  const { exchangeId, symbol, side, orderType = 'market', quantity, price, stopPrice } = req.body;
+  const {
+    exchangeId, symbol, side, orderType = 'market', quantity, price, stopPrice,
+    stopLoss, takeProfit,
+  } = req.body;
 
   if (!exchangeId || !symbol || !side || !quantity)
     return res.status(400).json({ success:false, error:'exchangeId, symbol, side, quantity required' });
+
+  // Sanity-check the bracket against the intended direction so a bad UI
+  // value can't accidentally submit a nonsensical SL/TP to the exchange.
+  if (stopLoss || takeProfit) {
+    const refPrice = orderType === 'market' ? null : parseFloat(price);
+    if (refPrice) {
+      if (side === 'buy'  && stopLoss   && parseFloat(stopLoss)   >= refPrice)
+        return res.status(400).json({ success:false, error:'Stop-loss must be below entry price for a buy order' });
+      if (side === 'buy'  && takeProfit && parseFloat(takeProfit) <= refPrice)
+        return res.status(400).json({ success:false, error:'Take-profit must be above entry price for a buy order' });
+      if (side === 'sell' && stopLoss   && parseFloat(stopLoss)   <= refPrice)
+        return res.status(400).json({ success:false, error:'Stop-loss must be above entry price for a sell order' });
+      if (side === 'sell' && takeProfit && parseFloat(takeProfit) >= refPrice)
+        return res.status(400).json({ success:false, error:'Take-profit must be below entry price for a sell order' });
+    }
+  }
 
   const isOanda = exchangeId === 'oanda';
 
@@ -46,12 +66,14 @@ async function placeOrder(req, res) {
       }
 
       const trade = await exchangesSvc.openPaperTrade(userId, exchangeId, {
-        symbol:    symbol.toUpperCase(),
+        symbol:      symbol.toUpperCase(),
         side,
         orderType,
-        quantity:  parseFloat(quantity),
-        price:     fillPrice,
-        limitPrice: orderType === 'limit' ? parseFloat(price) : null,
+        quantity:    parseFloat(quantity),
+        price:       fillPrice,
+        limitPrice:  orderType === 'limit' ? parseFloat(price) : null,
+        stopLoss:    stopLoss   ? parseFloat(stopLoss)   : null,
+        takeProfit:  takeProfit ? parseFloat(takeProfit) : null,
       });
 
       return res.json({ success:true, mode:'paper', order: trade });
@@ -65,19 +87,27 @@ async function placeOrder(req, res) {
     const result = await exchangesSvc.placeLiveOrder(exchangeId, creds, {
       symbol: symbol.toUpperCase(),
       side, type: orderType, quantity: parseFloat(quantity), price,
+      stopLoss:   stopLoss   ? parseFloat(stopLoss)   : undefined,
+      takeProfit: takeProfit ? parseFloat(takeProfit) : undefined,
     });
 
     // Audit log
     await db.query(
       `INSERT INTO live_orders
-         (user_id, exchange_id, exchange_order_id, symbol, side, order_type, quantity, price, status, raw_response)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+         (user_id, exchange_id, exchange_order_id, symbol, side, order_type, quantity, price, stop_loss, take_profit, status, raw_response)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
       [userId, exchangeId, result.exchangeOrderId, symbol.toUpperCase(),
-       side, orderType, quantity, price || null, result.status || 'submitted',
-       JSON.stringify(result.raw)]
+       side, orderType, quantity, price || null,
+       stopLoss || null, takeProfit || null,
+       result.status || 'submitted', JSON.stringify(result.raw)]
     );
 
-    res.json({ success:true, mode:'live', order: result });
+    res.json({
+      success: true, mode:'live', order: result,
+      warning: result.bracketUnsupported
+        ? 'Order placed, but this exchange does not support attached stop-loss/take-profit — set them manually.'
+        : undefined,
+    });
 
   } catch (err) {
     logger.error(`[trading.placeOrder] ${err.message}`);
@@ -133,7 +163,7 @@ async function getOrders(req, res) {
 async function cancelOrder(req, res) {
   const userId  = req.user.id;
   const { orderId } = req.params;
-  const { exchangeId, mode = 'paper' } = req.query;
+  const { exchangeId, mode = 'paper', symbol } = req.query;
 
   try {
     if (mode === 'paper') {
@@ -146,11 +176,12 @@ async function cancelOrder(req, res) {
       return res.json({ success:true, message:'Paper order cancelled' });
     }
 
-    // Live cancel — call exchange
+    // Live cancel — call exchange (generic ccxt path + OANDA custom, both
+    // live in exchangesSvc.cancelLiveOrder now)
     const creds = await exchangesSvc.getDecryptedCredentials(userId, exchangeId);
     if (!creds) return res.status(404).json({ success:false, error:'Exchange not connected' });
 
-    await cancelLiveOrder(exchangeId, creds, orderId);
+    await exchangesSvc.cancelLiveOrder(exchangeId, creds, orderId, symbol);
 
     await db.query(
       `UPDATE live_orders SET status='cancelled', updated_at=NOW() WHERE exchange_order_id=$1 AND user_id=$2`,
@@ -328,45 +359,6 @@ async function getUserExchangeIds(userId) {
     [userId]
   );
   return rows.map(r => r.exchange_id);
-}
-
-async function cancelLiveOrder(exchange, credentials, orderId) {
-  switch (exchange) {
-    case 'binance': {
-      // Need symbol — get from audit log or pass as param
-      // Simplified: just attempt cancel
-      const ts  = Date.now();
-      const qs  = `orderId=${orderId}&timestamp=${ts}`;
-      const sig = crypto.createHmac('sha256', credentials.apiSecret).update(qs).digest('hex');
-      await axios.delete(
-        `https://api.binance.com/api/v3/order?${qs}&signature=${sig}`,
-        { headers:{ 'X-MBX-APIKEY': credentials.apiKey }, timeout:8000 }
-      );
-      break;
-    }
-    case 'bybit': {
-      const ts  = Date.now().toString();
-      const rw  = '5000';
-      const body = { category:'spot', orderId };
-      const sig  = crypto.createHmac('sha256', credentials.apiSecret)
-        .update(ts + credentials.apiKey + rw + JSON.stringify(body)).digest('hex');
-      await axios.post('https://api.bybit.com/v5/order/cancel', body, {
-        headers:{ 'X-BAPI-API-KEY':credentials.apiKey, 'X-BAPI-SIGN':sig,
-                  'X-BAPI-TIMESTAMP':ts, 'X-BAPI-RECV-WINDOW':rw }, timeout:8000
-      });
-      break;
-    }
-    case 'oanda': {
-      const base = exchangesSvc.getOandaBaseUrl(credentials.mode);
-      await axios.put(
-        `${base}/v3/accounts/${credentials.apiKey}/orders/${orderId}/cancel`,
-        {},
-        { headers: { Authorization: `Bearer ${credentials.apiSecret}` }, timeout: 8000 }
-      );
-      break;
-    }
-    default: throw new Error(`Cancel not implemented for ${exchange}`);
-  }
 }
 
 module.exports = { placeOrder, getOrders, cancelOrder, getTicker, getBalance };

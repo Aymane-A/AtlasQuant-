@@ -445,14 +445,114 @@ async function addPosition(req, res) {
 }
 
 // ── DELETE /api/portfolio/position/:symbol/:side ──────────────────────────────
+// ✅ Feature: avant, cette route supprimait la position sans laisser aucune
+// trace — impossible de savoir combien avait été gagné/perdu, ni quand la
+// position avait été ouverte/fermée. La table `trades` existe déjà dans le
+// schéma DB (voir config/db.js) mais n'était jamais utilisée. On l'utilise
+// maintenant pour enregistrer chaque clôture comme un trade réalisé.
 async function removePosition(req, res) {
   try {
+    const userId = req.user.id;
+    const symbol = req.params.symbol.toUpperCase();
+    const side   = req.params.side || 'long';
+
+    const { rows } = await db.query(
+      `SELECT * FROM portfolio WHERE user_id=$1 AND symbol=$2 AND side=$3`,
+      [userId, symbol, side]
+    );
+    if (!rows.length) {
+      return res.status(404).json({ success:false, error:'Position not found' });
+    }
+    const pos = rows[0];
+
+    // Exit price — essaie le prix live, retombe sur le dernier prix connu en DB
+    let exitPrice = parseFloat(pos.current_price) || 0;
+    try {
+      const live = await fetchLivePrices([symbol]);
+      if (live[symbol]?.price) exitPrice = live[symbol].price;
+    } catch { /* fallback silencieux sur current_price */ }
+
+    const amount = parseFloat(pos.amount);
+    const entry  = parseFloat(pos.average_entry) || 0;
+    const pnl    = entry > 0
+      ? (side === 'short' ? (entry - exitPrice) : (exitPrice - entry)) * amount
+      : 0;
+    const pnlPct = entry > 0 ? (pnl / (entry * amount)) * 100 : 0;
+
+    await db.query(
+      `INSERT INTO trades
+         (user_id, symbol, side, entry_price, exit_price, quantity, pnl, pnl_pct, status, paper, opened_at, closed_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'closed',TRUE,$9,NOW())`,
+      [userId, symbol, side, entry, exitPrice, amount, pnl.toFixed(8), pnlPct.toFixed(4), pos.opened_at]
+    );
+
     await db.query(
       `DELETE FROM portfolio WHERE user_id=$1 AND symbol=$2 AND side=$3`,
-      [req.user.id, req.params.symbol.toUpperCase(), req.params.side || 'long']
+      [userId, symbol, side]
     );
-    res.status(200).json({ success:true });
+
+    res.status(200).json({
+      success: true,
+      realized: { symbol, side, exitPrice, pnl: fmtUSD(pnl), pnlPct: fmtPct(pnlPct) },
+    });
   } catch (err) {
+    logger.error(`[portfolio.removePosition] ${err.message}`);
+    res.status(500).json({ success:false, error:err.message });
+  }
+}
+
+// ── GET /api/portfolio/history ─────────────────────────────────────────────────
+// ✅ Feature: historique des trades réalisés (fermés via removePosition
+// ci-dessus). Renvoie la liste + un résumé (P&L total réalisé, win rate réel).
+async function getTradeHistory(req, res) {
+  try {
+    const userId = req.user.id;
+    const status = req.query.status || 'closed';
+    const limit  = parseInt(req.query.limit) || 50;
+
+    const { rows } = await db.query(
+      `SELECT id, symbol, side, entry_price, exit_price, quantity, pnl, pnl_pct, opened_at, closed_at
+       FROM trades WHERE user_id=$1 AND status=$2
+       ORDER BY closed_at DESC LIMIT $3`,
+      [userId, status, limit]
+    );
+
+    const trades = rows.map(t => {
+      const pnlRaw = parseFloat(t.pnl) || 0;
+      return {
+        id:        t.id,
+        symbol:    t.symbol,
+        side:      t.side,
+        entry:     parseFloat(t.entry_price),
+        exit:      parseFloat(t.exit_price),
+        quantity:  parseFloat(t.quantity),
+        pnl:       fmtUSD(pnlRaw),
+        pnlRaw,
+        pnlPct:    fmtPct(parseFloat(t.pnl_pct) || 0),
+        openedAt:  t.opened_at,
+        closedAt:  t.closed_at,
+        holdDays:  t.opened_at && t.closed_at
+          ? Math.max(0, Math.round((new Date(t.closed_at) - new Date(t.opened_at)) / 86400000))
+          : null,
+      };
+    });
+
+    const totalRealizedRaw = trades.reduce((sum, t) => sum + t.pnlRaw, 0);
+    const wins    = trades.filter(t => t.pnlRaw > 0).length;
+    const winRate = trades.length > 0 ? (wins / trades.length) * 100 : 0;
+
+    res.json({
+      success: true,
+      trades,
+      summary: {
+        totalRealized: fmtUSD(totalRealizedRaw),
+        totalRealizedRaw,
+        count:   trades.length,
+        winRate: parseFloat(winRate.toFixed(1)),
+      },
+    });
+  } catch (err) {
+    logger.error(`[portfolio.getTradeHistory] ${err.message}`);
     res.status(500).json({ success:false, error:err.message });
   }
 }
@@ -474,4 +574,4 @@ async function updateCash(req, res) {
   }
 }
 
-module.exports = { getPortfolioData, addPosition, removePosition, updateCash };
+module.exports = { getPortfolioData, addPosition, removePosition, updateCash, getTradeHistory };

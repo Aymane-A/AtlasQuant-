@@ -32,6 +32,17 @@ const RISK_CFG = {
   'Very High': { color: '#f43f5e', w: '100%' },
 };
 
+// ✅ Feature: quel label et quelle modale déclencher pour chaque type d'action.
+// 'HOLD' et les recommandations globales ('PORTFOLIO') n'ont pas d'action
+// applicable sur une position unique — pas de bouton Apply pour celles-là.
+const APPLY_LABEL = {
+  BUY:       'Open →',
+  SELL:      'Close →',
+  TRIM:      'Adjust →',
+  REBALANCE: 'Adjust →',
+  HEDGE:     'Open →',
+};
+
 function ScoreRing({ score }) {
   const r   = 36;
   const circ = 2 * Math.PI * r;
@@ -95,7 +106,11 @@ function AnalysisSkeleton() {
 }
 
 // ── Main component ────────────────────────────────────────
-export default function PortfolioAnalyzer() {
+// ✅ Feature: props `positions` (allPositionsData depuis Portfolio.jsx) et
+// `onApply(rec)` — permet à chaque recommandation de déclencher directement
+// la modale d'action correspondante côté parent, au lieu de rester un texte
+// que l'utilisateur doit appliquer manuellement lui-même.
+export default function PortfolioAnalyzer({ positions = [], onApply }) {
   const [analysis, setAnalysis] = useState(null);
   const [loading,  setLoading]  = useState(false);
   const [error,    setError]    = useState('');
@@ -274,6 +289,12 @@ export default function PortfolioAnalyzer() {
                 const priCfg  = PRIORITY_CFG[rec.priority] || PRIORITY_CFG.low;
                 const isOpen  = expanded[i];
 
+                // ✅ Feature: pas de bouton Apply pour une recommandation globale
+                // ('PORTFOLIO', pas un symbole précis) ou pour un simple HOLD
+                // (rien à exécuter — c'est déjà l'état actuel).
+                const applyLabel = APPLY_LABEL[rec.action];
+                const canApply   = applyLabel && rec.symbol && rec.symbol !== 'PORTFOLIO';
+
                 return (
                   <div key={i}
                     onClick={() => setExpanded(e => ({ ...e, [i]: !e[i] }))}
@@ -310,6 +331,24 @@ export default function PortfolioAnalyzer() {
                         overflow:'hidden', textOverflow:'ellipsis', whiteSpace: isOpen ? 'normal' : 'nowrap' }}>
                         {rec.reason}
                       </span>
+
+                      {/* Apply button — déclenche onApply(rec) côté parent, sans
+                          toggler l'accordéon (stopPropagation) */}
+                      {canApply && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); onApply?.(rec); }}
+                          style={{
+                            ...mono, fontSize:9, fontWeight:700, letterSpacing:'.05em',
+                            padding:'4px 10px', borderRadius:6, cursor:'pointer', flexShrink:0,
+                            border:`1px solid ${actCfg.color}40`, background:actCfg.bg, color:actCfg.color,
+                            transition:'all .15s',
+                          }}
+                          onMouseEnter={e => { e.currentTarget.style.background = actCfg.color + '25'; }}
+                          onMouseLeave={e => { e.currentTarget.style.background = actCfg.bg; }}
+                        >
+                          {applyLabel}
+                        </button>
+                      )}
 
                       <span style={{ ...mono, fontSize:10, color:'var(--text-muted)', flexShrink:0 }}>
                         {isOpen ? '▲' : '▼'}

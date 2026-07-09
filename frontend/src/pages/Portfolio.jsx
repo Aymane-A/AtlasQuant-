@@ -394,6 +394,12 @@ export default function Portfolio() {
   const [sectorData,       setSectorData]      = useState([]);
   const [equityCurve,      setEquityCurve]     = useState([]);
 
+  // ✅ Feature: trade history (positions fermées, réalisées)
+  const [historyData,    setHistoryData]    = useState([]);
+  const [historySummary, setHistorySummary] = useState({ totalRealized:'+$0.00', count:0, winRate:0 });
+  const [historyLoaded,  setHistoryLoaded]  = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
   // Modals
   const [showAddModal,    setShowAddModal]    = useState(false);
   const [addPrefill,      setAddPrefill]      = useState(null); // ✅ pre-fill for recommendation-triggered Add/Trim
@@ -429,6 +435,23 @@ export default function Portfolio() {
     const iv = setInterval(() => fetchPortfolioData(true), 60000);
     return () => clearInterval(iv);
   }, []);
+
+  // ✅ Feature: lazy-load l'historique seulement quand l'onglet est ouvert
+  const fetchHistory = async () => {
+    setHistoryLoading(true);
+    try {
+      const res = await api.get('/portfolio/history');
+      if (res.data.success) {
+        setHistoryData(res.data.trades || []);
+        setHistorySummary(res.data.summary || { totalRealized:'+$0.00', count:0, winRate:0 });
+      }
+    } catch { /* silent — history is secondary, don't block the page */ }
+    finally { setHistoryLoading(false); setHistoryLoaded(true); }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'history' && !historyLoaded) fetchHistory();
+  }, [activeTab, historyLoaded]);
 
   const liveP = useLivePrices();
   const applyLive = (h) => {
@@ -516,7 +539,7 @@ export default function Portfolio() {
         <ClosePositionModal
           position={closeTarget}
           onClose={() => setCloseTarget(null)}
-          onClosed={() => fetchPortfolioData(true)}
+          onClosed={() => { fetchPortfolioData(true); if (historyLoaded) fetchHistory(); }}
         />
       )}
 
@@ -652,7 +675,7 @@ export default function Portfolio() {
       <div className="aq-card" style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:16, padding:'20px 24px' }}>
         {/* Tab bar + Add button */}
         <div style={{ display:'flex', alignItems:'center', gap:0, marginBottom:20, borderBottom:'1px solid rgba(255,255,255,0.05)', paddingBottom:12 }}>
-          {['positions','sectors'].map(tab => (
+          {['positions','sectors','history'].map(tab => (
             <button key={tab} className="aq-tab" onClick={() => setActiveTab(tab)} style={{
               ...mono, fontSize:10, letterSpacing:'.12em', textTransform:'uppercase',
               background:'none', border:'none', cursor:'pointer', padding:'4px 18px 4px 0',
@@ -780,6 +803,71 @@ export default function Portfolio() {
                   <div style={{ ...mono, fontSize:11, color:T.slate, textAlign:'right' }}>{s.pct.toFixed(1)}%</div>
                 </div>
               ))}
+            </div>
+          )
+        )}
+
+        {/* ── History tab — ✅ Feature: trades réalisés (positions fermées) ── */}
+        {activeTab === 'history' && (
+          historyLoading ? (
+            <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+              {[1,2,3].map(i => <Sk key={i} h={36} />)}
+            </div>
+          ) : historyData.length === 0 ? (
+            <div style={{ textAlign:'center', padding:'48px 0', color:T.slate, ...mono, fontSize:12, opacity:.6 }}>
+              No closed trades yet — history appears here once you close a position.
+            </div>
+          ) : (
+            <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
+              {/* Summary strip */}
+              <div style={{ display:'flex', gap:24, padding:'12px 16px', background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:10 }}>
+                <div>
+                  <Label style={{ marginBottom:4 }}>Total Realized</Label>
+                  <div style={{ ...mono, fontSize:16, fontWeight:700, color: isNeg(historySummary.totalRealized) ? T.red : T.green }}>
+                    {historySummary.totalRealized}
+                  </div>
+                </div>
+                <div>
+                  <Label style={{ marginBottom:4 }}>Win Rate</Label>
+                  <div style={{ ...mono, fontSize:16, fontWeight:700, color:'var(--text)' }}>{historySummary.winRate}%</div>
+                </div>
+                <div>
+                  <Label style={{ marginBottom:4 }}>Closed Trades</Label>
+                  <div style={{ ...mono, fontSize:16, fontWeight:700, color:'var(--text)' }}>{historySummary.count}</div>
+                </div>
+              </div>
+
+              {/* Trades table */}
+              <div style={{ overflowX:'auto' }}>
+                <table style={{ width:'100%', borderCollapse:'collapse' }}>
+                  <thead>
+                    <tr>
+                      {['Asset','Side','Qty','Entry','Exit','P&L','Return','Held','Closed'].map((h, i) => (
+                        <th key={i} style={{ ...mono, fontSize:9, letterSpacing:'.18em', textTransform:'uppercase', color:T.slate, textAlign:'left', paddingBottom:12, paddingRight:16, fontWeight:400, whiteSpace:'nowrap' }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {historyData.map((t, i) => (
+                      <tr key={t.id || i} className="aq-row">
+                        <td style={{ ...mono, fontSize:12, fontWeight:700, color:'var(--text)', padding:'10px 16px 10px 0' }}>{t.symbol}</td>
+                        <td style={{ padding:'10px 16px 10px 0' }}>
+                          <span style={{ ...mono, fontSize:8, letterSpacing:'.1em', textTransform:'uppercase', padding:'3px 8px', borderRadius:4, background:t.side==='long'?'rgba(52,211,153,0.1)':'rgba(244,63,94,0.1)', color:t.side==='long'?T.green:T.red, border:`1px solid ${t.side==='long'?'rgba(52,211,153,0.2)':'rgba(244,63,94,0.2)'}` }}>
+                            {t.side}
+                          </span>
+                        </td>
+                        <td style={{ ...mono, fontSize:12, color:T.slate, padding:'10px 16px 10px 0' }}>{t.quantity}</td>
+                        <td style={{ ...mono, fontSize:12, color:T.slate, padding:'10px 16px 10px 0' }}>${t.entry.toLocaleString('en-US', { maximumFractionDigits:4 })}</td>
+                        <td style={{ ...mono, fontSize:12, color:'var(--text)', padding:'10px 16px 10px 0' }}>${t.exit.toLocaleString('en-US', { maximumFractionDigits:4 })}</td>
+                        <td style={{ ...mono, fontSize:12, fontWeight:600, color:colorPnl(t.pnl), padding:'10px 16px 10px 0' }}>{t.pnl}</td>
+                        <td style={{ ...mono, fontSize:12, color:colorPnl(t.pnlPct), padding:'10px 16px 10px 0' }}>{t.pnlPct}</td>
+                        <td style={{ ...mono, fontSize:12, color:T.slate, padding:'10px 16px 10px 0' }}>{t.holdDays != null ? `${t.holdDays}d` : '—'}</td>
+                        <td style={{ ...mono, fontSize:11, color:T.slate, padding:'10px 16px 10px 0' }}>{t.closedAt ? new Date(t.closedAt).toLocaleDateString('en-US', { month:'short', day:'numeric' }) : '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )
         )}

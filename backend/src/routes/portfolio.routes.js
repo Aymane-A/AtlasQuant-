@@ -10,6 +10,7 @@ const {
   addPosition,
   removePosition,
   updateCash,
+  getTradeHistory,
 } = require('../controllers/portfolioController');
 const { analyzePortfolio } = require('../controllers/portfolioAnalyzer.controller');
 
@@ -21,6 +22,9 @@ router.post('/position', protect, addPosition);
 
 // DELETE /api/portfolio/position/:symbol/:side
 router.delete('/position/:symbol/:side', protect, removePosition);
+
+// GET  /api/portfolio/history          — ✅ realized trade history (closed positions)
+router.get('/history', protect, getTradeHistory);
 
 // PATCH /api/portfolio/cash            — { cashBalance }
 router.patch('/cash', protect, updateCash);
