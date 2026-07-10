@@ -386,7 +386,12 @@ export default function Portfolio() {
   const [error,       setError]       = useState(null);
   const [lastUpdated, setLastUpdated] = useState(null);
 
-  const [hero,             setHero]            = useState({ totalValue:0, todayPnL:'+$0.00', dayReturn:'+0.00%', totalPnL:'+$0.00', totalReturn:'+0.00%', openPositions:0, availableCash:'+$0.00' });
+  const [hero, setHero] = useState({
+      totalValue:0, todayPnL:'+$0.00', dayReturn:'+0.00%',
+      totalPnL:'+$0.00', totalReturn:'+0.00%',
+      realizedPnL:'+$0.00', lifetimeTotal:'+$0.00', lifetimeReturn:'+0.00%', // ✅ new
+      openPositions:0, availableCash:'+$0.00',
+    });  
   const [allocations,      setAllocations]     = useState([]);
   const [holdingsData,     setHoldingsData]    = useState([]);
   const [allPositionsData, setAllPositionsData]= useState([]);
@@ -464,6 +469,8 @@ export default function Portfolio() {
   const filtered = (sideFilter === 'all' ? allPositionsData : allPositionsData.filter(p => p.side === sideFilter)).map(applyLive);
   const pnlUp    = !isNeg(hero.totalPnL);
   const dayUp    = !isNeg(hero.dayReturn);
+  const realizedUp = !isNeg(hero.realizedPnL);       // ✅ new
+  const lifetimeUp = !isNeg(hero.lifetimeTotal);     // ✅ new
 
   // ✅ Feature: route chaque recommandation IA vers la modale d'action adaptée.
   // - SELL sur une position existante → ClosePositionModal (sortie complète)
@@ -569,9 +576,10 @@ export default function Portfolio() {
             <Divider style={{ margin:'18px 0' }} />
             <div style={{ display:'flex', gap:36, flexWrap:'wrap' }}>
               {[
-                { label:"Today's P&L", value:hero.todayPnL,   up:dayUp },
-                { label:'Total P&L',   value:hero.totalPnL,   up:pnlUp },
-                { label:'Total Return',value:hero.totalReturn, up:pnlUp },
+                { label:"Today's P&L",    value:hero.todayPnL,      up:dayUp },
+                { label:'Unrealized P&L', value:hero.totalPnL,      up:pnlUp },
+                { label:'Realized P&L',   value:hero.realizedPnL,   up:realizedUp },
+                { label:'Lifetime Total', value:hero.lifetimeTotal, up:lifetimeUp },
               ].map(({ label, value, up }) => (
                 <div key={label}>
                   <Label style={{ marginBottom:5 }}>{label}</Label>

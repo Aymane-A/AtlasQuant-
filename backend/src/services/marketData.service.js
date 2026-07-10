@@ -466,6 +466,36 @@ const fetchYahooCandles = async (yahooSymbol, interval = "1d", limit = 200) => {
   }
 };
 
+const getBenchmarkHistory = async (
+    symbol,
+    limit = 30
+) => {
+
+    const clean = symbol.toUpperCase().replace("/", "");
+
+    let yahooSymbol;
+
+    if (clean === "BTC")
+        yahooSymbol = "BTC-USD";
+    else if (clean === "SPY")
+        yahooSymbol = "SPY";
+    else if (FOREX_PAIRS[clean])
+        yahooSymbol = FOREX_PAIRS[clean];
+    else if (COMMODITY_PAIRS[clean])
+        yahooSymbol = COMMODITY_PAIRS[clean];
+    else
+        throw new Error(`Unsupported benchmark ${symbol}`);
+
+    const candles = await fetchYahooCandles(
+        yahooSymbol,
+        "1d",
+        limit
+    );
+
+    return candles;
+};
+
+
 // ── 6. UNIFIED ASSET ROUTER (crypto / forex / commodity) ───
 const detectAssetType = (symbol = "") => {
   const clean = symbol.toUpperCase().replace("/", "");
@@ -517,6 +547,8 @@ const fetchAllMarkets = async () => {
   };
 };
 
+
+
 module.exports = {
   getCandles, get24hrStats, getMultiplePrices,
   fetchOHLCV, fetchTicker, fetchMultipleTickers,
@@ -526,4 +558,5 @@ module.exports = {
   FOREX_PAIRS, COMMODITY_PAIRS,
   getForexPrices, getCommodityPrices,
   detectAssetType, getUnifiedCandles, getUnifiedStats,
+  getBenchmarkHistory,
 };

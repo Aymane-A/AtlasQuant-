@@ -7,6 +7,7 @@ const db           = require('../config/db');
 const axios        = require('axios');
 const logger       = require('../utils/logger');
 const exchangesSvc = require('../services/exchanges.service');
+const { getBenchmarkHistory } = require('../services/marketData.service');
 
 const COLORS = ['#00f5d4','#a78bfa','#f59e0b','#f43f5e','#38bdf8','#34d399','#fb923c','#e879f9'];
 
@@ -268,6 +269,62 @@ async function getPortfolioData(req, res) {
       v: parseFloat(r.total_value),
     }));
 
+    const benchmark = req.query.benchmark || "BTC";
+
+    const benchmarkHistory = await getBenchmarkHistory(
+      benchmark,
+      equityCurve.length
+    );
+    
+    let benchmarkCurve = [];
+    let alpha = 0;
+
+    if (benchmarkHistory.length > 0 && equityCurve.length > 0) {
+
+      const firstPortfolio = equityCurve[0].v;
+      const firstBenchmark = benchmarkHistory[0].close;
+
+      benchmarkCurve = equityCurve.map((point, index) => {
+
+        const benchmarkPoint = benchmarkHistory[index];
+
+        if (!benchmarkPoint) {
+          return {
+            ...point,
+            benchmark: null,
+            portfolio: null,
+          };
+        }
+
+        return {
+          ...point,
+          portfolio: ((point.v - firstPortfolio) / firstPortfolio) * 100,
+          benchmark: ((benchmarkPoint.close - firstBenchmark) / firstBenchmark) * 100,
+        };
+      });
+
+      const last = benchmarkCurve.at(-1);
+
+      if (last) {
+        alpha = (last.portfolio || 0) - (last.benchmark || 0);
+      }
+    }
+
+    // 7.5. Realized P&L (lifetime, from closed trades)
+    // ✅ Feature: sans ça, le P&L des positions fermées (AMZN etc.) disparaissait
+    // complètement de la vue d'ensemble une fois la position supprimée de `portfolio`.
+    // On agrège `trades` avec le même filtre que getTradeHistory (status='closed',
+    // side IN ('long','short') — pour ignorer les trades BUY/SELL de trade.service.js)
+    // et on combine avec le P&L non-réalisé pour un vrai "Lifetime Total".
+    const { rows: realizedRows } = await db.query(
+      `SELECT COALESCE(SUM(pnl),0) AS realized_pnl,
+              COALESCE(SUM(entry_price*quantity),0) AS realized_cost
+       FROM trades WHERE user_id=$1 AND status='closed' AND side IN ('long','short')`,
+      [userId]
+    );
+    const realizedPnLRaw  = parseFloat(realizedRows[0].realized_pnl)  || 0;
+    const realizedCostRaw = parseFloat(realizedRows[0].realized_cost) || 0;
+
     // 8. Process positions
     let totalCost = 0, totalValue = cash, todayPnLRaw = 0;
 
@@ -319,15 +376,27 @@ async function getPortfolioData(req, res) {
     const dayRetPct     = (totalValue - todayPnLRaw) > 0
       ? (todayPnLRaw / (totalValue - todayPnLRaw)) * 100 : 0;
 
+    // ✅ Feature: Lifetime Total = Unrealized (positions ouvertes) + Realized
+    // (trades fermés). Le basis utilisé pour le % est la somme des deux cost
+    // basis (positions ouvertes + trades fermés), pas juste totalCost — sinon
+    // le % de retour lifetime serait faux dès qu'il y a des trades réalisés.
+    const lifetimeTotalRaw = totalPnLRaw + realizedPnLRaw;
+    const lifetimeCostRaw  = totalCost + realizedCostRaw;
+    const lifetimeRetPct   = lifetimeCostRaw > 0 ? (lifetimeTotalRaw / lifetimeCostRaw) * 100 : 0;
+
     const hero = {
       totalValue,
-      todayPnL:      fmtUSD(todayPnLRaw),
-      dayReturn:     fmtPct(dayRetPct),
-      totalPnL:      fmtUSD(totalPnLRaw),
-      totalReturn:   fmtPct(totalRetPct),
-      openPositions: positions.length,
-      availableCash: fmtUSD(cash),
-      exchangeCount: [...new Set(exchangeBalances.map(b => b.exchange))].length,
+      todayPnL:       fmtUSD(todayPnLRaw),
+      dayReturn:      fmtPct(dayRetPct),
+      totalPnL:       fmtUSD(totalPnLRaw),        // = Unrealized P&L (positions encore ouvertes)
+      totalReturn:    fmtPct(totalRetPct),
+      realizedPnL:    fmtUSD(realizedPnLRaw),     // ✅ new — somme lifetime des trades fermés
+      realizedPnLRaw,                             // ✅ raw value, utile pour le frontend (couleur, tri...)
+      lifetimeTotal:  fmtUSD(lifetimeTotalRaw),   // ✅ new — unrealized + realized
+      lifetimeReturn: fmtPct(lifetimeRetPct),     // ✅ new
+      openPositions:  positions.length,
+      availableCash:  fmtUSD(cash),
+      exchangeCount:  [...new Set(exchangeBalances.map(b => b.exchange))].length,
     };
 
     // 10. Allocations
@@ -504,6 +573,15 @@ async function removePosition(req, res) {
 // ── GET /api/portfolio/history ─────────────────────────────────────────────────
 // ✅ Feature: historique des trades réalisés (fermés via removePosition
 // ci-dessus). Renvoie la liste + un résumé (P&L total réalisé, win rate réel).
+//
+// ⚠️ La table `trades` est PARTAGÉE avec services/trade.service.js (paper
+// trading automatique déclenché par les signaux IA). Ce service utilise
+// side='BUY'/'SELL' (convention signal), alors qu'ici on utilise side='long'/
+// 'short' (convention position). Le filtre `side IN ('long','short')` isole
+// nos données de celles de trade.service.js — sans ce filtre, une fois que
+// TradeService.checkAndCloseTrades() sera implémenté (actuellement un stub
+// vide), ses trades fermés apparaîtraient mélangés ici avec un side non
+// reconnu par le frontend (toujours affiché en rouge, peu importe le résultat).
 async function getTradeHistory(req, res) {
   try {
     const userId = req.user.id;
@@ -512,7 +590,8 @@ async function getTradeHistory(req, res) {
 
     const { rows } = await db.query(
       `SELECT id, symbol, side, entry_price, exit_price, quantity, pnl, pnl_pct, opened_at, closed_at
-       FROM trades WHERE user_id=$1 AND status=$2
+       FROM trades
+       WHERE user_id=$1 AND status=$2 AND side IN ('long','short')
        ORDER BY closed_at DESC LIMIT $3`,
       [userId, status, limit]
     );
@@ -574,4 +653,4 @@ async function updateCash(req, res) {
   }
 }
 
-module.exports = { getPortfolioData, addPosition, removePosition, updateCash, getTradeHistory };
+module.exports = { getPortfolioData, addPosition, removePosition, updateCash, getTradeHistory, };

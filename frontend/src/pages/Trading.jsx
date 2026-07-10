@@ -873,7 +873,138 @@ function OrderForm({ exchange, symbol, ticker, balance, isForex, isCommodity, qu
 }
 
 // ── Orders Panel ──────────────────────────────────────────
-function OrdersPanel({ exchangeId, refresh }) {
+
+// ── Live P&L calculator ───────────────────────────────────
+// Called per open paper trade — fetches current price once per symbol
+// using the already-polling ticker state passed down from the parent,
+// so no extra API calls are needed.
+function useLivePnl(orders, prices) {
+  return orders.map(o => {
+    if (o.mode !== 'paper' || o.status !== 'open') return o;
+    const cur = prices[o.symbol] ?? prices[o.symbol?.replace('USDT','')]
+              ?? prices[(o.symbol||'').replace(/USDT$/,'')];
+    if (!cur || !o.price) return { ...o, livePnl: null, livePnlPct: null };
+    const entry = parseFloat(o.price);
+    const qty   = parseFloat(o.quantity);
+    const pnl   = o.side === 'buy' ? (cur - entry) * qty : (entry - cur) * qty;
+    const pct   = (pnl / (entry * qty)) * 100;
+    return { ...o, livePnl: pnl, livePnlPct: pct, currentPrice: cur };
+  });
+}
+
+// ── Journal Stats ─────────────────────────────────────────
+function JournalStats({ orders }) {
+  const closed = orders.filter(o => o.status === 'closed' && o.pnl != null);
+  if (!closed.length) return null;
+
+  const wins    = closed.filter(o => parseFloat(o.pnl) > 0);
+  const losses  = closed.filter(o => parseFloat(o.pnl) < 0);
+  const totalPnl = closed.reduce((s, o) => s + parseFloat(o.pnl), 0);
+  const winRate  = Math.round((wins.length / closed.length) * 100);
+  const avgWin   = wins.length   ? wins.reduce((s,o) => s + parseFloat(o.pnl), 0) / wins.length   : 0;
+  const avgLoss  = losses.length ? losses.reduce((s,o) => s + parseFloat(o.pnl), 0) / losses.length : 0;
+  const bestTrade = closed.reduce((best, o) => parseFloat(o.pnl) > parseFloat(best?.pnl ?? -Infinity) ? o : best, null);
+  const profitFactor = losses.length && avgLoss !== 0 ? Math.abs((avgWin * wins.length) / (avgLoss * losses.length)) : null;
+
+  const stats = [
+    { label: 'Total P&L',      value: `${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(2)}`,      color: totalPnl >= 0 ? T.green : T.red },
+    { label: 'Win Rate',       value: `${winRate}%`,                                               color: winRate >= 50 ? T.green : T.red },
+    { label: 'Trades',         value: closed.length,                                               color: 'var(--text)' },
+    { label: 'Avg Win',        value: `+$${avgWin.toFixed(2)}`,                                   color: T.green },
+    { label: 'Avg Loss',       value: `$${avgLoss.toFixed(2)}`,                                   color: T.red },
+    { label: 'Profit Factor',  value: profitFactor != null ? profitFactor.toFixed(2) : '—',       color: profitFactor >= 1.5 ? T.green : profitFactor < 1 ? T.red : T.amber },
+  ];
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:8, marginBottom:14 }}>
+      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:6 }}>
+        {stats.map(({ label, value, color }) => (
+          <div key={label} style={{ background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:8, padding:'8px 10px' }}>
+            <div style={{ ...mono, fontSize:8, color:T.slate, marginBottom:3, textTransform:'uppercase', letterSpacing:'.1em' }}>{label}</div>
+            <div style={{ ...mono, fontSize:12, fontWeight:800, color }}>{value}</div>
+          </div>
+        ))}
+      </div>
+      {bestTrade && (
+        <div style={{ background:'rgba(52,211,153,0.04)', border:'1px solid rgba(52,211,153,0.15)', borderRadius:8, padding:'8px 12px', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+          <span style={{ ...mono, fontSize:9, color:T.slate }}>🏆 Best trade</span>
+          <span style={{ ...mono, fontSize:10, fontWeight:800, color:T.green }}>
+            {bestTrade.symbol} +${parseFloat(bestTrade.pnl).toFixed(2)}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Signal Badge (for OrderForm header) ──────────────────
+// Fetches the latest signal for the currently selected symbol from
+// /api/signals and shows it as a badge above the order form.
+// Only fetches when symbol changes — not on every tick.
+function useSymbolSignal(symbol, isOandaAccount) {
+  const [signal, setSignal] = useState(null);
+
+  useEffect(() => {
+    if (!symbol) return;
+    setSignal(null);
+    // Map trading symbol to signals table format
+    const sigSym = isOandaAccount
+      ? symbol.replace('_', '/')          // EUR_USD → EUR/USD
+      : symbol.replace(/USDT$/, '') + '/USDT'; // BTC → BTC/USDT (or raw BTC)
+    // Try both formats
+    api.get(`/api/signals?symbol=${encodeURIComponent(sigSym)}&limit=1`)
+      .then(res => {
+        const s = res.data?.signals?.[0] || res.data?.[0];
+        if (s && s.signal !== 'HOLD') setSignal(s);
+      })
+      .catch(() => {
+        // Try raw symbol (crypto without /USDT)
+        api.get(`/api/signals?symbol=${encodeURIComponent(symbol)}&limit=1`)
+          .then(res => {
+            const s = res.data?.signals?.[0] || res.data?.[0];
+            if (s && s.signal !== 'HOLD') setSignal(s);
+          }).catch(() => {});
+      });
+  }, [symbol, isOandaAccount]);
+
+  return signal;
+}
+
+function SignalBadge({ signal }) {
+  if (!signal) return null;
+  const isBuy  = signal.signal === 'BUY';
+  const color  = isBuy ? T.green : T.red;
+  const bg     = isBuy ? 'rgba(52,211,153,0.08)' : 'rgba(244,63,94,0.08)';
+  const border = isBuy ? 'rgba(52,211,153,0.25)' : 'rgba(244,63,94,0.25)';
+
+  return (
+    <div style={{
+      display:'flex', alignItems:'center', gap:8,
+      background: bg, border:`1px solid ${border}`,
+      borderRadius:8, padding:'8px 12px',
+    }}>
+      <span style={{ fontSize:13 }}>{isBuy ? '⚡' : '⚡'}</span>
+      <div style={{ flex:1 }}>
+        <div style={{ ...mono, fontSize:10, fontWeight:800, color }}>
+          {signal.signal} Signal — {signal.confidence}% confidence
+        </div>
+        {signal.entry && (
+          <div style={{ ...mono, fontSize:9, color:T.slate, marginTop:2 }}>
+            Entry: {parseFloat(signal.entry).toLocaleString()}
+            {signal.stop_loss   && ` · SL: ${parseFloat(signal.stop_loss).toLocaleString()}`}
+            {signal.take_profit && ` · TP: ${parseFloat(signal.take_profit).toLocaleString()}`}
+          </div>
+        )}
+      </div>
+      <span style={{ ...mono, fontSize:8, color:T.slate }}>
+        {signal.created_at ? new Date(signal.created_at).toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit' }) : ''}
+      </span>
+    </div>
+  );
+}
+
+// ── Orders Panel (with Live P&L + Journal) ────────────────
+function OrdersPanel({ exchangeId, refresh, prices }) {
   const [orders,        setOrders]        = useState([]);
   const [tab,           setTab]           = useState('open');
   const [loading,       setLoading]       = useState(true);
@@ -883,13 +1014,14 @@ function OrdersPanel({ exchangeId, refresh }) {
     if (!exchangeId) return;
     if (!silent) setLoading(true);
     try {
-      const res = await api.get(`/trading/orders?exchangeId=${exchangeId}&status=${tab}`);
+      const res = await api.get(`/trading/orders?exchangeId=${exchangeId}&status=${tab === 'journal' ? 'closed' : tab}`);
       if (res.data.success) setOrders(res.data.orders || []);
     } catch {} finally { if (!silent) setLoading(false); }
   }, [exchangeId, tab]);
 
   useEffect(() => { load(); }, [load, refresh]);
 
+  // Poll open orders every 10s for Live P&L refresh
   useEffect(() => {
     if (tab !== 'open') return;
     const iv = setInterval(() => {
@@ -907,12 +1039,13 @@ function OrdersPanel({ exchangeId, refresh }) {
       const symQs = order.symbol ? `&symbol=${encodeURIComponent(order.symbol)}` : '';
       await api.delete(`/trading/orders/${order.id || order.exchange_order_id}?exchangeId=${exchangeId}&mode=${order.mode}${symQs}`);
       load();
-    } catch {} finally {
-      setPendingCancel(null);
-    }
+    } catch {} finally { setPendingCancel(null); }
   };
 
+  const enrichedOrders = useLivePnl(orders, prices || {});
   const sideColor = s => s === 'buy' ? T.green : T.red;
+
+  const TABS = ['open', 'closed', 'journal'];
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:0 }}>
@@ -924,15 +1057,16 @@ function OrdersPanel({ exchangeId, refresh }) {
         />
       )}
 
+      {/* Tab bar */}
       <div style={{ display:'flex', borderBottom:'1px solid rgba(255,255,255,0.05)', marginBottom:14 }}>
-        {['open','closed'].map(t => (
+        {TABS.map(t => (
           <button key={t} onClick={() => setTab(t)} style={{
             ...mono, fontSize:9, letterSpacing:'.12em', textTransform:'uppercase',
-            background:'none', border:'none', cursor:'pointer', padding:'8px 16px 8px 0',
+            background:'none', border:'none', cursor:'pointer', padding:'8px 14px 8px 0',
             color: tab===t ? 'var(--text)' : T.slate,
             borderBottom: tab===t ? `2px solid ${T.cyan}` : '2px solid transparent',
             marginBottom:-1, fontWeight: tab===t ? 700 : 400,
-          }}>{t}</button>
+          }}>{t === 'journal' ? '📒 Journal' : t}</button>
         ))}
         {tab === 'open' && (
           <span style={{ marginLeft:'auto', display:'flex', alignItems:'center', gap:5, ...mono, fontSize:8, color:T.slate, opacity:.6 }}>
@@ -946,54 +1080,130 @@ function OrdersPanel({ exchangeId, refresh }) {
         <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
           {[1,2,3].map(i => <Sk key={i} h={48}/>)}
         </div>
-      ) : orders.length === 0 ? (
-        <div style={{ textAlign:'center', padding:'32px 0', ...mono, fontSize:11, color:T.slate, opacity:.5 }}>
-          No {tab} orders
-        </div>
       ) : (
-        <div style={{ display:'flex', flexDirection:'column', gap:6, maxHeight:400, overflowY:'auto' }}>
-          {orders.map((o, i) => (
-            <div key={i} className="aq-t-row" style={{ display:'flex', flexDirection:'column', gap:6, padding:'10px 8px', borderRadius:8, background:'rgba(255,255,255,0.01)', cursor:'default' }}>
-              <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-                <span style={{ ...mono, fontSize:9, fontWeight:800, padding:'2px 8px', borderRadius:4,
-                  color:sideColor(o.side), background:`${sideColor(o.side)}15`, border:`1px solid ${sideColor(o.side)}30` }}>
-                  {(o.side||'').toUpperCase()}
-                </span>
-                <span style={{ ...mono, fontSize:11, fontWeight:700, color:'var(--text)' }}>{o.symbol}</span>
-                <span style={{ ...mono, fontSize:9, color:T.slate }}>× {parseFloat(o.quantity).toFixed(4)}</span>
-                <span style={{ ...mono, fontSize:8, marginLeft:'auto', color: o.mode==='paper' ? T.cyan : T.red }}>
-                  {o.mode==='paper' ? '📄' : '⚡'} {o.mode}
-                </span>
+
+        /* ── Journal tab ── */
+        tab === 'journal' ? (
+          <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+            <JournalStats orders={orders} />
+            {orders.filter(o => o.pnl != null).length === 0 ? (
+              <div style={{ textAlign:'center', padding:'24px 0', ...mono, fontSize:11, color:T.slate, opacity:.5 }}>
+                No closed trades yet
               </div>
-              {(o.stop_loss || o.take_profit) && (
-                <div style={{ display:'flex', gap:8, ...mono, fontSize:8 }}>
-                  {o.stop_loss   && <span style={{ color:T.red   }}>🛑 SL {parseFloat(o.stop_loss).toLocaleString()}</span>}
-                  {o.take_profit && <span style={{ color:T.green }}>🎯 TP {parseFloat(o.take_profit).toLocaleString()}</span>}
-                </div>
-              )}
-              <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
-                <span style={{ ...mono, fontSize:9, color:T.slate }}>
-                  {(o.order_type||'').replace('_',' ')}
-                  {o.price ? ` · $${parseFloat(o.price).toLocaleString()}` : ' · Market'}
-                </span>
-                {tab === 'open' ? (
-                  <button onClick={() => requestCancel(o)} style={{ ...mono, fontSize:9, padding:'3px 10px', borderRadius:5, cursor:'pointer', border:'1px solid rgba(244,63,94,0.2)', background:'rgba(244,63,94,0.06)', color:T.red }}>
-                    Cancel
-                  </button>
-                ) : (
-                  <span style={{ ...mono, fontSize:10, fontWeight:700, color: o.pnl != null ? (parseFloat(o.pnl)>=0?T.green:T.red) : T.slate }}>
-                    {o.pnl != null ? `${parseFloat(o.pnl)>=0?'+':''}$${parseFloat(o.pnl).toFixed(2)}` : o.status}
-                    {o.close_reason && o.close_reason !== 'manual' && (
-                      <span style={{ marginLeft:6, color:T.slate, fontWeight:400 }}>
-                        ({o.close_reason === 'stop_loss' ? '🛑 SL' : o.close_reason === 'take_profit' ? '🎯 TP' : o.close_reason})
-                      </span>
-                    )}
+            ) : (
+              <div style={{ display:'flex', flexDirection:'column', gap:5, maxHeight:380, overflowY:'auto' }}>
+                {orders.filter(o => o.pnl != null).map((o, i) => {
+                  const pnl    = parseFloat(o.pnl);
+                  const pnlPct = parseFloat(o.pnl_pct || 0);
+                  const isWin  = pnl > 0;
+                  return (
+                    <div key={i} className="aq-t-row" style={{
+                      display:'flex', flexDirection:'column', gap:4, padding:'10px 8px',
+                      borderRadius:8, background:'rgba(255,255,255,0.01)',
+                      borderLeft: `2px solid ${isWin ? T.green : T.red}`,
+                    }}>
+                      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                        <span style={{ ...mono, fontSize:9, fontWeight:800, color:sideColor(o.side) }}>
+                          {(o.side||'').toUpperCase()}
+                        </span>
+                        <span style={{ ...mono, fontSize:11, fontWeight:700, color:'var(--text)' }}>{o.symbol}</span>
+                        <span style={{ ...mono, fontSize:9, color:T.slate }}>× {parseFloat(o.quantity).toFixed(4)}</span>
+                        <span style={{ ...mono, fontSize:11, fontWeight:800, color: isWin ? T.green : T.red, marginLeft:'auto' }}>
+                          {isWin ? '+' : ''}${pnl.toFixed(2)}
+                          <span style={{ fontSize:9, fontWeight:400, marginLeft:4, color: isWin ? T.green : T.red, opacity:.8 }}>
+                            ({pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%)
+                          </span>
+                        </span>
+                      </div>
+                      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+                        <span style={{ ...mono, fontSize:8, color:T.slate }}>
+                          Entry: ${parseFloat(o.price).toLocaleString()}
+                        </span>
+                        <span style={{ ...mono, fontSize:8, color:T.slate }}>
+                          {o.close_reason === 'stop_loss' ? '🛑 SL hit' : o.close_reason === 'take_profit' ? '🎯 TP hit' : '✋ Manual'}
+                          {' · '}{o.closed_at ? new Date(o.closed_at).toLocaleDateString('en-GB', { day:'2-digit', month:'short' }) : ''}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+        ) : orders.length === 0 ? (
+          <div style={{ textAlign:'center', padding:'32px 0', ...mono, fontSize:11, color:T.slate, opacity:.5 }}>
+            No {tab} orders
+          </div>
+        ) : (
+
+          /* ── Open / Closed tabs ── */
+          <div style={{ display:'flex', flexDirection:'column', gap:6, maxHeight:420, overflowY:'auto' }}>
+            {enrichedOrders.map((o, i) => (
+              <div key={i} className="aq-t-row" style={{ display:'flex', flexDirection:'column', gap:6, padding:'10px 8px', borderRadius:8, background:'rgba(255,255,255,0.01)', cursor:'default' }}>
+                <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                  <span style={{ ...mono, fontSize:9, fontWeight:800, padding:'2px 8px', borderRadius:4,
+                    color:sideColor(o.side), background:`${sideColor(o.side)}15`, border:`1px solid ${sideColor(o.side)}30` }}>
+                    {(o.side||'').toUpperCase()}
                   </span>
+                  <span style={{ ...mono, fontSize:11, fontWeight:700, color:'var(--text)' }}>{o.symbol}</span>
+                  <span style={{ ...mono, fontSize:9, color:T.slate }}>× {parseFloat(o.quantity).toFixed(4)}</span>
+                  <span style={{ ...mono, fontSize:8, marginLeft:'auto', color: o.mode==='paper' ? T.cyan : T.red }}>
+                    {o.mode==='paper' ? '📄' : '⚡'} {o.mode}
+                  </span>
+                </div>
+
+                {/* Live P&L row — only for open paper trades */}
+                {tab === 'open' && o.livePnl != null && (
+                  <div style={{
+                    display:'flex', alignItems:'center', justifyContent:'space-between',
+                    background: o.livePnl >= 0 ? 'rgba(52,211,153,0.05)' : 'rgba(244,63,94,0.05)',
+                    border:`1px solid ${o.livePnl >= 0 ? 'rgba(52,211,153,0.15)' : 'rgba(244,63,94,0.15)'}`,
+                    borderRadius:6, padding:'5px 10px',
+                  }}>
+                    <span style={{ ...mono, fontSize:9, color:T.slate }}>
+                      Live P&L @ {parseFloat(o.currentPrice).toLocaleString('en-US', { maximumFractionDigits:4 })}
+                    </span>
+                    <span style={{ ...mono, fontSize:11, fontWeight:800, color: o.livePnl >= 0 ? T.green : T.red }}>
+                      {o.livePnl >= 0 ? '+' : ''}${o.livePnl.toFixed(2)}
+                      <span style={{ fontSize:9, fontWeight:400, marginLeft:4 }}>
+                        ({o.livePnlPct >= 0 ? '+' : ''}{o.livePnlPct.toFixed(2)}%)
+                      </span>
+                    </span>
+                  </div>
                 )}
+
+                {(o.stop_loss || o.take_profit) && (
+                  <div style={{ display:'flex', gap:8, ...mono, fontSize:8 }}>
+                    {o.stop_loss   && <span style={{ color:T.red   }}>🛑 SL {parseFloat(o.stop_loss).toLocaleString()}</span>}
+                    {o.take_profit && <span style={{ color:T.green }}>🎯 TP {parseFloat(o.take_profit).toLocaleString()}</span>}
+                  </div>
+                )}
+
+                <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+                  <span style={{ ...mono, fontSize:9, color:T.slate }}>
+                    {(o.order_type||'').replace('_',' ')}
+                    {o.price ? ` · $${parseFloat(o.price).toLocaleString()}` : ' · Market'}
+                  </span>
+                  {tab === 'open' ? (
+                    <button onClick={() => requestCancel(o)} style={{ ...mono, fontSize:9, padding:'3px 10px', borderRadius:5, cursor:'pointer', border:'1px solid rgba(244,63,94,0.2)', background:'rgba(244,63,94,0.06)', color:T.red }}>
+                      Cancel
+                    </button>
+                  ) : (
+                    <span style={{ ...mono, fontSize:10, fontWeight:700, color: o.pnl != null ? (parseFloat(o.pnl)>=0?T.green:T.red) : T.slate }}>
+                      {o.pnl != null ? `${parseFloat(o.pnl)>=0?'+':''}$${parseFloat(o.pnl).toFixed(2)}` : o.status}
+                      {o.close_reason && o.close_reason !== 'manual' && (
+                        <span style={{ marginLeft:6, color:T.slate, fontWeight:400 }}>
+                          ({o.close_reason === 'stop_loss' ? '🛑 SL' : o.close_reason === 'take_profit' ? '🎯 TP' : o.close_reason})
+                        </span>
+                      )}
+                    </span>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )
       )}
     </div>
   );
@@ -1003,7 +1213,7 @@ function OrdersPanel({ exchangeId, refresh }) {
 export default function Trading() {
   const [connections,   setConnections]   = useState({});
   const [selectedExId,  setSelectedExId]  = useState('');
-  const [instrumentTab, setInstrumentTab] = useState('forex'); // 'forex' | 'commodity' — only used for OANDA
+  const [instrumentTab, setInstrumentTab] = useState('forex');
   const [symbol,        setSymbol]        = useState('BTC');
   const [symbolInput,   setSymbolInput]   = useState('BTC');
   const [ticker,        setTicker]        = useState(null);
@@ -1013,41 +1223,29 @@ export default function Trading() {
   const [ordersRefresh, setOrdersRefresh] = useState(0);
   const [chartMode,     setChartMode]     = useState('tradingview');
   const [showAlert,     setShowAlert]     = useState(false);
+  // prices map: { 'BTC': 62000, 'BTCUSDT': 62000, 'ETH': 1700, ... }
+  // fed into OrdersPanel for Live P&L computation without extra fetches.
+  const [prices,        setPrices]        = useState({});
 
   const isOandaAccount = selectedExId === 'oanda';
   const isCommodity     = isOandaAccount && COMMODITY_SYMBOLS.includes(symbol);
   const isForex         = isOandaAccount && !isCommodity;
-  const quoteCcy         = isOandaAccount ? (balance?.[0]?.symbol || 'USD') : 'USDT';
-  const priceDp          = isCommodity ? 2 : isForex ? 5 : (ticker?.price > 1 ? 2 : 6);
+  const quoteCcy        = isOandaAccount ? (balance?.[0]?.symbol || 'USD') : 'USDT';
+  const priceDp         = isCommodity ? 2 : isForex ? 5 : (ticker?.price > 1 ? 2 : 6);
+
+  // Signal badge for the current symbol
+  const symbolSignal = useSymbolSignal(symbol, isOandaAccount);
 
   useEffect(() => { injectStyles(); }, []);
 
-  // ── Prefill symbol from ?symbol= query param ──────────────
-  // Lets the Watchlist page's "quick trade" button (⚡) deep-link
-  // straight into a symbol here instead of the default BTC.
-  // Watchlist only shows ⚡ for crypto rows, so this only ever
-  // receives crypto symbols — forex/commodity deep-linking would
-  // need a separate query param if that's wired up later.
   useEffect(() => {
     const params  = new URLSearchParams(window.location.search);
     const prefill = params.get('symbol');
     if (!prefill) return;
-
-    const clean = prefill
-      .toUpperCase()
-      .replace('/', '')
-      .replace(/USDT$/, '')
-      .replace(/[^A-Z0-9]/g, '');
-
-    if (clean) {
-      setSymbol(clean);
-      setSymbolInput(clean);
-    }
+    const clean = prefill.toUpperCase().replace('/','').replace(/USDT$/,'').replace(/[^A-Z0-9]/g,'');
+    if (clean) { setSymbol(clean); setSymbolInput(clean); }
   }, []);
 
-  // ── Reset symbol to a sensible default when switching between
-  // a crypto exchange and OANDA (forex/commodity instrument names
-  // contain "_", crypto tickers don't) ──
   useEffect(() => {
     if (!selectedExId) return;
     const symbolLooksOanda = symbol.includes('_');
@@ -1060,14 +1258,12 @@ export default function Trading() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedExId]);
 
-  // Switching the Forex/Commodities tab jumps to that list's first symbol.
   const switchInstrumentTab = (tab) => {
     setInstrumentTab(tab);
     const first = tab === 'forex' ? FOREX_SYMBOLS[0] : COMMODITY_SYMBOLS[0];
     setSymbol(first); setSymbolInput(first);
   };
 
-  // Load connections
   useEffect(() => {
     api.get('/exchanges/connections')
       .then(res => {
@@ -1078,8 +1274,6 @@ export default function Trading() {
       }).catch(() => {});
   }, []);
 
-  // Fetch ticker — OANDA needs exchangeId so the backend knows to
-  // route to OANDA's authenticated pricing/candles instead of Binance.
   const fetchTicker = useCallback(async (sym, exId) => {
     if (!sym) return;
     setTickerLoading(true);
@@ -1089,6 +1283,16 @@ export default function Trading() {
       if (res.data.success) {
         setTicker(res.data.ticker);
         setCandles(res.data.candles || []);
+        // Update prices map so Live P&L stays current without extra calls
+        const p = res.data.ticker?.price;
+        if (p) {
+          setPrices(prev => ({
+            ...prev,
+            [sym]: p,
+            [`${sym}USDT`]: p,
+            [sym.replace('_','/')]: p,
+          }));
+        }
       }
     } catch { setTicker(null); }
     finally { setTickerLoading(false); }
@@ -1100,7 +1304,6 @@ export default function Trading() {
     return () => clearInterval(iv);
   }, [symbol, selectedExId, fetchTicker]);
 
-  // Fetch balance
   useEffect(() => {
     if (!selectedExId) return;
     api.get(`/trading/balance?exchangeId=${selectedExId}`)
@@ -1143,6 +1346,7 @@ export default function Trading() {
 
       {isReadonly && <ReadonlyBanner exchangeName={selectedEx?.name} />}
 
+      {/* Header */}
       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', flexWrap:'wrap', gap:12 }}>
         <div>
           <div style={{ ...mono, fontSize:10, letterSpacing:'.2em', textTransform:'uppercase', color:T.slate, marginBottom:4 }}>// Live Trading</div>
@@ -1150,7 +1354,6 @@ export default function Trading() {
             {connectedExchanges.length} exchange{connectedExchanges.length!==1?'s':''} connected
           </div>
         </div>
-
         <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
           {connectedExchanges.map(ex => {
             const isSelected = selectedExId === ex.id;
@@ -1175,6 +1378,7 @@ export default function Trading() {
 
       <div style={{ display:'grid', gridTemplateColumns:'300px 1fr 270px', gap:14, alignItems:'start' }}>
 
+        {/* ── Left: Symbol picker + Order form ── */}
         <div style={{ ...panel, padding:22, display:'flex', flexDirection:'column', gap:14 }}>
 
           <div>
@@ -1222,6 +1426,9 @@ export default function Trading() {
             </div>
           </div>
 
+          {/* Signal badge — shows above the form only when a BUY/SELL signal exists */}
+          {symbolSignal && <SignalBadge signal={symbolSignal} />}
+
           <Divider/>
 
           {selectedEx ? (
@@ -1240,6 +1447,7 @@ export default function Trading() {
           )}
         </div>
 
+        {/* ── Center: Ticker + Chart + Balance ── */}
         <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
 
           <div style={{ ...panel, padding:'18px 22px' }}>
@@ -1313,15 +1521,16 @@ export default function Trading() {
           )}
         </div>
 
+        {/* ── Right: Orders Panel ── */}
         <div style={{ ...panel, padding:'18px 20px' }}>
           <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:14 }}>
-            <Label>Orders</Label>
+            <Label>Orders & Journal</Label>
             <button onClick={() => setOrdersRefresh(r => r+1)} style={{ ...mono, fontSize:9, padding:'3px 8px', borderRadius:5, border:'1px solid var(--border)', background:'transparent', color:T.slate, cursor:'pointer' }}>
               ↻
             </button>
           </div>
           {selectedExId ? (
-            <OrdersPanel exchangeId={selectedExId} refresh={ordersRefresh}/>
+            <OrdersPanel exchangeId={selectedExId} refresh={ordersRefresh} prices={prices} />
           ) : (
             <div style={{ textAlign:'center', padding:'24px 0', ...mono, fontSize:11, color:T.slate, opacity:.5 }}>Select exchange</div>
           )}
