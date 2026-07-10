@@ -6,6 +6,7 @@
 const db     = require('../config/db');
 const logger = require('../utils/logger');
 const { takePortfolioSnapshot } = require('../services/portfolioSnapshot.service');
+const { getLivePrices } = require('../services/livePrices.service');
 
 async function getDashboardData(req, res) {
   try {
@@ -34,18 +35,42 @@ async function getDashboardData(req, res) {
     const totalClosed   = parseInt(s?.total_closed)   || 0;
     const winRate       = totalClosed > 0 ? ((wins / totalClosed) * 100).toFixed(1) : '0.0';
 
-    // Cash + portfolio market value
+    // Cash
     const { rows: [acc] } = await db.query(
       `SELECT COALESCE(cash_balance, 10000) AS cash FROM accounts WHERE user_id = $1`,
       [userId]
     );
-    const { rows: [port] } = await db.query(`
-      SELECT COALESCE(SUM(amount * current_price), 0) AS market_value
-      FROM portfolio WHERE user_id = $1
-    `, [userId]);
+    const cash = parseFloat(acc?.cash || 10000);
 
-    const cash        = parseFloat(acc?.cash || 10000);
-    const marketValue = parseFloat(port?.market_value || 0);
+    // ── Portfolio market value — LIVE, via livePrices.service ─
+    // ✅ Fix: avant, marketValue venait de SUM(amount * current_price) en
+    // DB. Cette colonne n'est mise à jour que quand l'utilisateur visite
+    // la page Portfolio (getPortfolioData). Un utilisateur qui ouvre
+    // Dashboard sans être passé par Portfolio voyait donc une valeur
+    // potentiellement périmée (prix du jour d'ouverture de la position,
+    // parfois vieux de plusieurs jours). On récupère maintenant les
+    // positions et on demande les prix live au service centralisé —
+    // la valeur reste correcte quelle que soit la page visitée en
+    // premier, et comme livePrices.service a son propre cache 5min
+    // partagé, ça ne rajoute pas de charge réseau si Portfolio a déjà
+    // été chargé récemment.
+    const { rows: portfolioRows } = await db.query(
+      `SELECT symbol, amount, current_price FROM portfolio WHERE user_id = $1`,
+      [userId]
+    );
+
+    const symbols     = [...new Set(portfolioRows.map(p => p.symbol))];
+    const livePrices  = symbols.length > 0 ? await getLivePrices(symbols) : {};
+
+    const marketValue = portfolioRows.reduce((sum, p) => {
+      const live  = livePrices[p.symbol];
+      // Fallback on the DB's last-known price if the live fetch failed
+      // for this symbol (delisted, provider down, etc) rather than
+      // treating the position as worth $0.
+      const price = live?.price ?? parseFloat(p.current_price) ?? 0;
+      return sum + parseFloat(p.amount) * price;
+    }, 0);
+
     const portfolioValue = cash + marketValue + totalPnl;
 
     // ── 2. Equity curve from real snapshots (last 30 days) ─

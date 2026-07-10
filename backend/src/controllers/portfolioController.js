@@ -1,27 +1,15 @@
 /**
  * portfolioController.js — AtlasQuant AI v2
  * Merges DB positions + live exchange balances from connected exchanges
- * Price cache: 5min TTL to avoid Yahoo Finance 429s
+ * All price fetching/caching now lives in services/livePrices.service.js
  */
 const db           = require('../config/db');
-const axios        = require('axios');
 const logger       = require('../utils/logger');
 const exchangesSvc = require('../services/exchanges.service');
 const { getBenchmarkHistory } = require('../services/marketData.service');
+const { getLivePrices } = require('../services/livePrices.service');
 
 const COLORS = ['#00f5d4','#a78bfa','#f59e0b','#f43f5e','#38bdf8','#34d399','#fb923c','#e879f9'];
-
-// ── Price cache (in-memory, per process) ─────────────────────────────────────
-const PRICE_CACHE = new Map(); // symbol → { price, changeRaw, cachedAt }
-const PRICE_TTL   = 5 * 60 * 1000; // 5 minutes
-
-// Known stock tickers — everything else treated as crypto
-const STOCK_SYMBOLS = new Set([
-  'AAPL','MSFT','GOOGL','GOOG','AMZN','TSLA','NVDA','META','AMD','PLTR',
-  'SPY','QQQ','DIA','IWM','NFLX','BABA','TSM','ORCL','INTC','QCOM',
-  'JPM','GS','MS','BAC','WFC','V','MA','PYPL','SQ','COIN',
-  'XOM','CVX','BP','OXY','MCD','KO','PEP','PG','JNJ','UNH',
-]);
 
 function fmtUSD(n, decimals = 2) {
   const abs  = Math.abs(n).toFixed(decimals);
@@ -30,80 +18,6 @@ function fmtUSD(n, decimals = 2) {
 }
 function fmtPct(n, decimals = 2) {
   return `${n >= 0 ? '+' : ''}${n.toFixed(decimals)}%`;
-}
-
-// ── Fetch live prices with cache ──────────────────────────────────────────────
-async function fetchLivePrices(symbols) {
-  const CRYPTO_STABLE = ['USDT','USDC','BUSD','DAI','TUSD','FDUSD','FDUSD'];
-  const now = Date.now();
-
-  const priceMap         = {};
-  const cryptoToFetch    = [];
-  const stocksToFetch    = [];
-
-  // ── 1. Serve from cache where possible ──
-  for (const s of symbols) {
-    const cached = PRICE_CACHE.get(s);
-    if (cached && now - cached.cachedAt < PRICE_TTL) {
-      priceMap[s] = { price: cached.price, changeRaw: cached.changeRaw };
-      continue;
-    }
-    if (CRYPTO_STABLE.includes(s)) {
-      priceMap[s] = { price: 1, changeRaw: 0 };
-      PRICE_CACHE.set(s, { price: 1, changeRaw: 0, cachedAt: now });
-    } else if (STOCK_SYMBOLS.has(s)) {
-      stocksToFetch.push(s);
-    } else {
-      cryptoToFetch.push(s);
-    }
-  }
-
-  // ── 2. Crypto via Binance public API ──
-  if (cryptoToFetch.length > 0) {
-    const results = await Promise.allSettled(
-      cryptoToFetch.map(sym =>
-        axios.get(`https://api.binance.com/api/v3/ticker/24hr?symbol=${sym}USDT`, { timeout: 5000 })
-          .then(r => ({ sym, price: parseFloat(r.data.lastPrice), changeRaw: parseFloat(r.data.priceChangePercent) }))
-      )
-    );
-    for (const r of results) {
-      if (r.status === 'fulfilled' && r.value?.price > 0) {
-        const { sym, price, changeRaw } = r.value;
-        priceMap[sym] = { price, changeRaw };
-        PRICE_CACHE.set(sym, { price, changeRaw, cachedAt: now });
-      }
-    }
-  }
-
-  // ── 3. Stocks via internal prices route ──
-  if (stocksToFetch.length > 0) {
-    try {
-      const { data } = await axios.get(
-        `http://localhost:${process.env.PORT || 5000}/api/prices/stocks?symbols=${stocksToFetch.join(',')}`,
-        { timeout: 12000 }
-      );
-      if (data?.success && Array.isArray(data.data)) {
-        data.data.forEach(q => {
-          if (q?.symbol) {
-            priceMap[q.symbol] = { price: q.price, changeRaw: q.change };
-            PRICE_CACHE.set(q.symbol, { price: q.price, changeRaw: q.change, cachedAt: now });
-          }
-        });
-      }
-    } catch (e) {
-      logger.warn(`[portfolio] Stock prices fetch failed: ${e.message}`);
-      // Fallback: use stale cache rather than failing completely
-      for (const s of stocksToFetch) {
-        const stale = PRICE_CACHE.get(s);
-        if (stale) {
-          priceMap[s] = { price: stale.price, changeRaw: stale.changeRaw };
-          logger.warn(`[portfolio] Using stale cache for ${s} (age: ${Math.round((now - stale.cachedAt) / 1000)}s)`);
-        }
-      }
-    }
-  }
-
-  return priceMap;
 }
 
 // ── Fetch live balances from all connected exchanges ──────────────────────────
@@ -214,12 +128,56 @@ function mergePositions(dbPositions, exchangeBalances) {
   return { positions: Object.values(merged), stableCash };
 }
 
+// ── Benchmark curve builder (date-aligned, forward-filled) ────────────────────
+function toDateKey(d) {
+  const dt = new Date(d);
+  const y = dt.getUTCFullYear();
+  const m = String(dt.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(dt.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function buildBenchmarkCurve(equityCurve, benchmarkCandles) {
+  if (!benchmarkCandles.length || !equityCurve.length) return { curve: [], alpha: null };
+
+  const byDate = new Map(
+    benchmarkCandles.map(c => [toDateKey(c.date), c.close])
+  );
+
+  let lastKnownClose = null;
+  for (const c of benchmarkCandles) {
+    const d = toDateKey(c.date);
+    if (d <= equityCurve[0].date) lastKnownClose = c.close;
+    else break;
+  }
+
+  const firstPortfolio = equityCurve[0].v;
+  let firstBenchmark    = null;
+
+  const curve = equityCurve.map(point => {
+    if (byDate.has(point.date)) lastKnownClose = byDate.get(point.date);
+    if (firstBenchmark === null && lastKnownClose != null) firstBenchmark = lastKnownClose;
+
+    return {
+      t:         point.t,
+      portfolio: firstPortfolio > 0 ? ((point.v - firstPortfolio) / firstPortfolio) * 100 : 0,
+      benchmark: (lastKnownClose != null && firstBenchmark)
+        ? ((lastKnownClose - firstBenchmark) / firstBenchmark) * 100
+        : null,
+    };
+  });
+
+  const last  = curve.at(-1);
+  const alpha = (last && last.benchmark != null) ? (last.portfolio - last.benchmark) : null;
+
+  return { curve, alpha };
+}
+
 // ── GET /api/portfolio/data ───────────────────────────────────────────────────
 async function getPortfolioData(req, res) {
   try {
     const userId = req.user.id;
 
-    // 1. DB positions
     const { rows: dbPositions } = await db.query(
       `SELECT symbol, side, amount, average_entry, current_price, sector
        FROM portfolio WHERE user_id = $1
@@ -227,30 +185,32 @@ async function getPortfolioData(req, res) {
       [userId]
     );
 
-    // 2. Live exchange balances
     const exchangeBalances = await fetchExchangeBalances(userId);
-
-    // 3. Merge
     const { positions, stableCash } = mergePositions(dbPositions, exchangeBalances);
 
-    // 4. Live prices (with cache — no more 429s)
+    // Live prices — source wa7da: livePrices.service (cache + asset detection + routing)
     const symbols    = [...new Set(positions.map(p => p.symbol))];
-    const livePrices = symbols.length > 0 ? await fetchLivePrices(symbols) : {};
+    const livePrices = symbols.length > 0
+      ? await getLivePrices(symbols)
+      : {};
 
-    // 5. Update DB current_price (fire & forget)
-    if (Object.keys(livePrices).length > 0) {
-      Promise.all(
-        Object.entries(livePrices).map(([sym, d]) =>
+    await Promise.allSettled(
+      Object.entries(livePrices)
+        .filter(([, d]) => d) // skip symbols that failed to fetch (null)
+        .map(([sym, d]) =>
           db.query(
-            `UPDATE portfolio SET current_price=$1, updated_at=NOW()
-             WHERE user_id=$2 AND symbol=$3`,
+            `UPDATE portfolio
+            SET current_price=$1,
+                updated_at=NOW()
+            WHERE user_id=$2
+            AND symbol=$3`,
             [d.price, userId, sym]
-          ).catch(() => {})
+          )
         )
-      );
-    }
+    ).catch(err => {
+      logger.warn(`[portfolio] price update: ${err.message}`);
+    });
 
-    // 6. Cash
     const { rows: accountRows } = await db.query(
       `SELECT cash_balance FROM accounts WHERE user_id=$1 LIMIT 1`,
       [userId]
@@ -258,64 +218,36 @@ async function getPortfolioData(req, res) {
     const dbCash = accountRows.length ? parseFloat(accountRows[0].cash_balance) : 0;
     const cash   = dbCash + stableCash;
 
-    // 7. Equity curve
     const { rows: curveRows } = await db.query(
-      `SELECT snapshot_date, total_value FROM portfolio_snapshots
-       WHERE user_id=$1 ORDER BY snapshot_date DESC LIMIT 30`,
+      `SELECT
+        snapshot_date,
+        total_value,
+        TO_CHAR(snapshot_date, 'YYYY-MM-DD') AS date_key
+      FROM portfolio_snapshots
+      WHERE user_id=$1
+      ORDER BY snapshot_date DESC
+      LIMIT 30`,
       [userId]
     );
     const equityCurve = curveRows.reverse().map(r => ({
-      t: new Date(r.snapshot_date).toLocaleDateString('en-US', { month:'short', day:'numeric' }),
-      v: parseFloat(r.total_value),
+      t:    new Date(r.snapshot_date).toLocaleDateString('en-US', { month:'short', day:'numeric' }),
+      v:    parseFloat(r.total_value),
+      date: r.date_key,
     }));
 
-    const benchmark = req.query.benchmark || "BTC";
-
-    const benchmarkHistory = await getBenchmarkHistory(
-      benchmark,
-      equityCurve.length
-    );
-    
+    const benchmarkSymbol = (req.query.benchmark || 'BTC').toUpperCase();
     let benchmarkCurve = [];
-    let alpha = 0;
+    let alpha = null;
 
-    if (benchmarkHistory.length > 0 && equityCurve.length > 0) {
-
-      const firstPortfolio = equityCurve[0].v;
-      const firstBenchmark = benchmarkHistory[0].close;
-
-      benchmarkCurve = equityCurve.map((point, index) => {
-
-        const benchmarkPoint = benchmarkHistory[index];
-
-        if (!benchmarkPoint) {
-          return {
-            ...point,
-            benchmark: null,
-            portfolio: null,
-          };
-        }
-
-        return {
-          ...point,
-          portfolio: ((point.v - firstPortfolio) / firstPortfolio) * 100,
-          benchmark: ((benchmarkPoint.close - firstBenchmark) / firstBenchmark) * 100,
-        };
-      });
-
-      const last = benchmarkCurve.at(-1);
-
-      if (last) {
-        alpha = (last.portfolio || 0) - (last.benchmark || 0);
-      }
+    try {
+      const benchmarkCandles = await getBenchmarkHistory(benchmarkSymbol, equityCurve.length + 5);
+      const built = buildBenchmarkCurve(equityCurve, benchmarkCandles);
+      benchmarkCurve = built.curve;
+      alpha          = built.alpha;
+    } catch (e) {
+      logger.warn(`[portfolio] Benchmark fetch failed (${benchmarkSymbol}): ${e.message}`);
     }
 
-    // 7.5. Realized P&L (lifetime, from closed trades)
-    // ✅ Feature: sans ça, le P&L des positions fermées (AMZN etc.) disparaissait
-    // complètement de la vue d'ensemble une fois la position supprimée de `portfolio`.
-    // On agrège `trades` avec le même filtre que getTradeHistory (status='closed',
-    // side IN ('long','short') — pour ignorer les trades BUY/SELL de trade.service.js)
-    // et on combine avec le P&L non-réalisé pour un vrai "Lifetime Total".
     const { rows: realizedRows } = await db.query(
       `SELECT COALESCE(SUM(pnl),0) AS realized_pnl,
               COALESCE(SUM(entry_price*quantity),0) AS realized_cost
@@ -325,7 +257,6 @@ async function getPortfolioData(req, res) {
     const realizedPnLRaw  = parseFloat(realizedRows[0].realized_pnl)  || 0;
     const realizedCostRaw = parseFloat(realizedRows[0].realized_cost) || 0;
 
-    // 8. Process positions
     let totalCost = 0, totalValue = cash, todayPnLRaw = 0;
 
     const processedPositions = positions.map((p, i) => {
@@ -369,17 +300,12 @@ async function getPortfolioData(req, res) {
       };
     });
 
-    // 9. Summary stats
     const investedValue = totalValue - cash;
     const totalPnLRaw   = totalValue - cash - totalCost;
     const totalRetPct   = totalCost > 0 ? (totalPnLRaw / totalCost) * 100 : 0;
     const dayRetPct     = (totalValue - todayPnLRaw) > 0
       ? (todayPnLRaw / (totalValue - todayPnLRaw)) * 100 : 0;
 
-    // ✅ Feature: Lifetime Total = Unrealized (positions ouvertes) + Realized
-    // (trades fermés). Le basis utilisé pour le % est la somme des deux cost
-    // basis (positions ouvertes + trades fermés), pas juste totalCost — sinon
-    // le % de retour lifetime serait faux dès qu'il y a des trades réalisés.
     const lifetimeTotalRaw = totalPnLRaw + realizedPnLRaw;
     const lifetimeCostRaw  = totalCost + realizedCostRaw;
     const lifetimeRetPct   = lifetimeCostRaw > 0 ? (lifetimeTotalRaw / lifetimeCostRaw) * 100 : 0;
@@ -388,22 +314,17 @@ async function getPortfolioData(req, res) {
       totalValue,
       todayPnL:       fmtUSD(todayPnLRaw),
       dayReturn:      fmtPct(dayRetPct),
-      totalPnL:       fmtUSD(totalPnLRaw),        // = Unrealized P&L (positions encore ouvertes)
+      totalPnL:       fmtUSD(totalPnLRaw),
       totalReturn:    fmtPct(totalRetPct),
-      realizedPnL:    fmtUSD(realizedPnLRaw),     // ✅ new — somme lifetime des trades fermés
-      realizedPnLRaw,                             // ✅ raw value, utile pour le frontend (couleur, tri...)
-      lifetimeTotal:  fmtUSD(lifetimeTotalRaw),   // ✅ new — unrealized + realized
-      lifetimeReturn: fmtPct(lifetimeRetPct),     // ✅ new
+      realizedPnL:    fmtUSD(realizedPnLRaw),
+      realizedPnLRaw,
+      lifetimeTotal:  fmtUSD(lifetimeTotalRaw),
+      lifetimeReturn: fmtPct(lifetimeRetPct),
       openPositions:  positions.length,
       availableCash:  fmtUSD(cash),
       exchangeCount:  [...new Set(exchangeBalances.map(b => b.exchange))].length,
     };
 
-    // 10. Allocations
-    // ✅ Fix: positions et Cash utilisaient deux denominateurs différents
-    // (investedValue pour les positions, totalValue pour Cash), ce qui faisait
-    // que la somme des parts du donut ne totalisait jamais 100%. Tout le monde
-    // utilise maintenant `totalValue` (positions + cash) comme référence commune.
     const allocations = processedPositions.map(p => ({
       name:  p.sym,
       pct:   totalValue > 0 ? (p.curVal / totalValue) * 100 : 0,
@@ -413,10 +334,6 @@ async function getPortfolioData(req, res) {
       allocations.push({ name:'Cash', pct:(cash / totalValue) * 100, color:'#64748b' });
     }
 
-    // 11. Holdings strip (top 5 by value)
-    // Note: "% of portfolio" ici reste volontairement basé sur investedValue
-    // (composition des positions entre elles, cash exclu) — différent du donut
-    // ci-dessus qui montre la répartition du portefeuille total.
     const holdings = [...processedPositions]
       .sort((a, b) => b.curVal - a.curVal)
       .slice(0, 5)
@@ -430,7 +347,6 @@ async function getPortfolioData(req, res) {
         exchange: p.exchanges[0] || null,
       }));
 
-    // 12. All positions for table
     const allPositions = processedPositions.map(p => ({
       sym:       p.sym,
       side:      p.side,
@@ -445,38 +361,31 @@ async function getPortfolioData(req, res) {
       exchanges: p.exchanges,
     }));
 
-    // 13. Risk badges
-    // ✅ Fix: maxPct était calculé sur `allocations`, qui inclut la part "Cash".
-    // Une grosse réserve de cash se retrouvait donc comptée comme "la plus
-    // grosse position", faisant afficher Concentration = Cash Ratio (même
-    // valeur exacte) au lieu de refléter la vraie position la plus concentrée.
     const positionAllocations = allocations.filter(a => a.name !== 'Cash');
     const maxPct = positionAllocations.length > 0
       ? Math.max(...positionAllocations.map(a => a.pct))
       : 0;
     const risks = [
       { label:'Concentration',  value:maxPct.toFixed(1)+'%',  note:'Largest single position', warn:maxPct > 30 },
-      { label:'Unrealised P&L', value:fmtUSD(totalPnLRaw),    note:'vs cost basis',           warn:totalPnLRaw < 0 },
+      { label:'Unrealized P&L', value:fmtUSD(totalPnLRaw),    note:'vs cost basis',           warn:totalPnLRaw < 0 },
       { label:'Cash Ratio',     value:totalValue > 0 ? ((cash/totalValue)*100).toFixed(1)+'%' : '—', note:'Dry powder available', warn:totalValue > 0 && cash/totalValue < 0.05 },
     ];
 
-    // 14. Sectors
     const sectorMap = {};
     processedPositions.forEach(p => { sectorMap[p.sector] = (sectorMap[p.sector] || 0) + p.curVal; });
     const sectors = Object.entries(sectorMap).map(([name, val], i) => ({
       name, pct: investedValue > 0 ? (val / investedValue) * 100 : 0, color: COLORS[i % COLORS.length],
     }));
 
-    // 15. Connected exchanges
     const connectedExchanges = [...new Set(exchangeBalances.map(b => b.exchange))];
 
     res.status(200).json({
       success: true,
       hero, allocations, holdings, allPositions, risks, sectors, equityCurve,
+      benchmarkCurve, benchmarkSymbol, alpha,
       connectedExchanges,
       _meta: {
         pricesFrom:       Object.keys(livePrices),
-        cacheSize:        PRICE_CACHE.size,
         exchangeBalances: exchangeBalances.length,
         dbPositions:      dbPositions.length,
         fetchedAt:        new Date().toISOString(),
@@ -514,74 +423,131 @@ async function addPosition(req, res) {
 }
 
 // ── DELETE /api/portfolio/position/:symbol/:side ──────────────────────────────
-// ✅ Feature: avant, cette route supprimait la position sans laisser aucune
-// trace — impossible de savoir combien avait été gagné/perdu, ni quand la
-// position avait été ouverte/fermée. La table `trades` existe déjà dans le
-// schéma DB (voir config/db.js) mais n'était jamais utilisée. On l'utilise
-// maintenant pour enregistrer chaque clôture comme un trade réalisé.
 async function removePosition(req, res) {
+  const client = await db.connect();
+
   try {
     const userId = req.user.id;
     const symbol = req.params.symbol.toUpperCase();
-    const side   = req.params.side || 'long';
+    const side = req.params.side || 'long';
 
-    const { rows } = await db.query(
-      `SELECT * FROM portfolio WHERE user_id=$1 AND symbol=$2 AND side=$3`,
+    await client.query('BEGIN');
+
+    const { rows } = await client.query(
+      `SELECT *
+       FROM portfolio
+       WHERE user_id = $1
+         AND symbol = $2
+         AND side = $3`,
       [userId, symbol, side]
     );
+
     if (!rows.length) {
-      return res.status(404).json({ success:false, error:'Position not found' });
+      await client.query('ROLLBACK');
+      return res.status(404).json({
+        success: false,
+        error: 'Position not found',
+      });
     }
+
     const pos = rows[0];
 
-    // Exit price — essaie le prix live, retombe sur le dernier prix connu en DB
+    // Try live price first — via source wa7da (livePrices.service)
     let exitPrice = parseFloat(pos.current_price) || 0;
+
     try {
-      const live = await fetchLivePrices([symbol]);
-      if (live[symbol]?.price) exitPrice = live[symbol].price;
-    } catch { /* fallback silencieux sur current_price */ }
+      const live = await getLivePrices([symbol]);
+      if (live[symbol]?.price) {
+        exitPrice = live[symbol].price;
+      }
+    } catch (_) {
+      // Keep DB price
+    }
 
     const amount = parseFloat(pos.amount);
-    const entry  = parseFloat(pos.average_entry) || 0;
-    const pnl    = entry > 0
-      ? (side === 'short' ? (entry - exitPrice) : (exitPrice - entry)) * amount
-      : 0;
-    const pnlPct = entry > 0 ? (pnl / (entry * amount)) * 100 : 0;
+    const entry = parseFloat(pos.average_entry) || 0;
 
-    await db.query(
+    const pnl =
+      entry > 0
+        ? side === 'short'
+          ? (entry - exitPrice) * amount
+          : (exitPrice - entry) * amount
+        : 0;
+
+    const pnlPct =
+      entry > 0 ? (pnl / (entry * amount)) * 100 : 0;
+
+    await client.query(
       `INSERT INTO trades
-         (user_id, symbol, side, entry_price, exit_price, quantity, pnl, pnl_pct, status, paper, opened_at, closed_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'closed',TRUE,$9,NOW())`,
-      [userId, symbol, side, entry, exitPrice, amount, pnl.toFixed(8), pnlPct.toFixed(4), pos.opened_at]
+      (
+        user_id,
+        symbol,
+        side,
+        entry_price,
+        exit_price,
+        quantity,
+        pnl,
+        pnl_pct,
+        status,
+        paper,
+        opened_at,
+        closed_at
+      )
+      VALUES
+      (
+        $1,$2,$3,$4,$5,$6,$7,$8,
+        'closed',
+        TRUE,
+        $9,
+        NOW()
+      )`,
+      [
+        userId,
+        symbol,
+        side,
+        entry,
+        exitPrice,
+        amount,
+        pnl,
+        pnlPct,
+        pos.opened_at,
+      ]
     );
 
-    await db.query(
-      `DELETE FROM portfolio WHERE user_id=$1 AND symbol=$2 AND side=$3`,
+    await client.query(
+      `DELETE FROM portfolio
+       WHERE user_id = $1
+         AND symbol = $2
+         AND side = $3`,
       [userId, symbol, side]
     );
 
-    res.status(200).json({
+    await client.query('COMMIT');
+
+    return res.status(200).json({
       success: true,
-      realized: { symbol, side, exitPrice, pnl: fmtUSD(pnl), pnlPct: fmtPct(pnlPct) },
+      realized: {
+        symbol,
+        side,
+        exitPrice,
+        pnl: fmtUSD(pnl),
+        pnlPct: fmtPct(pnlPct),
+      },
     });
+
   } catch (err) {
+    await client.query('ROLLBACK');
     logger.error(`[portfolio.removePosition] ${err.message}`);
-    res.status(500).json({ success:false, error:err.message });
+    return res.status(500).json({
+      success: false,
+      error: err.message,
+    });
+  } finally {
+    client.release();
   }
 }
 
 // ── GET /api/portfolio/history ─────────────────────────────────────────────────
-// ✅ Feature: historique des trades réalisés (fermés via removePosition
-// ci-dessus). Renvoie la liste + un résumé (P&L total réalisé, win rate réel).
-//
-// ⚠️ La table `trades` est PARTAGÉE avec services/trade.service.js (paper
-// trading automatique déclenché par les signaux IA). Ce service utilise
-// side='BUY'/'SELL' (convention signal), alors qu'ici on utilise side='long'/
-// 'short' (convention position). Le filtre `side IN ('long','short')` isole
-// nos données de celles de trade.service.js — sans ce filtre, une fois que
-// TradeService.checkAndCloseTrades() sera implémenté (actuellement un stub
-// vide), ses trades fermés apparaîtraient mélangés ici avec un side non
-// reconnu par le frontend (toujours affiché en rouge, peu importe le résultat).
 async function getTradeHistory(req, res) {
   try {
     const userId = req.user.id;
@@ -653,4 +619,4 @@ async function updateCash(req, res) {
   }
 }
 
-module.exports = { getPortfolioData, addPosition, removePosition, updateCash, getTradeHistory, };
+module.exports = { getPortfolioData, addPosition, removePosition, updateCash, getTradeHistory };

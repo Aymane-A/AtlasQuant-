@@ -3,14 +3,26 @@
  *
  * RÔLE DE CE FICHIER :
  * Agrège toutes les données nécessaires à la page Markets en un seul
- * snapshot — crypto (Binance), indices/forex/commodities (Yahoo Finance),
- * et performance sectorielle (via ETFs SPDR représentatifs).
+ * snapshot — crypto, indices/forex/commodities, et performance
+ * sectorielle (via ETFs SPDR représentatifs).
+ *
+ * Tous les prix live (crypto + tout ce qui passe par Yahoo) viennent
+ * maintenant d'UN SEUL appel batché à livePrices.service — plus de
+ * ~28 requêtes individuelles par page load, et bénéficie du cache
+ * 5min partagé avec Portfolio/Dashboard/Watchlist/etc.
+ *
+ * Seule exception : les sparklines (historique de prix), qui restent
+ * une requête chart() séparée — ce n'est pas un "live price snapshot",
+ * c'est une série temporelle, donc hors du scope de livePrices.service.
  */
 
 const logger = require('../utils/logger');
-const { fetchMultipleTickers, fetchFearGreedIndex } = require('./marketData.service');
+const { fetchFearGreedIndex } = require('./marketData.service');
+const { getLivePrices } = require('./livePrices.service');
 
 // ── Yahoo Finance instantiation (v3 compatible) ──────────────────
+// Toujours nécessaire ici pour fetchSparkline() (chart() historique) —
+// c'est le seul appel Yahoo direct qui reste dans ce fichier.
 let yahooFinance = null;
 try {
   const YahooFinance = require('yahoo-finance2').default;
@@ -89,16 +101,11 @@ function parsePct(str) {
   return negative ? -num : num;
 }
 
-// ── Yahoo quote fetch ─────────────────────────────────────────────
-async function fetchYahooQuote(yahooSymbol) {
-  if (!yahooFinance) throw new Error('yahoo-finance2 non initialisé');
-  const quote = await yahooFinance.quote(yahooSymbol);
-  return {
-    price:     quote.regularMarketPrice,
-    changePct: quote.regularMarketChangePercent,
-  };
+function cryptoBaseSymbol(pairSymbol) {
+  return pairSymbol.split('/')[0]; // 'BTC/USDT' -> 'BTC'
 }
 
+// ── Sparkline (historique — séparé de livePrices.service, voir en-tête) ──
 async function fetchSparkline(yahooSymbol, points = 7) {
   if (!yahooFinance) return [];
   try {
@@ -120,85 +127,89 @@ async function fetchSparkline(yahooSymbol, points = 7) {
 }
 
 // ── Builders ──────────────────────────────────────────────────────
-async function buildIndices() {
+// Tous prennent `livePriceMap` (résultat du seul appel getLivePrices())
+// au lieu de fetcher chacun de leur côté.
+
+async function buildIndices(livePriceMap) {
   const results = await Promise.allSettled(
     INDICES.map(async idx => {
-      const [quote, spark] = await Promise.all([
-        fetchYahooQuote(idx.yahoo),
-        fetchSparkline(idx.yahoo),
-      ]);
+      const live = livePriceMap[idx.yahoo];
+      if (!live) throw new Error(`no live price for ${idx.yahoo}`);
+
+      const spark = await fetchSparkline(idx.yahoo);
       return {
         region: idx.region,
         name:   idx.name,
-        val:    fmtPrice(quote.price),
-        ch:     fmtPct(quote.changePct),
-        up:     quote.changePct >= 0,
-        spark:  spark.length > 0 ? spark : [quote.price],
+        val:    fmtPrice(live.price),
+        ch:     fmtPct(live.changeRaw),
+        up:     live.changeRaw >= 0,
+        spark:  spark.length > 0 ? spark : [live.price],
       };
     })
   );
   return results.filter(r => r.status === 'fulfilled').map(r => r.value);
 }
 
-async function buildForex() {
-  const results = await Promise.allSettled(
-    FOREX_PAIRS.map(async pair => {
-      const quote = await fetchYahooQuote(pair.yahoo);
+function buildForex(livePriceMap) {
+  return FOREX_PAIRS
+    .map(pair => {
+      const live = livePriceMap[pair.yahoo];
+      if (!live) return null;
       return {
         p:  pair.label,
-        v:  fmtPrice(quote.price, 4),
-        ch: fmtPct(quote.changePct),
-        up: quote.changePct >= 0,
+        v:  fmtPrice(live.price, 4),
+        ch: fmtPct(live.changeRaw),
+        up: live.changeRaw >= 0,
       };
     })
-  );
-  return results.filter(r => r.status === 'fulfilled').map(r => r.value);
+    .filter(Boolean);
 }
 
-async function buildCommodities() {
-  const results = await Promise.allSettled(
-    COMMODITIES.map(async c => {
-      const quote = await fetchYahooQuote(c.yahoo);
+function buildCommodities(livePriceMap) {
+  return COMMODITIES
+    .map(c => {
+      const live = livePriceMap[c.yahoo];
+      if (!live) return null;
       return {
         n:   c.name,
         sym: c.sym,
-        v:   `$${fmtPrice(quote.price, 3)}`,
-        ch:  fmtPct(quote.changePct),
-        up:  quote.changePct >= 0,
+        v:   `$${fmtPrice(live.price, 3)}`,
+        ch:  fmtPct(live.changeRaw),
+        up:  live.changeRaw >= 0,
       };
     })
-  );
-  return results.filter(r => r.status === 'fulfilled').map(r => r.value);
+    .filter(Boolean);
 }
 
-async function buildSectors() {
-  const results = await Promise.allSettled(
-    SECTOR_ETFS.map(async sector => {
-      const quote = await fetchYahooQuote(sector.yahoo);
+function buildSectors(livePriceMap) {
+  return SECTOR_ETFS
+    .map(sector => {
+      const live = livePriceMap[sector.yahoo];
+      if (!live) return null;
       return {
         name:      sector.name,
-        ch:        fmtPct(quote.changePct),
+        ch:        fmtPct(live.changeRaw),
         v:         '',
-        intensity: Math.max(-1, Math.min(1, quote.changePct / 3)),
+        intensity: Math.max(-1, Math.min(1, live.changeRaw / 3)),
       };
     })
-  );
-  return results.filter(r => r.status === 'fulfilled').map(r => r.value);
+    .filter(Boolean);
 }
 
-async function buildCrypto() {
-  try {
-    const tickers = await fetchMultipleTickers(CRYPTO_SYMBOLS);
-    return Object.entries(tickers).map(([symbol, t]) => ({
-      s:  symbol.split('/')[0],
-      v:  `$${fmtPrice(t.price)}`,
-      c:  fmtPct(t.change24h),
-      up: t.change24h >= 0,
-    }));
-  } catch (err) {
-    logger.error(`[marketStream] buildCrypto error: ${err.message}`);
-    return [];
-  }
+function buildCrypto(livePriceMap) {
+  return CRYPTO_SYMBOLS
+    .map(pairSymbol => {
+      const base = cryptoBaseSymbol(pairSymbol);
+      const live = livePriceMap[base];
+      if (!live) return null;
+      return {
+        s:  base,
+        v:  `$${fmtPrice(live.price)}`,
+        c:  fmtPct(live.changeRaw),
+        up: live.changeRaw >= 0,
+      };
+    })
+    .filter(Boolean);
 }
 
 async function buildTicks(cryptos, indices, forex, commodities) {
@@ -228,14 +239,27 @@ function computeTopMovers({ indices, forex, commodities, cryptos, sectors }) {
 }
 
 async function buildMarketSnapshot() {
-  const [indices, forex, commodities, sectors, cryptos, fearGreed] = await Promise.all([
-    buildIndices()        .catch(err => { logger.error(`[marketStream] indices: ${err.message}`);    return []; }),
-    buildForex()          .catch(err => { logger.error(`[marketStream] forex: ${err.message}`);      return []; }),
-    buildCommodities()    .catch(err => { logger.error(`[marketStream] commodities: ${err.message}`);return []; }),
-    buildSectors()        .catch(err => { logger.error(`[marketStream] sectors: ${err.message}`);    return []; }),
-    buildCrypto(),
-    fetchFearGreedIndex() .catch(err => { logger.error(`[marketStream] fearGreed: ${err.message}`);  return null; }),
+  // ── Un seul batch: crypto (bare symbols) + tout le reste (tickers Yahoo tels quels) ──
+  const symbols = [
+    ...CRYPTO_SYMBOLS.map(cryptoBaseSymbol),
+    ...INDICES.map(i => i.yahoo),
+    ...FOREX_PAIRS.map(f => f.yahoo),
+    ...COMMODITIES.map(c => c.yahoo),
+    ...SECTOR_ETFS.map(s => s.yahoo),
+  ];
+
+  const [livePriceMap, fearGreed] = await Promise.all([
+    getLivePrices(symbols),
+    fetchFearGreedIndex().catch(err => { logger.error(`[marketStream] fearGreed: ${err.message}`); return null; }),
   ]);
+
+  const [indices, forex, commodities, sectors] = await Promise.all([
+    buildIndices(livePriceMap)     .catch(err => { logger.error(`[marketStream] indices: ${err.message}`);     return []; }),
+    Promise.resolve(buildForex(livePriceMap))      .catch(err => { logger.error(`[marketStream] forex: ${err.message}`);       return []; }),
+    Promise.resolve(buildCommodities(livePriceMap)).catch(err => { logger.error(`[marketStream] commodities: ${err.message}`); return []; }),
+    Promise.resolve(buildSectors(livePriceMap))    .catch(err => { logger.error(`[marketStream] sectors: ${err.message}`);     return []; }),
+  ]);
+  const cryptos = buildCrypto(livePriceMap);
 
   const ticks     = await buildTicks(cryptos, indices, forex, commodities);
   const topMovers = computeTopMovers({ indices, forex, commodities, cryptos, sectors });

@@ -8,8 +8,12 @@ const axios  = require('axios');
 // yahoo-finance2 v3+ requires explicit instantiation — the old
 // `require('yahoo-finance2').default` singleton pattern (v2) no
 // longer works and throws "Call `new YahooFinance()` first."
+// Still needed here for getSparklineData() (historical chart data,
+// which lives outside the live-price service — see note below).
 const YahooFinance = require('yahoo-finance2').default;
 const yahooFinance = new YahooFinance({ suppressNotices: ['yahooSurvey'] });
+
+const { getLivePrices } = require('../services/livePrices.service');
 
 // ── Symbol mapping (Binance → Display) ────────────────────
 function toDisplaySymbol(sym) {
@@ -26,7 +30,7 @@ function toDisplaySymbol(sym) {
 
 // ── Normalize forex/commodity symbols ──────────────────────
 // Handles cases where symbol was stored without a slash
-// (e.g. "EURUSD" instead of "EUR/USD"), so YF_MAP lookups
+// (e.g. "EURUSD" instead of "EUR/USD"), so lookups
 // don't silently fail and fall through to a raw invalid ticker.
 function normalizeForexSymbol(sym) {
     if (!sym) return sym;
@@ -54,8 +58,9 @@ function normalizeForexSymbol(sym) {
 }
 
 // ── Forex/Commodity symbol → Yahoo Finance ticker map ───────
-// Kept at module scope so both getLivePrice() and getSparklineData()
-// share the same mapping instead of duplicating it.
+// Kept at module scope — still used by getSparklineData() to resolve
+// chart tickers (Yahoo's chart() endpoint needs its own ticker format,
+// same as before).
 const YF_MAP = {
     'XAU/USD': 'GC=F',     'XAG/USD': 'SI=F',
     'OIL/USD': 'CL=F',     'EUR/USD':  'EURUSD=X',
@@ -65,46 +70,18 @@ const YF_MAP = {
     'NGAS':    'NG=F',
 };
 
-// ── Live price fetcher ─────────────────────────────────────
-async function getLivePrice(symbol) {
-    try {
-        // Crypto (Binance)
-        if (!symbol.includes('/') && (symbol.endsWith('USDT') || symbol.endsWith('BTC'))) {
-            const { data } = await axios.get(
-                `https://api.binance.com/api/v3/ticker/24hr?symbol=${symbol}`,
-                { timeout: 5000 }
-            );
-            return {
-                price:   parseFloat(data.lastPrice),
-                change:  parseFloat(data.priceChangePercent),
-                high24h: parseFloat(data.highPrice),
-                low24h:  parseFloat(data.lowPrice),
-                volume:  parseFloat(data.quoteVolume),
-            };
-        }
-
-        // Forex / Commodities (Yahoo Finance)
-        const normalizedSymbol = normalizeForexSymbol(symbol);
-        const yfSym = YF_MAP[normalizedSymbol] || YF_MAP[symbol] || normalizedSymbol;
-
-        const quote = await yahooFinance.quote(yfSym);
-
-        // Yahoo can resolve a ticker but return no market price (e.g. delisted/closed market)
-        if (!quote || quote.regularMarketPrice === undefined) {
-            logger.error(`[watchlist] getLivePrice(${symbol}): yfSym="${yfSym}" returned no regularMarketPrice`);
-        }
-
-        return {
-            price:   quote?.regularMarketPrice        || 0,
-            change:  quote?.regularMarketChangePercent || 0,
-            high24h: quote?.regularMarketDayHigh       || 0,
-            low24h:  quote?.regularMarketDayLow        || 0,
-            volume:  quote?.regularMarketVolume         || 0,
-        };
-    } catch (err) {
-        logger.error(`[watchlist] getLivePrice(${symbol}): ${err.message}`);
-        return { price: 0, change: 0, high24h: 0, low24h: 0, volume: 0 };
-    }
+// ── DB symbol format → livePrices.service bare-symbol format ──
+// Watchlist stores symbols the way each source naturally names them
+// ("BTCUSDT" for crypto pairs, "EUR/USD" for forex/commodities,
+// "SPY" for ETFs). livePrices.service works with bare tickers
+// ("BTC", "EURUSD", "SPY") and does its own asset-type detection —
+// this bridges the two formats in both directions.
+function toBaseSymbol(dbSymbol) {
+    if (!dbSymbol) return dbSymbol;
+    const s = dbSymbol.toUpperCase().trim();
+    if (s.includes('/')) return s.replace('/', '');   // EUR/USD  -> EURUSD
+    if (s.endsWith('USDT')) return s.slice(0, -4);     // BTCUSDT  -> BTC
+    return s;                                          // SPY, AAPL, etc — already bare
 }
 
 // ── Format volume ──────────────────────────────────────────
@@ -116,6 +93,12 @@ function fmtVolume(v) {
 }
 
 // ── Sparkline data (last ~24 points for mini chart) ─────────
+// NOTE: intentionally NOT part of livePrices.service — that service
+// is a single current price/change snapshot per symbol (5min cache),
+// while this needs a short historical series per symbol. Different
+// shape, different caching needs (chart candles shouldn't be cached
+// the same way a live quote is). Kept here, calling Binance/Yahoo
+// directly as before.
 async function getSparklineData(symbol) {
     try {
         // Crypto (Binance) — hourly closes over the last 24h
@@ -161,10 +144,25 @@ async function getWatchlist(req, res) {
             [req.user.id]
         );
 
+        if (rows.length === 0) {
+            return res.json({ success: true, stocks: [] });
+        }
+
+        // ── Single batched call for ALL watchlist symbols ──
+        // Before: one Binance/Yahoo request PER symbol PER row (via
+        // Promise.all -> getLivePrice). Now: one call to the shared
+        // service, which itself batches per-provider and uses its
+        // 5min cache — so a watchlist shared across pages (Watchlist,
+        // Dashboard, Screener...) hits Binance/Yahoo far less often.
+        const dbSymbols   = rows.map(r => r.symbol);
+        const baseSymbols = dbSymbols.map(toBaseSymbol);
+        const livePrices  = await getLivePrices(baseSymbols);
+
         const stocks = await Promise.all(
             rows.map(async r => {
-                const [priceData, sigRow, sparkline] = await Promise.all([
-                    getLivePrice(r.symbol),
+                const priceData = livePrices[toBaseSymbol(r.symbol)] || {};
+
+                const [sigRow, sparkline] = await Promise.all([
                     db.query(
                         `SELECT signal, confidence FROM signals
                          WHERE symbol = $1
@@ -179,10 +177,10 @@ async function getWatchlist(req, res) {
                 return {
                     sym:        r.symbol,
                     symbol:     r.symbol,
-                    price:      priceData.price,
-                    change:     priceData.change,
-                    high24h:    priceData.high24h,
-                    low24h:     priceData.low24h,
+                    price:      priceData.price   ?? 0,
+                    change:     priceData.changeRaw ?? 0,
+                    high24h:    priceData.high24h ?? 0,
+                    low24h:     priceData.low24h  ?? 0,
                     volume:     fmtVolume(priceData.volume),
                     signal:     sig?.signal     || null,
                     confidence: sig?.confidence || null,
