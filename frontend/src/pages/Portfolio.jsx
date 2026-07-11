@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
-  AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid, Legend,
+  AreaChart, Area, XAxis, YAxis, CartesianGrid,
 } from 'recharts';
 import api from '../services/api';
 import { useLivePrices } from '../hooks/useLivePrices';
@@ -31,13 +31,6 @@ const ttStyle  = {
 };
 
 const SECTORS = ['Crypto','Stocks','DeFi','NFT','Commodities','Forex','ETF','Other'];
-
-// ✅ Feature: benchmarks disponibles pour la comparaison — doivent matcher ce
-// que getBenchmarkHistory() sait résoudre côté backend (marketData.service.js)
-const BENCHMARKS = [
-  { symbol:'BTC', label:'BTC' },
-  { symbol:'SPY', label:'S&P 500' },
-];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function fmtPrice(sym, price) {
@@ -76,7 +69,6 @@ function injectStyles() {
     .aq-row:hover .aq-close-btn { opacity:1; }
     .aq-input:focus { border-color: rgba(0,245,212,0.4) !important; outline:none; }
     .aq-input { transition: border-color .15s; }
-    .aq-bench-btn:hover { border-color: rgba(0,245,212,0.5) !important; color: rgba(0,245,212,0.85) !important; }
   `;
   document.head.appendChild(s);
 }
@@ -394,12 +386,7 @@ export default function Portfolio() {
   const [error,       setError]       = useState(null);
   const [lastUpdated, setLastUpdated] = useState(null);
 
-  const [hero, setHero] = useState({
-    totalValue:0, todayPnL:'+$0.00', dayReturn:'+0.00%',
-    totalPnL:'+$0.00', totalReturn:'+0.00%',
-    realizedPnL:'+$0.00', lifetimeTotal:'+$0.00', lifetimeReturn:'+0.00%', // ✅ new — Realized P&L
-    openPositions:0, availableCash:'+$0.00',
-  });
+  const [hero,             setHero]            = useState({ totalValue:0, todayPnL:'+$0.00', dayReturn:'+0.00%', totalPnL:'+$0.00', totalReturn:'+0.00%', realizedPnL:'+$0.00', lifetimePnL:'+$0.00', openPositions:0, availableCash:'+$0.00' });
   const [allocations,      setAllocations]     = useState([]);
   const [holdingsData,     setHoldingsData]    = useState([]);
   const [allPositionsData, setAllPositionsData]= useState([]);
@@ -413,11 +400,6 @@ export default function Portfolio() {
   const [historyLoaded,  setHistoryLoaded]  = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
 
-  // ✅ Feature: Benchmark Comparison (Portfolio vs BTC/SPY)
-  const [benchmarkSymbol, setBenchmarkSymbol] = useState('BTC');
-  const [benchmarkCurve,  setBenchmarkCurve]  = useState([]);
-  const [alpha,           setAlpha]           = useState(null);
-
   // Modals
   const [showAddModal,    setShowAddModal]    = useState(false);
   const [addPrefill,      setAddPrefill]      = useState(null); // ✅ pre-fill for recommendation-triggered Add/Trim
@@ -425,10 +407,10 @@ export default function Portfolio() {
 
   useEffect(() => { injectStyles(); }, []);
 
-  const fetchPortfolioData = async (silent = false, benchmark = benchmarkSymbol) => {
+  const fetchPortfolioData = async (silent = false) => {
     if (!silent) {} // keep loading state on first load only
     try {
-      const res = await api.get('/portfolio/data', { params: { benchmark } });
+      const res = await api.get('/portfolio/data');
       if (res.data.success) {
         const d = res.data;
         setHero(d.hero);
@@ -438,8 +420,6 @@ export default function Portfolio() {
         setRisks(d.risks                 || []);
         setSectorData(d.sectors          || []);
         setEquityCurve(d.equityCurve     || []);
-        setBenchmarkCurve(d.benchmarkCurve || []); // ✅ new
-        setAlpha(d.alpha ?? null);                 // ✅ new
         setLastUpdated(new Date());
         setError(null);
       }
@@ -455,14 +435,6 @@ export default function Portfolio() {
     const iv = setInterval(() => fetchPortfolioData(true), 60000);
     return () => clearInterval(iv);
   }, []);
-
-  // ✅ Feature: re-fetch (silencieux, garde le reste de la page intacte) quand
-  // l'utilisateur change de benchmark via le toggle
-  const handleBenchmarkChange = (symbol) => {
-    if (symbol === benchmarkSymbol) return;
-    setBenchmarkSymbol(symbol);
-    fetchPortfolioData(true, symbol);
-  };
 
   // ✅ Feature: lazy-load l'historique seulement quand l'onglet est ouvert
   const fetchHistory = async () => {
@@ -490,11 +462,8 @@ export default function Portfolio() {
 
   const holdings = holdingsData.map(applyLive);
   const filtered = (sideFilter === 'all' ? allPositionsData : allPositionsData.filter(p => p.side === sideFilter)).map(applyLive);
-  const pnlUp      = !isNeg(hero.totalPnL);
-  const dayUp      = !isNeg(hero.dayReturn);
-  const realizedUp = !isNeg(hero.realizedPnL);       // ✅ new
-  const lifetimeUp = !isNeg(hero.lifetimeTotal);     // ✅ new
-  const hasBenchmark = benchmarkCurve.length >= 2;   // ✅ new — false → fallback to plain $ equity curve
+  const pnlUp    = !isNeg(hero.totalPnL);
+  const dayUp    = !isNeg(hero.dayReturn);
 
   // ✅ Feature: route chaque recommandation IA vers la modale d'action adaptée.
   // - SELL sur une position existante → ClosePositionModal (sortie complète)
@@ -600,10 +569,11 @@ export default function Portfolio() {
             <Divider style={{ margin:'18px 0' }} />
             <div style={{ display:'flex', gap:36, flexWrap:'wrap' }}>
               {[
-                { label:"Today's P&L",    value:hero.todayPnL,      up:dayUp },
-                { label:'Unrealized P&L', value:hero.totalPnL,      up:pnlUp },
-                { label:'Realized P&L',   value:hero.realizedPnL,   up:realizedUp },
-                { label:'Lifetime Total', value:hero.lifetimeTotal, up:lifetimeUp },
+                { label:"Today's P&L",     value:hero.todayPnL,    up:dayUp },
+                { label:'Unrealised P&L',  value:hero.totalPnL,    up:pnlUp },
+                { label:'Total Return',    value:hero.totalReturn, up:pnlUp },
+                { label:'Realised P&L',    value:hero.realizedPnL, up:!isNeg(hero.realizedPnL) },
+                { label:'Lifetime Total',  value:hero.lifetimePnL, up:!isNeg(hero.lifetimePnL) },
               ].map(({ label, value, up }) => (
                 <div key={label}>
                   <Label style={{ marginBottom:5 }}>{label}</Label>
@@ -663,57 +633,13 @@ export default function Portfolio() {
         </div>
 
         <div className="aq-card" style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:16, padding:'20px 22px' }}>
-          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16, flexWrap:'wrap', gap:10 }}>
-            <div style={{ display:'flex', alignItems:'center', gap:12 }}>
-              <Label>Equity Curve</Label>
-              {/* ✅ Feature: Benchmark toggle — n'apparaît que si on a assez de
-                  données pour comparer (2+ points), sinon inutile de l'afficher */}
-              {equityCurve.length >= 2 && (
-                <div style={{ display:'flex', gap:4 }}>
-                  {BENCHMARKS.map(b => (
-                    <button key={b.symbol} className="aq-bench-btn" onClick={() => handleBenchmarkChange(b.symbol)} style={{
-                      ...mono, fontSize:9, letterSpacing:'.06em', padding:'3px 10px', borderRadius:20, cursor:'pointer', transition:'all .15s',
-                      border:'1px solid', borderColor: benchmarkSymbol===b.symbol ? T.purple : 'rgba(255,255,255,0.08)',
-                      background: benchmarkSymbol===b.symbol ? 'rgba(167,139,250,0.1)' : 'transparent',
-                      color: benchmarkSymbol===b.symbol ? T.purple : T.slate,
-                    }}>
-                      vs {b.label}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-            <div style={{ display:'flex', alignItems:'center', gap:10 }}>
-              {/* ✅ Alpha badge — n'apparaît que si le benchmark a pu être aligné */}
-              {hasBenchmark && alpha != null && (
-                <span style={{ ...mono, fontSize:10, fontWeight:700, padding:'3px 10px', borderRadius:20,
-                  background: alpha >= 0 ? 'rgba(52,211,153,0.1)' : 'rgba(244,63,94,0.1)',
-                  color: alpha >= 0 ? T.green : T.red,
-                  border:`1px solid ${alpha >= 0 ? 'rgba(52,211,153,0.2)' : 'rgba(244,63,94,0.2)'}` }}>
-                  Alpha {alpha >= 0 ? '+' : ''}{alpha.toFixed(1)}%
-                </span>
-              )}
-              {equityCurve.length >= 2 && <span style={{ ...mono, fontSize:9, color:T.slate }}>30d</span>}
-            </div>
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
+            <Label>Equity Curve</Label>
+            {equityCurve.length >= 2 && <span style={{ ...mono, fontSize:9, color:T.slate }}>30d</span>}
           </div>
-
           {equityCurve.length < 2 ? (
             <div style={{ ...mono, fontSize:12, color:T.slate, textAlign:'center', padding:'50px 0', opacity:.6 }}>Accumulating data…</div>
-          ) : hasBenchmark ? (
-            // ✅ Benchmark mode: both curves normalized to % change since day 1
-            <ResponsiveContainer width="100%" height={195}>
-              <LineChart data={benchmarkCurve} margin={{ top:4, right:4, left:0, bottom:0 }}>
-                <CartesianGrid stroke="rgba(255,255,255,0.03)" vertical={false} />
-                <XAxis dataKey="t" tick={{ ...mono, fontSize:9, fill:T.slate }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
-                <YAxis tick={{ ...mono, fontSize:9, fill:T.slate }} axisLine={false} tickLine={false} tickFormatter={v => `${v.toFixed(0)}%`} width={42} />
-                <Tooltip {...ttStyle} formatter={(v, n) => [`${v == null ? '—' : v.toFixed(2)+'%'}`, n === 'portfolio' ? 'Portfolio' : benchmarkSymbol]} />
-                <Legend wrapperStyle={{ ...mono, fontSize:9 }} formatter={v => v === 'portfolio' ? 'Portfolio' : benchmarkSymbol} />
-                <Line type="monotone" dataKey="portfolio" stroke={T.purple} strokeWidth={1.75} dot={false} activeDot={{ r:4, fill:T.purple, stroke:'var(--surface)', strokeWidth:2 }} connectNulls />
-                <Line type="monotone" dataKey="benchmark" stroke={T.amber}  strokeWidth={1.5}  dot={false} activeDot={{ r:4, fill:T.amber,  stroke:'var(--surface)', strokeWidth:2 }} strokeDasharray="4 3" connectNulls />
-              </LineChart>
-            </ResponsiveContainer>
           ) : (
-            // Fallback: plain $ equity curve (benchmark fetch failed or unavailable)
             <ResponsiveContainer width="100%" height={195}>
               <AreaChart data={equityCurve} margin={{ top:4, right:4, left:0, bottom:0 }}>
                 <defs>

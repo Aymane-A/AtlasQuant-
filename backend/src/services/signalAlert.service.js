@@ -10,6 +10,15 @@ const { sendTelegramAlert } = require('./telegram.service');
 
 const MIN_CONFIDENCE = 75; // Only alert on signals >= 75% confidence
 
+// ✅ Fix: fenêtre de cooldown par symbole. `signals` est une table insert-only
+// (chaque scan crée une nouvelle ligne avec un nouvel id, même pour un signal
+// quasi identique). L'ancien dedup comparait sur `id`, qui est TOUJOURS
+// différent d'un scan à l'autre — résultat : une alerte + email + Telegram à
+// chaque cycle de scan pour le même symbole (ex. FILUSDT alerté 5 fois dans
+// la même journée avec des confidences à peine différentes). Le dedup se fait
+// maintenant sur symbole + fenêtre de temps, indépendamment de l'id du signal.
+const ALERT_COOLDOWN_HOURS = 12;
+
 // ── Email template for AI signals ────────────────────────
 async function sendSignalEmail({ to, symbol, signal, confidence, entry, stop_loss, take_profit, risk_reward, reasoning }) {
   const nodemailer = require('nodemailer');
@@ -137,22 +146,29 @@ async function checkSignalAlerts() {
 
     if (users.length === 0) return;
 
-    // Get high-confidence signals from last 4h not yet alerted
+    // ✅ Fix: DISTINCT ON (symbol) — si plusieurs scans dans les 4 dernières
+    // heures ont produit plusieurs signaux pour le même symbole (cron +
+    // refresh manuel par ex.), on ne garde que le plus confiant, pas un par
+    // ligne. Et le NOT EXISTS compare maintenant sur symbol + fenêtre de
+    // cooldown (ALERT_COOLDOWN_HOURS), pas sur l'id du signal — qui change
+    // à chaque scan et rendait l'ancien dedup inopérant.
     const { rows: signals } = await db.query(`
-      SELECT id, symbol, signal, confidence, price, entry,
+      SELECT DISTINCT ON (symbol)
+             id, symbol, signal, confidence, price, entry,
              stop_loss, take_profit, risk_reward, reasoning, created_at
       FROM signals
       WHERE confidence >= $1
         AND signal IN ('BUY', 'SELL')
         AND created_at >= NOW() - INTERVAL '4 hours'
-        AND id NOT IN (
-          SELECT COALESCE((metadata->>'signal_id')::int, 0)
-          FROM alerts
-          WHERE type = 'ai_signal'
+        AND NOT EXISTS (
+          SELECT 1 FROM alerts a
+          WHERE a.type = 'ai_signal'
+            AND a.symbol = signals.symbol
+            AND a.created_at >= NOW() - ($2 || ' hours')::INTERVAL
         )
-      ORDER BY confidence DESC
+      ORDER BY symbol, confidence DESC, created_at DESC
       LIMIT 10
-    `, [MIN_CONFIDENCE]);
+    `, [MIN_CONFIDENCE, ALERT_COOLDOWN_HOURS]);
 
     if (signals.length === 0) return;
 
@@ -162,8 +178,8 @@ async function checkSignalAlerts() {
       // Create auto-alert in DB for each user (type = 'ai_signal')
       for (const user of users) {
         await db.query(`
-          INSERT INTO alerts (user_id, symbol, type, condition, target, triggered, notify_email, notify_telegram, metadata)
-          VALUES ($1, $2, 'ai_signal', 'above', $3, true, true, true, $4)
+          INSERT INTO alerts (user_id, symbol, type, condition, target, triggered, triggered_at, notify_email, notify_telegram, metadata)
+          VALUES ($1, $2, 'ai_signal', 'above', $3, true, NOW(), true, true, $4)
           ON CONFLICT DO NOTHING
         `, [
           user.id,

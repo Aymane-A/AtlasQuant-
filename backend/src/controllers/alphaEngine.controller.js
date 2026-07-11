@@ -241,14 +241,29 @@ async function getAlphaEngineData(req, res) {
 
     // ── 7. Live Signal Feed (last 12, all asset classes) ─────────────
     const feed = recentAll.slice(0, 12).map(s => ({
+      // ── Core display fields ──
       sym:        s.symbol,
+      symbol:     s.symbol,
       assetClass: s.asset_class || 'Crypto',
+      asset_class:s.asset_class || 'Crypto',
       type:       s.signal,
+      signal:     s.signal,
       msg:        s.reasoning
         ? s.reasoning.substring(0, 70) + (s.reasoning.length > 70 ? '...' : '')
         : `${s.signal} signal @ $${parseFloat(s.price || 0).toFixed(2)}`,
       price:      parseFloat(s.price || 0),
-      conf:       s.confidence || 0,
+      // ── Full data for SignalModal ──
+      // conf kept as number (was string "78%" before — caused NaN in breakdown)
+      conf:       parseInt(s.confidence, 10) || 0,
+      confidence: parseInt(s.confidence, 10) || 0,
+      entry:      s.entry      ? parseFloat(s.entry)       : parseFloat(s.price || 0),
+      stop_loss:  s.stop_loss  ? parseFloat(s.stop_loss)   : null,
+      take_profit:s.take_profit? parseFloat(s.take_profit) : null,
+      risk_reward:s.risk_reward || null,
+      reasoning:  s.reasoning  || '',
+      // indicators is stored as JSONB — comes back as object already parsed by pg
+      indicators: s.indicators || {},
+      created_at: s.created_at,
       time:       new Date(s.created_at).toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' }),
     }));
 

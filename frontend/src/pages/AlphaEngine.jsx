@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import api from '../services/api';
+import SignalModal from '../components/SignalModal';
 import { useTranslation } from 'react-i18next';
 
 // ── Design tokens ─────────────────────────────────────────
@@ -238,7 +239,7 @@ function FactorWeights({ factors, loading }) {
 }
 
 // ── Alpha Scores ──────────────────────────────────────────
-function AlphaScores({ scores, loading }) {
+function AlphaScores({ scores, loading, onSelect }) {
   const sideColor = s => s === 'BUY' ? T.green : s === 'SELL' ? T.red : T.amber;
 
   return (
@@ -261,9 +262,9 @@ function AlphaScores({ scores, loading }) {
           {scores.map((s, i) => {
             const color = sideColor(s.side);
             return (
-              <div key={i} className="aq-score-card" style={{
+              <div key={i} className="aq-score-card" onClick={() => onSelect && onSelect(s)} style={{
                 background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)',
-                borderRadius:12, padding:16, transition:'all .15s', cursor:'default',
+                borderRadius:12, padding:16, transition:'all .15s', cursor:'pointer',
               }}>
                 <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:10 }}>
                   <div>
@@ -331,7 +332,7 @@ function AccuracyChart({ accuracy, confThresh, loading }) {
 }
 
 // ── Live Signal Feed ──────────────────────────────────────
-function SignalFeed({ feed, loading }) {
+function SignalFeed({ feed, loading, onSelect }) {
   const sideColor = s => s === 'BUY' ? T.green : s === 'SELL' ? T.red : T.amber;
   const assetIcon = a => ({ Crypto:'🪙', Forex:'💱', Commodity:'🥇', Indices:'📈' }[a] || '◈');
 
@@ -351,11 +352,11 @@ function SignalFeed({ feed, loading }) {
         : feed.map((item, i) => {
           const color = sideColor(item.type);
           return (
-            <div key={i} className="aq-feed-row" style={{
+            <div key={i} className="aq-feed-row" onClick={() => onSelect && onSelect(item)} style={{
               display:'grid', gridTemplateColumns:'28px 90px 56px 1fr 56px 48px',
               alignItems:'center', gap:10, padding:'9px 12px',
               borderBottom:'1px solid rgba(255,255,255,0.03)',
-              borderRadius:6, transition:'background .15s',
+              borderRadius:6, transition:'background .15s', cursor:'pointer',
             }}>
               <span style={{ fontSize:12 }}>{assetIcon(item.assetClass)}</span>
               <span style={{ ...mono, fontSize:11, fontWeight:800, color:'var(--text)' }}>{item.sym}</span>
@@ -388,6 +389,7 @@ export default function AlphaEngine() {
   const [selectedMdl, setSelectedMdl] = useState(0);
   const [confThresh,  setConfThresh]  = useState(65);
   const [assetClass,  setAssetClass]  = useState('all');
+  const [selectedSignal, setSelectedSignal] = useState(null);
 
   useEffect(() => { injectStyles(); }, []);
 
@@ -517,13 +519,14 @@ export default function AlphaEngine() {
 
       {/* ── Alpha Scores + Accuracy Chart ── */}
       <div style={{ display:'grid', gridTemplateColumns:'1.2fr 1fr', gap:16 }}>
-        <AlphaScores scores={scores} loading={loading} />
+        <AlphaScores scores={scores} loading={loading} onSelect={setSelectedSignal} />
         <AccuracyChart accuracy={accuracy} confThresh={confThresh} loading={loading} />
       </div>
 
       {/* ── Live Signal Feed ── */}
-      <SignalFeed feed={feed} loading={loading} />
+      <SignalFeed feed={feed} loading={loading} onSelect={setSelectedSignal} />
 
+      {selectedSignal && <SignalModal signal={selectedSignal} onClose={() => setSelectedSignal(null)} />}
     </div>
   );
 }
