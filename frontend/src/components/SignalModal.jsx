@@ -59,16 +59,43 @@ function useSignalStats(symbol) {
   return stats;
 }
 
-// ── Signal Timeline (derived from confidence trend) ───────
+// ── Signal Timeline ──────────────────────────────────────
 function SignalTimeline({ signal: sig }) {
-  // Build a 4-step timeline from what we know
   const conf  = parseInt(String(sig.confidence||sig.conf||0).replace('%',''),10)||0;
   const color = sc(sig.signal);
+
+  const mkTime = (offsetMs) => sig.created_at
+    ? new Date(new Date(sig.created_at).getTime() + offsetMs)
+        .toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})
+    : '—';
+
   const steps = [
-    { time: sig.created_at ? new Date(new Date(sig.created_at)-120000).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}) : '—', label:'Signal Detected',  done:true  },
-    { time: sig.created_at ? new Date(new Date(sig.created_at)-60000).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}) : '—',  label:`Indicators Scored`, sub:`${Math.max(40,conf-10)}% pre-conf`, done:true },
-    { time: sig.created_at ? new Date(sig.created_at).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}) : '—',                  label:`AI Validated`,      sub:`${conf}% confidence`, done:true, highlight:true },
-    { time: 'Now',                                                                                                                             label:'Signal Active',     sub:'Awaiting trade', done:false, pulse:true },
+    {
+      time:  mkTime(-120000),
+      label: 'Signal Detected',
+      sub:   'Market scan completed',
+      done:  true,
+    },
+    {
+      time:  mkTime(-60000),
+      label: 'Indicators',
+      sub:   `${Math.max(40, conf - 10)}% pre-confidence`,
+      done:  true,
+    },
+    {
+      time:      mkTime(0),
+      label:     'AI Validated',
+      sub:       `${conf}% confidence`,
+      done:      true,
+      highlight: true,
+    },
+    {
+      time:  'Now',
+      label: 'Monitoring Market',
+      sub:   '⚡ AI watching for confirmation',
+      done:  false,
+      pulse: true,
+    },
   ];
 
   return (
@@ -84,14 +111,24 @@ function SignalTimeline({ signal: sig }) {
               boxShadow: s.pulse ? `0 0 8px ${color}` : 'none',
               animation: s.pulse ? 'aq-pulse 1.8s infinite' : 'none',
             }}/>
-            {i < steps.length-1 && <div style={{ width:1, height:28, background:'rgba(255,255,255,0.07)', margin:'2px 0' }}/>}
+            {i < steps.length - 1 && (
+              <div style={{ width:1, height:28, background:'rgba(255,255,255,0.07)', margin:'2px 0' }}/>
+            )}
           </div>
-          <div style={{ paddingBottom: i < steps.length-1 ? 0 : 0 }}>
+          <div>
             <div style={{ display:'flex', gap:8, alignItems:'baseline' }}>
               <span style={{ ...mono, fontSize:8, color:T.slate }}>{s.time}</span>
-              <span style={{ ...mono, fontSize:10, fontWeight:700, color: s.highlight ? color : 'var(--text)' }}>{s.label}</span>
+              <span style={{ ...mono, fontSize:10, fontWeight:700,
+                color: s.highlight ? color : s.pulse ? T.cyan : 'var(--text)' }}>
+                {s.label}
+              </span>
             </div>
-            {s.sub && <div style={{ ...mono, fontSize:9, color:T.slate }}>{s.sub}</div>}
+            {s.sub && (
+              <div style={{ ...mono, fontSize:9,
+                color: s.pulse ? T.cyan : T.slate, opacity: s.pulse ? 0.9 : 0.7 }}>
+                {s.sub}
+              </div>
+            )}
           </div>
         </div>
       ))}
@@ -298,23 +335,47 @@ function AiReasoning({ reasoning, signal }) {
   );
 }
 
-// ── Confidence Circle ─────────────────────────────────────
-function ConfCircle({ value, color }) {
-  const r      = 45;
-  const circ   = 2 * Math.PI * r; // ~283
-  const offset = circ - (value / 100) * circ;
+// ── Confidence Circle — animated counter 0→value ────────
+function ConfCircle({ value, color, action, size=110 }) {
+  const [displayed, setDisplayed] = useState(0);
+  const [started,   setStarted]   = useState(false);
+  const r    = (size - (size < 90 ? 10 : 20)) / 2;
+  const circ = 2 * Math.PI * r;
+
+  // Start animation after a short mount delay
+  useEffect(() => {
+    const t = setTimeout(() => setStarted(true), 150);
+    return () => clearTimeout(t);
+  }, []);
+
+  // Ease-out counter: fast at start, slower near target
+  useEffect(() => {
+    if (!started || displayed >= value) return;
+    const step  = Math.max(1, Math.round((value - displayed) / 5));
+    const delay = displayed < value * 0.65 ? 16 : 28;
+    const t     = setTimeout(() => setDisplayed(p => Math.min(p + step, value)), delay);
+    return () => clearTimeout(t);
+  }, [displayed, value, started]);
+
+  const offset = circ - (displayed / 100) * circ;
+
+  const cx   = size / 2;
+  const sw   = size < 90 ? 5 : 8;
+  const fsSz = size < 90 ? 14 : 22;
+  const fsLb = size < 90 ? 8  : 10;
+  const mt   = size < 90 ? -size*0.62 : -72;
+
   return (
-    <div style={{display:'flex',flexDirection:'column',alignItems:'center',padding:'10px 0'}}>
-      <svg width={110} height={110} style={{transform:'rotate(-90deg)'}}>
-        <circle cx={55} cy={55} r={r} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth={8}/>
-        <circle cx={55} cy={55} r={r} fill="none" stroke={color} strokeWidth={8}
-          strokeDasharray={circ} strokeDashoffset={offset}
-          strokeLinecap="round"
-          style={{transition:'stroke-dashoffset .8s ease'}}/>
+    <div style={{display:'flex',flexDirection:'column',alignItems:'center',flexShrink:0}}>
+      <svg width={size} height={size} style={{transform:'rotate(-90deg)'}}>
+        <circle cx={cx} cy={cx} r={r} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth={sw}/>
+        <circle cx={cx} cy={cx} r={r} fill="none" stroke={color} strokeWidth={sw}
+          strokeDasharray={circ} strokeDashoffset={offset} strokeLinecap="round"
+          style={{transition:'stroke-dashoffset 0.04s linear'}}/>
       </svg>
-      <div style={{marginTop:-72,display:'flex',flexDirection:'column',alignItems:'center',zIndex:1}}>
-        <div style={{...mono,fontSize:22,fontWeight:900,color}}>{value}%</div>
-        <div style={{...mono,fontSize:9,color:T.slate}}>AI Confidence</div>
+      <div style={{marginTop:mt,display:'flex',flexDirection:'column',alignItems:'center',zIndex:1}}>
+        <div style={{...mono,fontSize:fsSz,fontWeight:900,color}}>{displayed}%</div>
+        <div style={{...mono,fontSize:fsLb,color:'var(--text)',fontWeight:900}}>{action||'HOLD'}</div>
       </div>
     </div>
   );
@@ -348,29 +409,43 @@ function ConfBreakdown({ confidence, indicators, signal }) {
   const oc = v => v>=70?T.green:v>=50?T.cyan:v>=35?T.amber:T.red;
 
   const dims=[
-    {label:'Trend Analysis',      val:trend,       icon:'📈'},
-    {label:'Momentum',            val:momentum,    icon:'⚡'},
-    {label:'Volume',              val:volume,      icon:'📊'},
-    {label:'Volatility',          val:volatility,  icon:'🌊'},
-    {label:'Pattern Recognition', val:pattern,     icon:'🔮'},
-    {label:'News Impact',         val:news,        icon:'📰'},
+    {label:'Trend',     val:trend,       icon:'📈'},
+    {label:'Momentum',  val:momentum,    icon:'⚡'},
+    {label:'Volume',    val:volume,      icon:'📊'},
+    {label:'Volatility',val:volatility,  icon:'🌊'},
+    {label:'Pattern',   val:pattern,     icon:'🔮'},
+    {label:'News',      val:news,        icon:'📰'},
   ];
 
   return (
-    <div style={{background:'rgba(255,255,255,0.02)',border:'1px solid var(--border)',borderRadius:10,padding:14}}>
-      <Lbl>AI Confidence Breakdown</Lbl>
-      <ConfCircle value={overall} color={oc(overall)}/>
-      <div style={{display:'flex',flexDirection:'column',gap:7,marginTop:4}}>
-        {dims.map(d=>(
-          <div key={d.label} style={{display:'flex',alignItems:'center',gap:8}}>
-            <span style={{fontSize:11,flexShrink:0}}>{d.icon}</span>
-            <div style={{...mono,fontSize:9,color:'var(--text)',width:120,flexShrink:0}}>{d.label}</div>
-            <div style={{flex:1,height:3,background:'rgba(255,255,255,.06)',borderRadius:2,overflow:'hidden'}}>
-              <div style={{height:'100%',width:`${d.val}%`,borderRadius:2,background:oc(d.val),transition:'width .5s'}}/>
-            </div>
-            <div style={{...mono,fontSize:10,fontWeight:800,color:oc(d.val),width:32,textAlign:'right'}}>{d.val}%</div>
+    <div style={{background:'rgba(255,255,255,0.02)',border:'1px solid var(--border)',borderRadius:10,padding:'12px 14px'}}>
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10}}>
+        <Lbl style={{marginBottom:0}}>AI Confidence Breakdown</Lbl>
+        <span style={{...mono,fontSize:18,fontWeight:900,color:oc(overall)}}>{overall}%</span>
+      </div>
+
+      {/* Compact: small circle left + signal label */}
+      <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:12}}>
+        <ConfCircle value={overall} color={oc(overall)} action={signal||'HOLD'} size={80}/>
+        <div style={{flex:1}}>
+          {/* Overall bar */}
+          <div style={{height:4,background:'rgba(255,255,255,0.06)',borderRadius:2,marginBottom:10,overflow:'hidden'}}>
+            <div style={{height:'100%',width:`${overall}%`,borderRadius:2,
+              background:`linear-gradient(90deg,${T.cyan},${oc(overall)})`,transition:'width .6s'}}/>
           </div>
-        ))}
+          {/* 2-column dims grid */}
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'5px 10px'}}>
+            {dims.map(d=>(
+              <div key={d.label} style={{display:'flex',alignItems:'center',gap:5}}>
+                <span style={{fontSize:10,flexShrink:0}}>{d.icon}</span>
+                <div style={{flex:1,height:2,background:'rgba(255,255,255,.06)',borderRadius:1,overflow:'hidden'}}>
+                  <div style={{height:'100%',width:`${d.val}%`,background:oc(d.val),transition:'width .5s'}}/>
+                </div>
+                <span style={{...mono,fontSize:9,fontWeight:800,color:oc(d.val),width:28,textAlign:'right',flexShrink:0}}>{d.val}%</span>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -510,7 +585,12 @@ export default function SignalModal({ signal: sig, onClose }) {
 
   const handleTrade = () => {
     const sym = (sig.symbol||'').replace('/','').replace(/USDT$/i,'').toUpperCase();
-    window.location.href = `/trading?symbol=${encodeURIComponent(sym)}&side=${(sig.signal||'buy').toLowerCase()}`;
+    const params = new URLSearchParams({ symbol: sym, side });
+    const entryV = toNum(sig.entry || sig.price);
+    if (entryV)             params.set('entry', String(entryV));
+    if (toNum(sig.stop_loss))    params.set('sl',    String(toNum(sig.stop_loss)));
+    if (toNum(sig.take_profit))  params.set('tp',    String(toNum(sig.take_profit)));
+    window.location.href = `/trading?${params.toString()}`;
   };
 
   const handleAlert = async () => {

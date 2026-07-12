@@ -10,6 +10,17 @@ const { sendTelegramAlert } = require('./telegram.service');
 
 const MIN_CONFIDENCE = 75; // Only alert on signals >= 75% confidence
 
+// ✅ Feature: tokens spéciaux qu'un utilisateur peut ajouter à sa liste de
+// symboles suivis pour couvrir toute une classe d'actifs d'un coup, sans
+// devoir taper chaque ticker un par un (ex. "ALL_CRYPTO" au lieu de BTC,
+// ETH, SOL, ... un par un).
+const CLASS_WILDCARDS = {
+  ALL_CRYPTO:    'Crypto',
+  ALL_FOREX:     'Forex',
+  ALL_COMMODITY: 'Commodity',
+  ALL_INDICES:   'Indices',
+};
+
 // ✅ Fix: fenêtre de cooldown par symbole. `signals` est une table insert-only
 // (chaque scan crée une nouvelle ligne avec un nouvel id, même pour un signal
 // quasi identique). L'ancien dedup comparait sur `id`, qui est TOUJOURS
@@ -136,14 +147,14 @@ async function sendSignalTelegram({ symbol, signal, confidence, entry, stop_loss
 async function checkSignalAlerts() {
   try {
     // ✅ Feature: on récupère aussi les préférences d'alertes AI de chaque
-    // utilisateur (signal_alert_mode: 'all'|'custom', signal_alert_classes:
-    // liste des classes d'actifs suivies en mode 'custom'). Définies via
-    // POST /api/settings/update { section:'signalAlerts', payload:{mode,classes} }.
+    // utilisateur (signal_alert_mode: 'all'|'custom', signal_alert_symbols:
+    // liste de tickers précis suivis en mode 'custom', ex. ["BTCUSDT","AAPL"]).
+    // Définies via POST /api/settings/update { section:'signalAlerts', payload:{mode,symbols} }.
     const { rows: users } = await db.query(`
       SELECT u.id, u.email, u.name,
              COALESCE(us.notifications, true)         AS notifications,
              COALESCE(us.signal_alert_mode, 'all')     AS alert_mode,
-             COALESCE(us.signal_alert_classes, '["Crypto","Forex","Commodity","Indices"]'::jsonb) AS alert_classes
+             COALESCE(us.signal_alert_symbols, '[]'::jsonb) AS alert_symbols
       FROM users u
       LEFT JOIN user_settings us ON us.user_id = u.id
       WHERE COALESCE(us.notifications, true) = true
@@ -154,15 +165,14 @@ async function checkSignalAlerts() {
     // ✅ Fix: DISTINCT ON (symbol) — si plusieurs scans dans les 4 dernières
     // heures ont produit plusieurs signaux pour le même symbole (cron +
     // refresh manuel par ex.), on ne garde que le plus confiant, pas un par
-    // ligne. `asset_class` est sélectionné pour le filtrage par préférence
-    // utilisateur ci-dessous. Le dedup global par symbole a été retiré d'ici
-    // et déplacé au niveau utilisateur (voir recentSet plus bas) — plus
-    // correct pour un système multi-utilisateurs : chaque utilisateur a son
-    // propre cooldown, indépendant des alertes déjà envoyées à quelqu'un d'autre.
+    // ligne. Le dedup global par symbole a été retiré d'ici et déplacé au
+    // niveau utilisateur (voir recentSet plus bas) — plus correct pour un
+    // système multi-utilisateurs : chaque utilisateur a son propre cooldown,
+    // indépendant des alertes déjà envoyées à quelqu'un d'autre.
     const { rows: signals } = await db.query(`
       SELECT DISTINCT ON (symbol)
              id, symbol, signal, confidence, price, entry,
-             stop_loss, take_profit, risk_reward, reasoning, asset_class, created_at
+             stop_loss, take_profit, risk_reward, reasoning, created_at
       FROM signals
       WHERE confidence >= $1
         AND signal IN ('BUY', 'SELL')
@@ -188,12 +198,15 @@ async function checkSignalAlerts() {
     for (const sig of signals) {
       for (const user of users) {
         // ✅ Feature: si l'utilisateur a choisi "custom", on ignore les
-        // signaux hors de ses classes d'actifs sélectionnées.
+        // signaux dont le symbole n'est pas dans sa liste de tickers suivis.
+        // Comparaison insensible à la casse (le symbole en DB est déjà en
+        // majuscules, mais on normalise au cas où).
         if (user.alert_mode === 'custom') {
-          const classes = Array.isArray(user.alert_classes)
-            ? user.alert_classes
-            : (() => { try { return JSON.parse(user.alert_classes); } catch { return []; } })();
-          if (!classes.includes(sig.asset_class)) continue;
+          const symbols = Array.isArray(user.alert_symbols)
+            ? user.alert_symbols
+            : (() => { try { return JSON.parse(user.alert_symbols); } catch { return []; } })();
+          const followedSet = new Set(symbols.map(s => String(s).toUpperCase().trim()));
+          if (!followedSet.has(sig.symbol.toUpperCase())) continue;
         }
 
         const cooldownKey = `${user.id}:${sig.symbol}`;
@@ -208,7 +221,7 @@ async function checkSignalAlerts() {
           user.id,
           sig.symbol,
           sig.entry || sig.price,
-          JSON.stringify({ signal_id: sig.id, signal: sig.signal, confidence: sig.confidence, asset_class: sig.asset_class }),
+          JSON.stringify({ signal_id: sig.id, signal: sig.signal, confidence: sig.confidence }),
         ]);
 
         const payload = {

@@ -568,6 +568,23 @@ function OrderForm({ exchange, symbol, ticker, balance, isForex, isCommodity, qu
   const [takeProfit,setTakeProfit]= useState('');
   const [showBracket, setShowBracket] = useState(false);
   const [showCalc,  setShowCalc]  = useState(false);
+
+  // ── Read pre-fill from SignalModal "Trade this Signal" ──
+  // Trading page stores ?side=&entry=&sl=&tp= in sessionStorage
+  // so we can read it here after the form mounts.
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem('aq_prefill');
+      if (!raw) return;
+      const pf = JSON.parse(raw);
+      sessionStorage.removeItem('aq_prefill'); // consume once
+      if (pf.side  && ['buy','sell'].includes(pf.side)) setSide(pf.side);
+      if (pf.sl)    { setStopLoss(pf.sl);    setShowBracket(true); }
+      if (pf.tp)    { setTakeProfit(pf.tp);  setShowBracket(true); }
+      // entry → use as limit price if not market
+      if (pf.entry) setPrice(pf.entry);
+    } catch {}
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const [pct,       setPct]       = useState(null);
   const [loading,   setLoading]   = useState(false);
   const [result,    setResult]    = useState(null);
@@ -1241,9 +1258,20 @@ export default function Trading() {
   useEffect(() => {
     const params  = new URLSearchParams(window.location.search);
     const prefill = params.get('symbol');
-    if (!prefill) return;
-    const clean = prefill.toUpperCase().replace('/','').replace(/USDT$/,'').replace(/[^A-Z0-9]/g,'');
-    if (clean) { setSymbol(clean); setSymbolInput(clean); }
+    if (prefill) {
+      const clean = prefill.toUpperCase().replace('/','').replace(/USDT$/,'').replace(/[^A-Z0-9]/g,'');
+      if (clean) { setSymbol(clean); setSymbolInput(clean); }
+    }
+    // Pre-fill from SignalModal "Trade this Signal":
+    // ?side=buy&entry=1.416&sl=1.41&tp=1.425
+    // Stored in sessionStorage so OrderForm reads after mount.
+    const side  = params.get('side');
+    const entry = params.get('entry');
+    const sl    = params.get('sl');
+    const tp    = params.get('tp');
+    if (side || entry || sl || tp) {
+      sessionStorage.setItem('aq_prefill', JSON.stringify({ side, entry, sl, tp }));
+    }
   }, []);
 
   useEffect(() => {

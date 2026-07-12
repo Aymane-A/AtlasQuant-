@@ -3,8 +3,6 @@ import { useTranslation } from 'react-i18next';
 import { alertsAPI } from '../services/api';
 import api from '../services/api';
 
-const ASSET_CLASSES = ['Crypto', 'Forex', 'Commodity', 'Indices'];
-
 export default function Alerts() {
   const { t } = useTranslation();
   const a = key => t(`alerts.${key}`);
@@ -29,8 +27,10 @@ export default function Alerts() {
   const [data, setData]           = useState({ stats:null, notifications:[], alerts:[] });
   const [history, setHistory]     = useState([]);
 
-  // ✅ Feature: préférences AI Signal Alerts — Follow All vs Custom (classes choisies)
-  const [alertPrefs, setAlertPrefs]     = useState({ mode:'all', classes:ASSET_CLASSES });
+  // ✅ Feature: préférences AI Signal Alerts — Follow All vs Custom (liste de
+  // symboles précis tapés par l'utilisateur, ex. BTC, AAPL, EURUSD)
+  const [alertPrefs, setAlertPrefs]     = useState({ mode:'all', symbols:[] });
+  const [symbolInput, setSymbolInput]   = useState('');
   const [prefsLoading, setPrefsLoading] = useState(true);
   const [prefsSaving, setPrefsSaving]   = useState(false);
   const [prefsSaved, setPrefsSaved]     = useState(false);
@@ -66,9 +66,7 @@ export default function Alerts() {
       const s = res.data?.settings || {};
       setAlertPrefs({
         mode:    s.signal_alert_mode === 'custom' ? 'custom' : 'all',
-        classes: Array.isArray(s.signal_alert_classes) && s.signal_alert_classes.length > 0
-          ? s.signal_alert_classes
-          : ASSET_CLASSES,
+        symbols: Array.isArray(s.signal_alert_symbols) ? s.signal_alert_symbols : [],
       });
     } catch { /* garde les valeurs par défaut si l'appel échoue */ }
     finally { setPrefsLoading(false); }
@@ -115,14 +113,25 @@ export default function Alerts() {
     }
   };
 
-  // ✅ Feature: toggle une classe d'actifs en mode 'custom'
-  const toggleAssetClass = (cls) => {
+  // ✅ Feature: ajoute/retire un symbole de la liste suivie en mode 'custom'
+  const addSymbol = () => {
+    const sym = symbolInput.toUpperCase().trim();
+    if (!sym) return;
     setPrefsSaved(false);
-    setAlertPrefs(p => {
-      const has = p.classes.includes(cls);
-      const next = has ? p.classes.filter(c => c !== cls) : [...p.classes, cls];
-      return { ...p, classes: next };
-    });
+    setAlertPrefs(p => p.symbols.includes(sym) ? p : { ...p, symbols: [...p.symbols, sym] });
+    setSymbolInput('');
+  };
+
+  const removeSymbol = (sym) => {
+    setPrefsSaved(false);
+    setAlertPrefs(p => ({ ...p, symbols: p.symbols.filter(s => s !== sym) }));
+  };
+
+  const handleSymbolKeyDown = (e) => {
+    if (e.key === 'Enter' || e.key === ',') {
+      e.preventDefault();
+      addSymbol();
+    }
   };
 
   const setPrefsMode = (mode) => {
@@ -131,15 +140,15 @@ export default function Alerts() {
   };
 
   const savePrefs = async () => {
-    if (alertPrefs.mode === 'custom' && alertPrefs.classes.length === 0) {
-      setError('Select at least one asset class');
+    if (alertPrefs.mode === 'custom' && alertPrefs.symbols.length === 0) {
+      setError('Add at least one symbol to follow');
       return;
     }
     setPrefsSaving(true);
     try {
       await api.post('/settings/update', {
         section: 'signalAlerts',
-        payload: { mode: alertPrefs.mode, classes: alertPrefs.classes },
+        payload: { mode: alertPrefs.mode, symbols: alertPrefs.symbols },
       });
       setPrefsSaved(true);
       setError('');
@@ -277,7 +286,7 @@ export default function Alerts() {
             <div style={{ display:'flex', gap:10 }}>
               {[
                 { val:'all',    label:'Follow Everything', desc:'Get alerted on every high-confidence signal, any asset class' },
-                { val:'custom', label:'Custom',             desc:'Only follow specific asset classes' },
+                { val:'custom', label:'Custom',             desc:'Only follow specific symbols you choose' },
               ].map(opt => (
                 <button key={opt.val} onClick={() => setPrefsMode(opt.val)} style={{
                   flex:1, textAlign:'left', padding:'12px 16px', borderRadius:10, cursor:'pointer',
@@ -295,24 +304,44 @@ export default function Alerts() {
               ))}
             </div>
 
-            {/* Asset class picker — only when 'custom' */}
+            {/* Symbol watchlist — only when 'custom' */}
             {alertPrefs.mode === 'custom' && (
-              <div style={{ display:'flex', gap:8, flexWrap:'wrap', padding:'12px 14px', background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:10 }}>
-                {ASSET_CLASSES.map(cls => {
-                  const active = alertPrefs.classes.includes(cls);
-                  return (
-                    <button key={cls} onClick={() => toggleAssetClass(cls)} style={{
-                      padding:'7px 16px', borderRadius:20, cursor:'pointer',
-                      fontFamily:'JetBrains Mono,monospace', fontSize:11, fontWeight:600,
-                      border:`1px solid ${active ? 'var(--cyan-dim)' : 'rgba(255,255,255,0.08)'}`,
-                      background: active ? 'rgba(0,245,212,0.1)' : 'transparent',
-                      color: active ? 'var(--cyan)' : 'var(--text-muted)',
-                      transition:'all .15s',
-                    }}>
-                      {active ? '✓ ' : ''}{cls}
-                    </button>
-                  );
-                })}
+              <div style={{ padding:'12px 14px', background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:10 }}>
+                <div style={{ display:'flex', gap:8, marginBottom: alertPrefs.symbols.length > 0 ? 10 : 0 }}>
+                  <input
+                    style={{ ...inp, flex:1 }}
+                    placeholder="Type a symbol and press Enter (BTC, AAPL, EURUSD...)"
+                    value={symbolInput}
+                    onChange={e => setSymbolInput(e.target.value)}
+                    onKeyDown={handleSymbolKeyDown}
+                  />
+                  <button onClick={addSymbol} style={{
+                    padding:'0 18px', borderRadius:8, border:'1px solid var(--cyan-dim)',
+                    background:'rgba(0,245,212,0.08)', color:'var(--cyan)',
+                    fontFamily:'JetBrains Mono,monospace', fontSize:12, fontWeight:700, cursor:'pointer',
+                  }}>
+                    + Add
+                  </button>
+                </div>
+                {alertPrefs.symbols.length === 0 ? (
+                  <div style={{ fontSize:10, color:'var(--text-muted)', fontFamily:'JetBrains Mono,monospace' }}>
+                    No symbols yet — add the tickers you want AI signal alerts for.
+                  </div>
+                ) : (
+                  <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+                    {alertPrefs.symbols.map(sym => (
+                      <span key={sym} style={{
+                        display:'flex', alignItems:'center', gap:6,
+                        padding:'6px 10px 6px 14px', borderRadius:20,
+                        border:'1px solid var(--cyan-dim)', background:'rgba(0,245,212,0.1)',
+                        color:'var(--cyan)', fontFamily:'JetBrains Mono,monospace', fontSize:11, fontWeight:600,
+                      }}>
+                        {sym}
+                        <span onClick={() => removeSymbol(sym)} style={{ cursor:'pointer', opacity:0.7, fontWeight:700, padding:'0 2px' }}>✕</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </div>

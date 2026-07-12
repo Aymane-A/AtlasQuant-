@@ -289,9 +289,11 @@ async function migrate() {
 
     -- ✅ Feature: préférences utilisateur pour les alertes AI auto-générées
     -- (signalAlert.service.js). mode='all' = tout suivre, mode='custom' =
-    -- suivre seulement les classes d'actifs listées dans signal_alert_classes.
+    -- suivre uniquement les symboles listés dans signal_alert_symbols
+    -- (ex. ["BTCUSDT","AAPL","EURUSD"]) — une liste de tickers précis choisis
+    -- par l'utilisateur, pas des classes d'actifs entières.
     ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS signal_alert_mode    VARCHAR(10) NOT NULL DEFAULT 'all';
-    ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS signal_alert_classes JSONB       NOT NULL DEFAULT '["Crypto","Forex","Commodity","Indices"]'::jsonb;
+    ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS signal_alert_symbols JSONB       NOT NULL DEFAULT '[]'::jsonb;
 
     ALTER TABLE signals ADD COLUMN IF NOT EXISTS asset_class TEXT NOT NULL DEFAULT 'Crypto';
   `);

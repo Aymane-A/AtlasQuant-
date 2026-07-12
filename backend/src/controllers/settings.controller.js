@@ -17,7 +17,8 @@ async function getSettings(req, res) {
 
     const { rows: settingsRows } = await db.query(
       `SELECT theme, notifications, api_keys_enabled,
-              default_capital, default_risk_pct, default_timeframe
+              default_capital, default_risk_pct, default_timeframe,
+              signal_alert_mode, signal_alert_symbols
        FROM user_settings WHERE user_id = $1`,
       [userId]
     );
@@ -29,6 +30,10 @@ async function getSettings(req, res) {
       default_capital: 100000,
       default_risk_pct: 1,
       default_timeframe: 'Daily',
+      // ✅ Feature: par défaut on suit tout (comportement historique inchangé
+      // pour les comptes existants sans préférence explicite).
+      signal_alert_mode: 'all',
+      signal_alert_symbols: [],
     };
 
     res.json({ success: true, profile: userRows[0] || {}, settings });
@@ -89,6 +94,34 @@ async function updateSettings(req, res) {
         [userId, payload.theme]
       );
       return res.json({ success: true, message: 'Thème mis à jour' });
+    }
+
+    // ✅ Feature: préférences d'alertes AI auto-générées (signalAlert.service.js)
+    // payload: { mode: 'all' | 'custom', symbols: ['BTCUSDT','AAPL','EURUSD',...] }
+    // 'symbols' est une liste libre de tickers précis choisis par l'utilisateur,
+    // pas des classes d'actifs — l'utilisateur tape exactement ce qu'il veut suivre.
+    if (section === 'signalAlerts') {
+      const mode = payload.mode === 'custom' ? 'custom' : 'all';
+      const symbols = Array.isArray(payload.symbols)
+        ? [...new Set(payload.symbols
+            .map(s => String(s).toUpperCase().trim())
+            .filter(Boolean))]
+        : [];
+
+      if (mode === 'custom' && symbols.length === 0) {
+        return res.status(400).json({ success: false, error: 'Add at least one symbol to follow' });
+      }
+
+      await db.query(
+        `INSERT INTO user_settings (user_id, signal_alert_mode, signal_alert_symbols)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (user_id) DO UPDATE SET
+           signal_alert_mode    = EXCLUDED.signal_alert_mode,
+           signal_alert_symbols = EXCLUDED.signal_alert_symbols,
+           updated_at           = NOW()`,
+        [userId, mode, JSON.stringify(symbols)]
+      );
+      return res.json({ success: true, message: 'Préférences d\'alertes mises à jour', mode, symbols });
     }
 
     return res.status(400).json({ success: false, error: `Section inconnue: ${section}` });
