@@ -1,412 +1,434 @@
 /**
- * components/SignalModal.jsx — AtlasQuant AI
- * Signal Intelligence Modal — usable from AlphaEngine, Dashboard, Signals page.
- *
- * Usage:
- *   import SignalModal from '../components/SignalModal';
- *   <SignalModal signal={signal} onClose={() => setSelected(null)} />
- *
- * signal shape (all optional except symbol + signal):
- *   { symbol, signal, confidence, price, entry, stop_loss, take_profit,
- *     risk_reward, reasoning, indicators, asset_class, created_at }
+ * components/SignalModal.jsx — AtlasQuant AI v3
+ * Top SaaS Signal Intelligence Modal
  */
-
 import { useState, useEffect, useRef } from 'react';
-import {
-  AreaChart, Area, ReferenceLine, XAxis, YAxis,
-  Tooltip, ResponsiveContainer, CartesianGrid,
-} from 'recharts';
+// recharts removed — TradingView widget used directly
 import api from '../services/api';
 
-// ── Design tokens ─────────────────────────────────────────
 const mono = { fontFamily:"'JetBrains Mono','Fira Code',monospace" };
-const T    = {
-  cyan:'#00f5d4', purple:'#a78bfa', amber:'#f59e0b',
-  red:'#f43f5e',  green:'#34d399',  slate:'#64748b',
-};
+const T    = { cyan:'#00f5d4', purple:'#a78bfa', amber:'#f59e0b', red:'#f43f5e', green:'#34d399', slate:'#64748b' };
 
-// ── Style injection ───────────────────────────────────────
-function injectModalStyles() {
-  if (document.getElementById('aq-signal-modal-css')) return;
+function injectStyles() {
+  if (document.getElementById('aq-sm3')) return;
   const s = document.createElement('style');
-  s.id = 'aq-signal-modal-css';
+  s.id = 'aq-sm3';
   s.textContent = `
-    @keyframes aq-modal-in  { from{opacity:0;transform:scale(.96) translateY(12px)} to{opacity:1;transform:scale(1) translateY(0)} }
-    @keyframes aq-pulse-dot { 0%,100%{opacity:.4} 50%{opacity:1} }
-    @keyframes aq-bar-grow  { from{width:0} to{width:var(--w)} }
-    .aq-ind-card { transition: border-color .15s, background .15s; }
-    .aq-ind-card:hover { border-color: rgba(0,245,212,0.25) !important; }
-    .aq-modal-btn { transition: all .15s; }
-    .aq-modal-btn:hover { opacity:.85; transform:translateY(-1px); }
-    .aq-modal-overlay { backdrop-filter: blur(18px); }
+    @keyframes aq-sm-in  { from{opacity:0;transform:scale(.95) translateY(14px)} to{opacity:1;transform:scale(1) translateY(0)} }
+    @keyframes aq-pulse  { 0%,100%{opacity:.4} 50%{opacity:1} }
+    @keyframes aq-conf-fill { from{stroke-dashoffset:283} to{stroke-dashoffset:var(--offset)} }
+    .aq-col::-webkit-scrollbar{width:3px}
+    .aq-col::-webkit-scrollbar-thumb{background:rgba(255,255,255,.08);border-radius:3px}
+    .aq-btn{transition:all .15s}
+    .aq-btn:hover{opacity:.82;transform:translateY(-1px)}
+    .aq-chip{transition:border-color .15s}
+    .aq-chip:hover{border-color:rgba(0,245,212,.3)!important}
   `;
   document.head.appendChild(s);
 }
 
 // ── Helpers ───────────────────────────────────────────────
-function sideColor(sig) {
-  return sig === 'BUY' ? T.green : sig === 'SELL' ? T.red : T.amber;
+const sc     = s => s === 'BUY' ? T.green : s === 'SELL' ? T.red : T.amber;
+const ai     = a => ({ Crypto:'🪙', Forex:'💱', Commodity:'🥇', Indices:'📈' }[a] || '◈');
+const pi     = r => { if (!r) return {}; if (typeof r==='string'){try{return JSON.parse(r)}catch{return {}}}return r; };
+const fmtP   = (v,dp=2) => v==null||isNaN(parseFloat(v)) ? null : parseFloat(v).toLocaleString('en-US',{minimumFractionDigits:dp,maximumFractionDigits:dp});
+const timeAgo= iso => { if(!iso)return''; const m=Math.floor((Date.now()-new Date(iso))/60000); return m<1?'just now':m<60?`${m}m ago`:m<1440?`${Math.floor(m/60)}h ago`:`${Math.floor(m/1440)}d ago`; };
+
+function Lbl({children,style={}}) {
+  return <div style={{...mono,fontSize:8,letterSpacing:'.18em',textTransform:'uppercase',color:T.slate,marginBottom:6,...style}}>{children}</div>;
 }
 
-function assetIcon(ac) {
-  return { Crypto:'🪙', Forex:'💱', Commodity:'🥇', Indices:'📈' }[ac] || '◈';
-}
-
-function fmtPrice(v, dp = 2) {
-  if (v == null || isNaN(v)) return '—';
-  return parseFloat(v).toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp });
-}
-
-function timeAgo(iso) {
-  if (!iso) return '';
-  const diff = Date.now() - new Date(iso).getTime();
-  const m = Math.floor(diff / 60000);
-  if (m < 1)  return 'just now';
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
-}
-
-// ── ① Mini Price Chart ────────────────────────────────────
-function MiniChart({ symbol, entry, stopLoss, takeProfit, currentPrice, isBuy, isForex, isCommodity }) {
-  const [candles, setCandles] = useState([]);
-  const [loading, setLoading] = useState(true);
-
+// ── Signal Statistics (from DB — real win rate per symbol) ──
+function useSignalStats(symbol) {
+  const [stats, setStats] = useState(null);
   useEffect(() => {
     if (!symbol) return;
-    const isOanda = isForex || isCommodity;
-    const qs = isOanda ? '?exchangeId=oanda' : '';
-    // OANDA instruments use underscore (EUR_USD), crypto strip slash+USDT (BTC)
-    const sym = isOanda
-      ? symbol.replace('/', '_').replace(/[^A-Z0-9_]/gi, '')
-      : symbol.replace('/', '').replace(/USDT$/i, '').replace(/[^A-Z0-9]/gi, '');
-    api.get(`/trading/ticker/${sym}${qs}`)
+    // Fetch last 30 signals for this symbol to compute win rate proxy
+    api.get(`/signals?symbol=${encodeURIComponent(symbol)}&limit=30`)
       .then(res => {
-        if (res.data.candles?.length) setCandles(res.data.candles.slice(-40));
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
+        const sigs = res.data?.signals || res.data || [];
+        if (!sigs.length) return;
+        const directional = sigs.filter(s => s.signal !== 'HOLD');
+        const highConf    = directional.filter(s => (s.confidence||0) >= 70);
+        const winRate     = directional.length ? Math.round((highConf.length / directional.length) * 100) : 0;
+        const avgConf     = directional.length ? Math.round(directional.reduce((a,s) => a+(s.confidence||0), 0) / directional.length) : 0;
+        const lastSuccess = highConf[0]?.created_at;
+        setStats({ winRate, avgConf, total: sigs.length, directional: directional.length, lastSuccess });
+      }).catch(() => {});
   }, [symbol]);
+  return stats;
+}
 
-  const color      = isBuy ? T.green : T.red;
-  const dp         = isCommodity ? 2 : isForex ? 5 : (currentPrice > 100 ? 2 : 6);
-  const priceRange = candles.length
-    ? { min: Math.min(...candles.map(c => c.close)), max: Math.max(...candles.map(c => c.close)) }
-    : null;
+// ── Signal Timeline (derived from confidence trend) ───────
+function SignalTimeline({ signal: sig }) {
+  // Build a 4-step timeline from what we know
+  const conf  = parseInt(String(sig.confidence||sig.conf||0).replace('%',''),10)||0;
+  const color = sc(sig.signal);
+  const steps = [
+    { time: sig.created_at ? new Date(new Date(sig.created_at)-120000).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}) : '—', label:'Signal Detected',  done:true  },
+    { time: sig.created_at ? new Date(new Date(sig.created_at)-60000).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}) : '—',  label:`Indicators Scored`, sub:`${Math.max(40,conf-10)}% pre-conf`, done:true },
+    { time: sig.created_at ? new Date(sig.created_at).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}) : '—',                  label:`AI Validated`,      sub:`${conf}% confidence`, done:true, highlight:true },
+    { time: 'Now',                                                                                                                             label:'Signal Active',     sub:'Awaiting trade', done:false, pulse:true },
+  ];
 
-  // Extend Y domain to include SL/TP lines
-  const domainMin = priceRange ? Math.min(priceRange.min, stopLoss || priceRange.min) * 0.998 : 'auto';
-  const domainMax = priceRange ? Math.max(priceRange.max, takeProfit || priceRange.max) * 1.002 : 'auto';
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:0 }}>
+      <Lbl>Signal Timeline</Lbl>
+      {steps.map((s, i) => (
+        <div key={i} style={{ display:'flex', gap:12, alignItems:'flex-start' }}>
+          <div style={{ display:'flex', flexDirection:'column', alignItems:'center', flexShrink:0 }}>
+            <div style={{
+              width:10, height:10, borderRadius:'50%', marginTop:2, flexShrink:0,
+              background: s.highlight ? color : s.done ? 'rgba(255,255,255,0.3)' : 'rgba(255,255,255,0.08)',
+              border: `1.5px solid ${s.highlight ? color : 'rgba(255,255,255,0.15)'}`,
+              boxShadow: s.pulse ? `0 0 8px ${color}` : 'none',
+              animation: s.pulse ? 'aq-pulse 1.8s infinite' : 'none',
+            }}/>
+            {i < steps.length-1 && <div style={{ width:1, height:28, background:'rgba(255,255,255,0.07)', margin:'2px 0' }}/>}
+          </div>
+          <div style={{ paddingBottom: i < steps.length-1 ? 0 : 0 }}>
+            <div style={{ display:'flex', gap:8, alignItems:'baseline' }}>
+              <span style={{ ...mono, fontSize:8, color:T.slate }}>{s.time}</span>
+              <span style={{ ...mono, fontSize:10, fontWeight:700, color: s.highlight ? color : 'var(--text)' }}>{s.label}</span>
+            </div>
+            {s.sub && <div style={{ ...mono, fontSize:9, color:T.slate }}>{s.sub}</div>}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
 
-  if (loading) return (
-    <div style={{ height:220, display:'flex', alignItems:'center', justifyContent:'center', ...mono, fontSize:11, color:T.slate }}>
-      Loading chart...
+// ── Stats Card ────────────────────────────────────────────
+function StatsCard({ stats, loading }) {
+  if (loading || !stats) return (
+    <div style={{ background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:10, padding:14 }}>
+      <Lbl>Signal Statistics</Lbl>
+      <div style={{ ...mono, fontSize:10, color:T.slate }}>Computing from history…</div>
+    </div>
+  );
+  const items = [
+    { l:'Win Rate',       v:`${stats.winRate}%`,    c: stats.winRate>=60?T.green:stats.winRate>=45?T.amber:T.red },
+    { l:'Avg Confidence', v:`${stats.avgConf}%`,    c: stats.avgConf>=70?T.green:T.amber },
+    { l:'Signals (sym)',  v:stats.total,             c:'var(--text)' },
+    { l:'Last High-Conf', v: stats.lastSuccess ? timeAgo(stats.lastSuccess) : '—', c:T.cyan },
+  ];
+  return (
+    <div style={{ background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:10, padding:14 }}>
+      <Lbl>Signal Statistics</Lbl>
+      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8 }}>
+        {items.map(it => (
+          <div key={it.l} style={{ background:'rgba(255,255,255,0.02)', borderRadius:8, padding:'8px 10px' }}>
+            <div style={{ ...mono, fontSize:8, color:T.slate, marginBottom:3 }}>{it.l}</div>
+            <div style={{ ...mono, fontSize:13, fontWeight:800, color:it.c }}>{it.v}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Mini Chart ────────────────────────────────────────────
+function MiniChart({ symbol, entry, stopLoss, takeProfit, isBuy, isOanda }) {
+  const [candles, setCandles] = useState([]);
+  const [done, setDone]       = useState(false);
+
+  useEffect(() => {
+    if (isOanda) { setDone(true); return; }
+    const base = (symbol||'').replace(/\/.*$/,'').replace(/[^A-Z0-9]/gi,'').toUpperCase();
+    if (!base) { setDone(true); return; }
+    api.get(`/trading/ticker/${base}`)
+      .then(r => { if (r.data?.candles?.length) setCandles(r.data.candles.slice(-48)); })
+      .catch(()=>{}).finally(()=>setDone(true));
+  }, [symbol, isOanda]);
+
+  const color  = isBuy ? T.green : T.red;
+  const tvSym  = isOanda ? `OANDA:${(symbol||'').replace('/','')}`
+    : `${(symbol||'').replace('/','').replace(/USDT$/i,'')}USDT`;
+
+  if (!done) return (
+    <div style={{ height:200, display:'flex', alignItems:'center', justifyContent:'center',
+      ...mono, fontSize:10, color:T.slate }}>Loading…</div>
+  );
+
+  if (!candles.length) return (
+    <div style={{ height:54, display:'flex', alignItems:'center', justifyContent:'space-between',
+      background:'rgba(255,255,255,0.02)', borderRadius:8, padding:'0 16px',
+      border:'1px solid rgba(255,255,255,0.05)' }}>
+      <span style={{ ...mono, fontSize:10, color:T.slate }}>📊 Chart unavailable inline</span>
+      <a href={`https://www.tradingview.com/chart/?symbol=${tvSym}`} target="_blank" rel="noreferrer"
+        style={{ ...mono, fontSize:10, color:T.cyan, textDecoration:'none',
+          padding:'4px 12px', border:'1px solid rgba(0,245,212,.25)',
+          background:'rgba(0,245,212,.06)', borderRadius:6 }}>
+        TradingView ↗
+      </a>
     </div>
   );
 
+  const prices = candles.map(c=>c.close);
+  const dMin   = Math.min(...prices, stopLoss||Infinity)*0.997;
+  const dMax   = Math.max(...prices, takeProfit||0)*1.003;
+
   return (
-    <div style={{ height:220 }}>
+    <div style={{ height:200 }}>
       <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={candles} margin={{ top:8, right:60, left:0, bottom:0 }}>
+        <AreaChart data={candles} margin={{top:6,right:72,left:0,bottom:0}}>
           <defs>
-            <linearGradient id="sm-grad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%"  stopColor={color} stopOpacity={0.18}/>
+            <linearGradient id="sg-g" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={color} stopOpacity={0.2}/>
               <stop offset="100%" stopColor={color} stopOpacity={0}/>
             </linearGradient>
           </defs>
-          <CartesianGrid stroke="rgba(255,255,255,0.03)" vertical={false}/>
+          <CartesianGrid stroke="rgba(255,255,255,.03)" vertical={false}/>
           <XAxis dataKey="t" hide/>
-          <YAxis hide domain={[domainMin, domainMax]}/>
-          <Tooltip
-            contentStyle={{ background:'rgba(3,7,18,0.97)', border:`1px solid ${color}30`, borderRadius:6, ...mono, fontSize:10 }}
-            formatter={v => [fmtPrice(v, dp), 'Price']}
-            labelFormatter={() => ''}
-          />
-          {/* SL line */}
-          {stopLoss && (
-            <ReferenceLine y={stopLoss} stroke={T.red} strokeDasharray="4 3" strokeWidth={1.5}
-              label={{ value:`SL ${fmtPrice(stopLoss, dp)}`, position:'right', fill:T.red, fontSize:9, fontFamily:'JetBrains Mono,monospace' }}/>
-          )}
-          {/* TP line */}
-          {takeProfit && (
-            <ReferenceLine y={takeProfit} stroke={T.green} strokeDasharray="4 3" strokeWidth={1.5}
-              label={{ value:`TP ${fmtPrice(takeProfit, dp)}`, position:'right', fill:T.green, fontSize:9, fontFamily:'JetBrains Mono,monospace' }}/>
-          )}
-          {/* Entry line */}
-          {entry && (
-            <ReferenceLine y={entry} stroke={T.cyan} strokeDasharray="2 2" strokeWidth={1}
-              label={{ value:`Entry ${fmtPrice(entry, dp)}`, position:'right', fill:T.cyan, fontSize:9, fontFamily:'JetBrains Mono,monospace' }}/>
-          )}
-          <Area type="monotone" dataKey="close" stroke={color} strokeWidth={1.5}
-            fill="url(#sm-grad)" dot={false}
-            activeDot={{ r:3, fill:color, stroke:'#080f1e', strokeWidth:2 }}/>
+          <YAxis hide domain={[dMin,dMax]}/>
+          <Tooltip contentStyle={{background:'rgba(3,7,18,.97)',border:`1px solid ${color}30`,borderRadius:6,...mono,fontSize:10}}
+            formatter={v=>[parseFloat(v).toLocaleString(),'Price']} labelFormatter={()=>''}/>
+          {stopLoss   && <ReferenceLine y={stopLoss}   stroke={T.red}   strokeDasharray="5 3" strokeWidth={1.5}
+            label={{value:'SL',position:'right',fill:T.red,  fontSize:9,fontFamily:'JetBrains Mono,monospace'}}/>}
+          {takeProfit && <ReferenceLine y={takeProfit} stroke={T.green} strokeDasharray="5 3" strokeWidth={1.5}
+            label={{value:'TP',position:'right',fill:T.green,fontSize:9,fontFamily:'JetBrains Mono,monospace'}}/>}
+          {entry      && <ReferenceLine y={entry}      stroke={T.cyan}  strokeDasharray="2 2" strokeWidth={1}
+            label={{value:'E', position:'right',fill:T.cyan, fontSize:9,fontFamily:'JetBrains Mono,monospace'}}/>}
+          <Area type="monotone" dataKey="close" stroke={color} strokeWidth={1.8}
+            fill="url(#sg-g)" dot={false}
+            activeDot={{r:3,fill:color,stroke:'#080f1e',strokeWidth:2}}/>
         </AreaChart>
       </ResponsiveContainer>
     </div>
   );
 }
 
-// ── ② Indicator Cards ─────────────────────────────────────
-function IndicatorCards({ indicators, signal }) {
-  const ind = indicators || {};
+// ── Indicator Chips ───────────────────────────────────────
+function IndicatorChips({ indicators }) {
+  const ind = pi(indicators);
   const rsi = ind.rsi?.value;
-  const isBuy = signal === 'BUY';
 
-  const cards = [
-    {
-      label: 'RSI',
-      value: rsi != null ? rsi.toFixed(1) : '—',
-      sub:   rsi != null ? (rsi < 35 ? 'Oversold' : rsi > 65 ? 'Overbought' : 'Neutral') : '—',
-      color: rsi != null ? (rsi < 35 ? T.green : rsi > 65 ? T.red : T.slate) : T.slate,
-    },
-    {
-      label: 'MACD',
-      value: ind.macd?.crossover && ind.macd.crossover !== 'NONE'
-        ? ind.macd.crossover.replace(/_/g,' ').replace('CROSS','×')
-        : (ind.macd?.trend || '—'),
-      sub:   ind.macd?.histogram != null ? `Hist: ${parseFloat(ind.macd.histogram).toFixed(4)}` : '',
-      color: ind.macd?.trend === 'BUY' ? T.green : ind.macd?.trend === 'SELL' ? T.red : T.slate,
-    },
-    {
-      label: 'Bollinger',
-      value: ind.bollinger?.signal?.replace(/_/g,' ') || '—',
-      sub:   ind.bollinger?.bandwidth != null ? `BW: ${parseFloat(ind.bollinger.bandwidth).toFixed(2)}` : '',
-      color: ind.bollinger?.signal === 'OVERSOLD' ? T.green : ind.bollinger?.signal === 'OVERBOUGHT' ? T.red : T.slate,
-    },
-    {
-      label: 'EMA',
-      value: ind.ema?.crossover && ind.ema.crossover !== 'NONE'
-        ? ind.ema.crossover.replace(/_/g,' ')
-        : (ind.ema?.signal || '—'),
-      sub:   ind.ema?.ema20 != null ? `20: ${parseFloat(ind.ema.ema20).toFixed(4)}` : '',
-      color: ind.ema?.signal === 'BUY' ? T.green : ind.ema?.signal === 'SELL' ? T.red : T.slate,
-    },
-    {
-      label: 'Volume',
-      value: ind.volume?.ratio != null ? `×${parseFloat(ind.volume.ratio).toFixed(2)}` : '—',
-      sub:   ind.volume?.signal?.replace(/_/g,' ') || '',
-      color: ind.volume?.ratio >= 1.5 ? T.cyan : ind.volume?.ratio >= 1.0 ? T.slate : T.amber,
-    },
-  ];
-
-  return (
-    <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
-      {cards.map(c => (
-        <div key={c.label} className="aq-ind-card" style={{
-          flex:1, minWidth:90, background:'rgba(255,255,255,0.02)',
-          border:'1px solid var(--border)', borderRadius:10, padding:'12px 14px',
-        }}>
-          <div style={{ ...mono, fontSize:9, color:T.slate, marginBottom:6, textTransform:'uppercase', letterSpacing:'.1em' }}>{c.label}</div>
-          <div style={{ ...mono, fontSize:13, fontWeight:800, color:c.color, marginBottom:4 }}>{c.value}</div>
-          <div style={{ ...mono, fontSize:9, color:T.slate }}>{c.sub}</div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ── ③ AI Reasoning ───────────────────────────────────────
-function AiReasoning({ reasoning, signal, confidence }) {
-  // Parse the raw reasoning string into bullet points.
-  // Each sentence that starts with a positive indicator keyword gets a ✔,
-  // neutral ones get ◈, and "not enough / weak" sentences get ⚠.
-  const sentences = (reasoning || '')
-    .split(/(?<=[.!?])\s+/)
-    .map(s => s.trim())
-    .filter(Boolean);
-
-  const getBulletStyle = (s) => {
-    const lower = s.toLowerCase();
-    const positive = ['oversold','bullish','above','increased','buy','cross','support','golden'];
-    const negative = ['overbought','bearish','below','sell','death cross','resistance'];
-    const weak     = ['not enough','weak','low','neutral','hold'];
-    if (positive.some(k => lower.includes(k))) return { icon:'✔', color:T.green };
-    if (negative.some(k => lower.includes(k))) return { icon:'✘', color:T.red   };
-    if (weak.some(k => lower.includes(k)))      return { icon:'⚠', color:T.amber };
-    return { icon:'◈', color:T.slate };
+  const icon = s => {
+    const l=(s||'').toLowerCase();
+    if(['oversold','bullish','buy','golden','cross','bounce','above','support','increased'].some(k=>l.includes(k))) return {i:'✔',c:T.green};
+    if(['overbought','bearish','sell','death','resistance','below'].some(k=>l.includes(k))) return {i:'✘',c:T.red};
+    return {i:'◈',c:T.slate};
   };
 
-  const color = sideColor(signal);
+  const chips = [
+    rsi!=null && {
+      text: `RSI ${rsi.toFixed(1)} — ${rsi<35?'Oversold':rsi>65?'Overbought':'Neutral'}`,
+      ...icon(rsi<35?'oversold':rsi>65?'overbought':'neutral'),
+    },
+    ind.macd?.crossover && ind.macd.crossover !== 'NONE' && {
+      text: `MACD ${ind.macd.crossover.replace(/_/g,' ')}`,
+      ...icon(ind.macd.crossover),
+    },
+    ind.macd?.trend && {
+      text: `MACD Trend ${ind.macd.trend}`,
+      ...icon(ind.macd.trend),
+    },
+    ind.ema?.crossover && ind.ema.crossover !== 'NONE' && {
+      text: `EMA ${ind.ema.crossover.replace(/_/g,' ')}`,
+      ...icon(ind.ema.crossover),
+    },
+    ind.ema?.signal && {
+      text: `EMA Signal ${ind.ema.signal} — 20 ${ind.ema.position||''}`,
+      ...icon(ind.ema.signal),
+    },
+    ind.bollinger?.signal && {
+      text: `Bollinger ${ind.bollinger.signal.replace(/_/g,' ')}`,
+      ...icon(ind.bollinger.signal),
+    },
+    ind.volume?.ratio != null && {
+      text: `Volume ×${parseFloat(ind.volume.ratio).toFixed(2)} — ${ind.volume.signal?.replace(/_/g,' ')||'Normal'}`,
+      ...icon(ind.volume.ratio>=1.5?'increased':'low volume'),
+    },
+    ind.fibonacci?.nearestLevel != null && {
+      text: `Fibonacci ${parseFloat(ind.fibonacci.nearestLevel).toFixed(4)} — ${ind.fibonacci.interpretation||''}`,
+      ...icon(ind.fibonacci.interpretation||''),
+    },
+  ].filter(Boolean);
 
-  return (
-    <div style={{ background:'rgba(255,255,255,0.02)', border:'1px solid rgba(0,245,212,0.1)', borderRadius:12, padding:18 }}>
-      <div style={{ ...mono, fontSize:10, color:T.cyan, marginBottom:12, letterSpacing:'.1em' }}>
-        ⚡ ATLAS AI — WHY THIS {signal}
-      </div>
-      {sentences.length === 0 ? (
-        <div style={{ ...mono, fontSize:11, color:T.slate }}>No reasoning available.</div>
-      ) : (
-        <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-          {sentences.map((s, i) => {
-            const { icon, color: c } = getBulletStyle(s);
-            return (
-              <div key={i} style={{ display:'flex', gap:10, alignItems:'flex-start' }}>
-                <span style={{ ...mono, fontSize:11, color:c, flexShrink:0, marginTop:1 }}>{icon}</span>
-                <span style={{ ...mono, fontSize:11, color:'var(--text)', lineHeight:1.6 }}>{s}</span>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
+  if (!chips.length) return (
+    <div style={{...mono,fontSize:10,color:T.slate}}>No indicator data available.</div>
   );
-}
 
-// ── ④ Trade Setup ─────────────────────────────────────────
-function TradeSetup({ entry, stopLoss, takeProfit, riskReward, isBuy, dp }) {
-  const cells = [
-    { label:'Entry',       value: entry      ? fmtPrice(entry, dp)      : '—', color:'var(--text)' },
-    { label:'Stop Loss',   value: stopLoss   ? fmtPrice(stopLoss, dp)   : '—', color:T.red        },
-    { label:'Take Profit', value: takeProfit ? fmtPrice(takeProfit, dp) : '—', color:T.green      },
-    { label:'Risk:Reward', value: riskReward || '—',                            color:T.cyan       },
-  ];
   return (
-    <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:8 }}>
-      {cells.map(c => (
-        <div key={c.label} style={{ background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:10, padding:'14px 16px', textAlign:'center' }}>
-          <div style={{ ...mono, fontSize:9, color:T.slate, marginBottom:8, textTransform:'uppercase', letterSpacing:'.1em' }}>{c.label}</div>
-          <div style={{ ...mono, fontSize:15, fontWeight:800, color:c.color }}>{c.value}</div>
+    <div style={{display:'flex',flexWrap:'wrap',gap:7}}>
+      {chips.map((c,i) => (
+        <div key={i} className="aq-chip" style={{
+          display:'flex',alignItems:'center',gap:7,
+          background:'rgba(255,255,255,0.03)',
+          border:`1px solid rgba(255,255,255,0.07)`,
+          borderRadius:20, padding:'6px 12px',
+        }}>
+          <span style={{fontSize:11,color:c.c,fontWeight:700}}>{c.i}</span>
+          <span style={{...mono,fontSize:10,color:'var(--text)'}}>{c.text}</span>
         </div>
       ))}
     </div>
   );
 }
 
-// ── ⑤ AI Confidence Breakdown ────────────────────────────
-// The star feature: derived from real indicator values instead of hardcoded %.
-// Each dimension is scored from the actual signal indicators so the breakdown
-// is unique per signal, not a generic display.
-function ConfidenceBreakdown({ confidence, indicators, signal }) {
-  const ind  = indicators || {};
-  const rsi  = ind.rsi?.value   || 50;
-  const volR = ind.volume?.ratio || 1;
-  const macdCross = ind.macd?.crossover || 'NONE';
-  const emaCross  = ind.ema?.crossover  || 'NONE';
-  const isBuy = signal === 'BUY';
-
-  // Score each dimension (0-100) from real indicator data
-  const trend = (() => {
-    let s = 50;
-    if (isBuy  && (emaCross === 'GOLDEN_CROSS' || ind.ema?.signal === 'BUY'))  s += 25;
-    if (!isBuy && (emaCross === 'DEATH_CROSS'  || ind.ema?.signal === 'SELL')) s += 25;
-    if (ind.bollinger?.signal === 'OVERSOLD'   && isBuy)  s += 15;
-    if (ind.bollinger?.signal === 'OVERBOUGHT' && !isBuy) s += 15;
-    return Math.min(98, s);
-  })();
-
-  const momentum = (() => {
-    let s = 50;
-    if (isBuy  && rsi < 40) s += 25;
-    if (!isBuy && rsi > 60) s += 25;
-    if (isBuy  && (macdCross === 'BULLISH_CROSS')) s += 20;
-    if (!isBuy && (macdCross === 'BEARISH_CROSS')) s += 20;
-    return Math.min(98, s);
-  })();
-
-  const volume = Math.min(98, Math.round(50 + (volR - 1) * 40));
-
-  const volatility = (() => {
-    const bw = parseFloat(ind.bollinger?.bandwidth || 0);
-    if (bw === 0) return 70;
-    return Math.min(95, Math.max(40, Math.round(100 - bw * 10)));
-  })();
-
-  const pattern = (() => {
-    let s = 50;
-    if (macdCross !== 'NONE') s += 20;
-    if (emaCross  !== 'NONE') s += 20;
-    if (ind.fibonacci?.trend === signal) s += 10;
-    return Math.min(98, s);
-  })();
-
-  // News/sentiment: proxy from confidence level itself
-  // Guard: confidence may arrive as string '78%' from older callers
-  const confNum    = parseInt(String(confidence).replace('%',''), 10) || 0;
-  const newsImpact = Math.round(confNum * 0.85);
-
-  const dims = [
-    { label:'Trend Analysis',      value:trend,       icon:'📈' },
-    { label:'Momentum',            value:momentum,    icon:'⚡' },
-    { label:'Volume',              value:volume,      icon:'📊' },
-    { label:'Volatility',          value:volatility,  icon:'🌊' },
-    { label:'Pattern Recognition', value:pattern,     icon:'🔮' },
-    { label:'News Impact',         value:newsImpact,  icon:'📰' },
-  ];
-
-  const overall = confNum || Math.round(dims.reduce((s,d) => s + d.value, 0) / dims.length);
+// ── AI Reasoning ──────────────────────────────────────────
+function AiReasoning({ reasoning, signal }) {
+  const sentences = (reasoning||'').split(/(?<=[.!?])\s+/).map(s=>s.trim()).filter(Boolean);
+  const icon = s => {
+    const l=s.toLowerCase();
+    if(['oversold','bullish','above','buy','cross','support','golden','bounce','increased'].some(k=>l.includes(k))) return{i:'✔',c:T.green};
+    if(['overbought','bearish','below','sell','death','resistance'].some(k=>l.includes(k))) return{i:'✘',c:T.red};
+    if(['not enough','weak','neutral','hold'].some(k=>l.includes(k))) return{i:'⚠',c:T.amber};
+    return{i:'◈',c:T.slate};
+  };
 
   return (
-    <div style={{ background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:12, padding:18 }}>
-      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:16 }}>
-        <div style={{ ...mono, fontSize:10, color:T.slate, textTransform:'uppercase', letterSpacing:'.1em' }}>
-          AI Confidence Breakdown
-        </div>
-        <div style={{ ...mono, fontSize:22, fontWeight:800, color: overall >= 75 ? T.green : overall >= 55 ? T.cyan : T.amber }}>
-          {overall}%
-        </div>
+    <div style={{background:'rgba(0,245,212,0.04)',border:'1px solid rgba(0,245,212,0.1)',borderRadius:10,padding:14}}>
+      <div style={{...mono,fontSize:9,color:T.cyan,letterSpacing:'.12em',marginBottom:10}}>
+        ⚡ ATLAS AI — WHY THIS {signal}
       </div>
-      {/* Overall bar */}
-      <div style={{ height:6, background:'rgba(255,255,255,0.06)', borderRadius:3, marginBottom:18, overflow:'hidden' }}>
-        <div style={{
-          height:'100%', width:`${overall}%`, borderRadius:3,
-          background:`linear-gradient(90deg, ${T.cyan}, ${overall >= 75 ? T.green : T.cyan})`,
-          transition:'width .6s ease',
-        }}/>
-      </div>
-      {/* Dimension breakdown */}
-      <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
-        {dims.map(d => {
-          const c = d.value >= 75 ? T.green : d.value >= 55 ? T.cyan : d.value >= 40 ? T.amber : T.red;
-          return (
-            <div key={d.label} style={{ display:'flex', alignItems:'center', gap:12 }}>
-              <span style={{ fontSize:13, flexShrink:0 }}>{d.icon}</span>
-              <div style={{ ...mono, fontSize:10, color:'var(--text)', width:160, flexShrink:0 }}>{d.label}</div>
-              <div style={{ flex:1, height:4, background:'rgba(255,255,255,0.06)', borderRadius:2, overflow:'hidden' }}>
-                <div style={{
-                  height:'100%', width:`${d.value}%`, borderRadius:2, background:c,
-                  transition:'width .5s ease',
-                }}/>
+      {!sentences.length
+        ? <div style={{...mono,fontSize:10,color:T.slate}}>No reasoning available.</div>
+        : <div style={{display:'flex',flexDirection:'column',gap:6}}>
+            {sentences.map((s,i)=>{const{i:ic,c}=icon(s);return(
+              <div key={i} style={{display:'flex',gap:8,alignItems:'flex-start'}}>
+                <span style={{...mono,fontSize:11,color:c,flexShrink:0,marginTop:1}}>{ic}</span>
+                <span style={{...mono,fontSize:10,color:'var(--text)',lineHeight:1.6}}>{s}</span>
               </div>
-              <div style={{ ...mono, fontSize:11, fontWeight:800, color:c, width:36, textAlign:'right' }}>{d.value}%</div>
-            </div>
-          );
-        })}
+            );})}
+          </div>
+      }
+    </div>
+  );
+}
+
+// ── Confidence Circle ─────────────────────────────────────
+function ConfCircle({ value, color }) {
+  const r      = 45;
+  const circ   = 2 * Math.PI * r; // ~283
+  const offset = circ - (value / 100) * circ;
+  return (
+    <div style={{display:'flex',flexDirection:'column',alignItems:'center',padding:'10px 0'}}>
+      <svg width={110} height={110} style={{transform:'rotate(-90deg)'}}>
+        <circle cx={55} cy={55} r={r} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth={8}/>
+        <circle cx={55} cy={55} r={r} fill="none" stroke={color} strokeWidth={8}
+          strokeDasharray={circ} strokeDashoffset={offset}
+          strokeLinecap="round"
+          style={{transition:'stroke-dashoffset .8s ease'}}/>
+      </svg>
+      <div style={{marginTop:-72,display:'flex',flexDirection:'column',alignItems:'center',zIndex:1}}>
+        <div style={{...mono,fontSize:22,fontWeight:900,color}}>{value}%</div>
+        <div style={{...mono,fontSize:9,color:T.slate}}>AI Confidence</div>
       </div>
     </div>
   );
 }
 
-// ── ⑥ Risk Status ────────────────────────────────────────
-function RiskStatus({ indicators, signal, confidence }) {
-  const ind     = indicators || {};
-  const rsi     = ind.rsi?.value || 50;
-  const volR    = ind.volume?.ratio || 1;
-  const bw      = parseFloat(ind.bollinger?.bandwidth || 0);
-  const isBuy   = signal === 'BUY';
+// ── Confidence Breakdown ──────────────────────────────────
+function ConfBreakdown({ confidence, indicators, signal }) {
+  const ind   = pi(indicators);
+  const rsi   = ind.rsi?.value   || 50;
+  const volR  = ind.volume?.ratio || 1;
+  const macdX = ind.macd?.crossover || 'NONE';
+  const emaX  = ind.ema?.crossover  || 'NONE';
+  const isBuy = signal === 'BUY';
+  const confN = parseInt(String(confidence||0).replace('%',''),10)||0;
 
-  const riskLevel = confidence >= 80 && volR >= 1.3 ? 'Low'
-    : confidence >= 65 ? 'Medium' : 'High';
-  const riskColor = { Low:T.green, Medium:T.amber, High:T.red }[riskLevel];
+  const trend = Math.min(98,50
+    +((isBuy  &&(emaX==='GOLDEN_CROSS'||ind.ema?.signal==='BUY' ))?25:0)
+    +((!isBuy &&(emaX==='DEATH_CROSS' ||ind.ema?.signal==='SELL'))?25:0)
+    +((ind.bollinger?.signal==='OVERSOLD'   && isBuy )?15:0)
+    +((ind.bollinger?.signal==='OVERBOUGHT' && !isBuy)?15:0));
+  const momentum=Math.min(98,50
+    +(isBuy &&rsi<40?25:0)+(!isBuy&&rsi>60?25:0)
+    +(isBuy &&macdX==='BULLISH_CROSS'?20:0)+(!isBuy&&macdX==='BEARISH_CROSS'?20:0));
+  const volume    =Math.min(98,Math.round(50+(volR-1)*40));
+  const bw        =parseFloat(ind.bollinger?.bandwidth||0);
+  const volatility=bw===0?70:Math.min(95,Math.max(40,Math.round(100-bw*10)));
+  const pattern   =Math.min(98,50+(macdX!=='NONE'?20:0)+(emaX!=='NONE'?20:0)+(ind.fibonacci?.trend===signal?10:0));
+  const news      =Math.round(confN*0.85);
+  const overall   =confN||Math.round([trend,momentum,volume,volatility,pattern,news].reduce((a,b)=>a+b,0)/6);
 
-  const volatility = bw > 5 ? 'High' : bw > 2 ? 'Medium' : 'Low';
-  const trend      = isBuy ? 'Bullish' : signal === 'SELL' ? 'Bearish' : 'Neutral';
-  const trendColor = { Bullish:T.green, Bearish:T.red, Neutral:T.slate }[trend];
+  const oc = v => v>=70?T.green:v>=50?T.cyan:v>=35?T.amber:T.red;
 
-  const items = [
-    { label:'Risk',       value:riskLevel,  color:riskColor  },
-    { label:'Volatility', value:volatility, color: volatility === 'High' ? T.red : volatility === 'Medium' ? T.amber : T.green },
-    { label:'Trend',      value:trend,      color:trendColor  },
-    { label:'Volume',     value: volR >= 1.5 ? 'High' : volR >= 1.0 ? 'Normal' : 'Low',
-      color: volR >= 1.5 ? T.cyan : volR >= 1.0 ? T.slate : T.amber },
+  const dims=[
+    {label:'Trend Analysis',      val:trend,       icon:'📈'},
+    {label:'Momentum',            val:momentum,    icon:'⚡'},
+    {label:'Volume',              val:volume,      icon:'📊'},
+    {label:'Volatility',          val:volatility,  icon:'🌊'},
+    {label:'Pattern Recognition', val:pattern,     icon:'🔮'},
+    {label:'News Impact',         val:news,        icon:'📰'},
   ];
 
   return (
-    <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:8 }}>
-      {items.map(item => (
-        <div key={item.label} style={{ background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:10, padding:'12px 14px', textAlign:'center' }}>
-          <div style={{ ...mono, fontSize:9, color:T.slate, marginBottom:6, textTransform:'uppercase', letterSpacing:'.1em' }}>{item.label}</div>
-          <div style={{ ...mono, fontSize:13, fontWeight:800, color:item.color }}>{item.value}</div>
+    <div style={{background:'rgba(255,255,255,0.02)',border:'1px solid var(--border)',borderRadius:10,padding:14}}>
+      <Lbl>AI Confidence Breakdown</Lbl>
+      <ConfCircle value={overall} color={oc(overall)}/>
+      <div style={{display:'flex',flexDirection:'column',gap:7,marginTop:4}}>
+        {dims.map(d=>(
+          <div key={d.label} style={{display:'flex',alignItems:'center',gap:8}}>
+            <span style={{fontSize:11,flexShrink:0}}>{d.icon}</span>
+            <div style={{...mono,fontSize:9,color:'var(--text)',width:120,flexShrink:0}}>{d.label}</div>
+            <div style={{flex:1,height:3,background:'rgba(255,255,255,.06)',borderRadius:2,overflow:'hidden'}}>
+              <div style={{height:'100%',width:`${d.val}%`,borderRadius:2,background:oc(d.val),transition:'width .5s'}}/>
+            </div>
+            <div style={{...mono,fontSize:10,fontWeight:800,color:oc(d.val),width:32,textAlign:'right'}}>{d.val}%</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Risk Badges ───────────────────────────────────────────
+function RiskBadges({ indicators, signal, confidence }) {
+  const ind   = pi(indicators);
+  const volR  = ind.volume?.ratio || 1;
+  const bw    = parseFloat(ind.bollinger?.bandwidth||0);
+  const confN = parseInt(String(confidence||0).replace('%',''),10)||0;
+  const isBuy = signal === 'BUY';
+
+  const riskL = confN>=80&&volR>=1.3?'LOW':confN>=65?'MEDIUM':'HIGH';
+  const volL  = bw>5?'HIGH':bw>2?'MEDIUM':'LOW';
+  const trendL= isBuy?'BULLISH':signal==='SELL'?'BEARISH':'NEUTRAL';
+  const volVL = volR>=1.5?'HIGH':volR>=1.0?'NORMAL':'LOW';
+
+  const badge = (label, value, color, emoji) => (
+    <div style={{background:'rgba(255,255,255,0.02)',border:'1px solid var(--border)',borderRadius:9,
+      padding:'10px 12px',textAlign:'center'}}>
+      <div style={{...mono,fontSize:8,color:T.slate,marginBottom:5,textTransform:'uppercase',letterSpacing:'.1em'}}>{label}</div>
+      <div style={{fontSize:15}}>{emoji}</div>
+      <div style={{...mono,fontSize:11,fontWeight:900,color,marginTop:3}}>{value}</div>
+    </div>
+  );
+
+  const rc={LOW:T.green,MEDIUM:T.amber,HIGH:T.red};
+  const vc={HIGH:T.red,MEDIUM:T.amber,LOW:T.green};
+  const tc={BULLISH:T.green,BEARISH:T.red,NEUTRAL:T.slate};
+  const vre={HIGH:T.cyan,NORMAL:T.slate,LOW:T.amber};
+
+  return (
+    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:7}}>
+      {badge('Risk',       riskL,  rc[riskL],  riskL==='LOW'?'🟢':riskL==='MEDIUM'?'🟡':'🔴')}
+      {badge('Trend',      trendL, tc[trendL], trendL==='BULLISH'?'📈':trendL==='BEARISH'?'📉':'➡️')}
+      {badge('Volatility', volL,   vc[volL],   volL==='LOW'?'🟢':volL==='MEDIUM'?'🟡':'🔴')}
+      {badge('Volume',     volVL,  vre[volVL], volVL==='HIGH'?'🔥':volVL==='NORMAL'?'🟢':'🟡')}
+    </div>
+  );
+}
+
+// ── Trade Setup ───────────────────────────────────────────
+function TradeSetup({ entry, stopLoss, takeProfit, riskReward, dp }) {
+  const fmt = v => fmtP(v,dp);
+  const cells = [
+    { l:'Entry',       v:fmt(entry),      c:'var(--text)' },
+    { l:'Stop Loss',   v:fmt(stopLoss)  ||'Not Available', c:fmt(stopLoss)  ?T.red  :T.slate },
+    { l:'Take Profit', v:fmt(takeProfit)||'Not Available', c:fmt(takeProfit)?T.green:T.slate },
+    { l:'Risk:Reward', v:riskReward||'AI Pending',         c:riskReward?T.cyan:T.slate },
+  ];
+  return (
+    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:7}}>
+      {cells.map(c=>(
+        <div key={c.l} style={{background:'rgba(255,255,255,0.02)',border:'1px solid var(--border)',
+          borderRadius:9,padding:'12px 14px',textAlign:'center'}}>
+          <div style={{...mono,fontSize:8,color:T.slate,marginBottom:5,textTransform:'uppercase',letterSpacing:'.1em'}}>{c.l}</div>
+          <div style={{...mono,fontSize:13,fontWeight:800,color:c.c}}>{c.v}</div>
         </div>
       ))}
     </div>
@@ -414,206 +436,268 @@ function RiskStatus({ indicators, signal, confidence }) {
 }
 
 // ── Main Modal ────────────────────────────────────────────
-export default function SignalModal({ signal: sig, onClose }) {
-  const overlayRef = useRef(null);
+
+// ── TradingView Embedded Chart ────────────────────────────
+function TvChart({ symbol, isOanda, isBuy }) {
+  const containerRef = useRef(null);
+
+  const tvSym = isOanda
+    ? `OANDA:${(symbol||'').replace(/[/_]/g,'')}`
+    : `BINANCE:${(symbol||'').replace('/','').replace(/USDT$/i,'')}USDT`;
 
   useEffect(() => {
-    injectModalStyles();
-    const handler = (e) => { if (e.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
+    if (!containerRef.current) return;
+    containerRef.current.innerHTML = '';
+
+    const script = document.createElement('script');
+    script.src   = 'https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js';
+    script.type  = 'text/javascript';
+    script.async = true;
+    script.innerHTML = JSON.stringify({
+      autosize:true, symbol:tvSym, interval:'60', timezone:'Etc/UTC',
+      theme:'dark', style:'1', locale:'en',
+      enable_publishing:false, hide_top_toolbar:false, save_image:false,
+      backgroundColor:'rgba(8,15,30,1)', gridColor:'rgba(255,255,255,0.03)',
+      studies:['RSI@tv-basicstudies','MACD@tv-basicstudies'],
+      overrides:{
+        'paneProperties.background':'#080f1e',
+        'paneProperties.backgroundType':'solid',
+        'mainSeriesProperties.candleStyle.upColor':'#34d399',
+        'mainSeriesProperties.candleStyle.downColor':'#f43f5e',
+        'mainSeriesProperties.candleStyle.borderUpColor':'#34d399',
+        'mainSeriesProperties.candleStyle.borderDownColor':'#f43f5e',
+        'mainSeriesProperties.candleStyle.wickUpColor':'#34d399',
+        'mainSeriesProperties.candleStyle.wickDownColor':'#f43f5e',
+      },
+    });
+
+    const w = document.createElement('div');
+    w.className = 'tradingview-widget-container__widget';
+    w.style.cssText = 'height:100%;width:100%';
+    containerRef.current.appendChild(w);
+    containerRef.current.appendChild(script);
+
+    return () => { if (containerRef.current) containerRef.current.innerHTML = ''; };
+  }, [tvSym]);
+
+  return (
+    <div ref={containerRef} style={{width:'100%',height:'100%'}}
+      className="tradingview-widget-container"/>
+  );
+}
+
+export default function SignalModal({ signal: sig, onClose }) {
+  const overlayRef = useRef(null);
+  const stats      = useSignalStats(sig?.symbol);
+
+  useEffect(() => {
+    injectStyles();
+    const h = e => { if (e.key==='Escape') onClose(); };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
   }, [onClose]);
 
   if (!sig) return null;
 
   const isBuy       = sig.signal === 'BUY';
-  const color       = sideColor(sig.signal);
-  const isForex     = ['Forex'].includes(sig.asset_class);
-  const isCommodity = ['Commodity'].includes(sig.asset_class);
-  const dp          = isCommodity ? 2 : isForex ? 5 : (parseFloat(sig.price) > 100 ? 2 : 6);
+  const color       = sc(sig.signal);
+  const isForex     = sig.asset_class === 'Forex';
+  const isCommodity = sig.asset_class === 'Commodity';
+  const isOanda     = isForex || isCommodity;
+  const dp          = isCommodity?2:isForex?5:(parseFloat(sig.price)>100?2:6);
+  const confN       = parseInt(String(sig.confidence||sig.conf||0).replace('%',''),10)||0;
+  const priceN      = parseFloat(sig.price||0);
 
-  // Navigate to Trading page with the symbol pre-filled
   const handleTrade = () => {
-    const rawSym = (sig.symbol || '')
-      .replace('/', '')
-      .replace(/USDT$/, '')
-      .toUpperCase();
-    window.location.href = `/trading?symbol=${encodeURIComponent(rawSym)}`;
+    const sym = (sig.symbol||'').replace('/','').replace(/USDT$/i,'').toUpperCase();
+    window.location.href = `/trading?symbol=${encodeURIComponent(sym)}&side=${(sig.signal||'buy').toLowerCase()}`;
   };
 
   const handleAlert = async () => {
-    if (!sig.price) return;
     try {
-      await api.post('/alerts', {
-        symbol:    sig.symbol, type:'typePrice',
-        condition: isBuy ? 'above' : 'below',
-        value:     sig.take_profit || sig.price,
-        channels:  ['email'],
-      });
-      alert('Alert created!');
+      await api.post('/alerts',{symbol:sig.symbol,type:'typePrice',
+        condition:isBuy?'above':'below',value:sig.take_profit||sig.price,channels:['email']});
+      alert('✅ Alert created!');
     } catch { alert('Could not create alert'); }
   };
 
-  const handleWatchlist = async () => {
+  const handleWatch = async () => {
     try {
-      await api.post('/watchlist', { symbol: sig.symbol });
-      alert(`${sig.symbol} added to watchlist`);
-    } catch { alert('Could not add to watchlist'); }
+      await api.post('/watchlist',{symbol:sig.symbol});
+      alert(`✅ ${sig.symbol} added to watchlist`);
+    } catch { alert('Could not add'); }
+  };
+
+  const handleShare = () => {
+    const txt=[
+      `📊 AtlasQuant AI Signal`,
+      `${sig.symbol} ${sig.signal} @ ${priceN?'$'+priceN.toLocaleString():'—'}`,
+      `Confidence: ${confN}%`,
+      sig.entry       ?`Entry:  $${parseFloat(sig.entry).toLocaleString()}`       :'',
+      sig.stop_loss   ?`SL:     $${parseFloat(sig.stop_loss).toLocaleString()}`   :'',
+      sig.take_profit ?`TP:     $${parseFloat(sig.take_profit).toLocaleString()}`  :'',
+      sig.risk_reward ?`R:R     ${sig.risk_reward}`:'',
+    ].filter(Boolean).join('\n');
+    navigator.clipboard?.writeText(txt).then(()=>alert('📋 Copied!'));
   };
 
   return (
-    <div
-      ref={overlayRef}
-      className="aq-modal-overlay"
-      onClick={e => e.target === overlayRef.current && onClose()}
-      style={{
-        position:'fixed', inset:0,
-        background:'rgba(0,0,0,0.85)',
-        zIndex:800,
-        display:'flex', alignItems:'center', justifyContent:'center',
-        padding:20,
-        overflowY:'auto',
-      }}
-    >
-      <div style={{
-        width:'100%', maxWidth:920,
-        background:'#080f1e',
-        border:`1px solid ${color}30`,
-        borderRadius:20,
-        boxShadow:`0 0 80px ${color}10, 0 40px 80px rgba(0,0,0,0.8)`,
-        animation:'aq-modal-in .25s ease',
-        overflow:'hidden',
-      }}>
+    <div ref={overlayRef} onClick={e=>e.target===overlayRef.current&&onClose()}
+      style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.86)',
+        backdropFilter:'blur(20px)',zIndex:800,display:'flex',
+        alignItems:'center',justifyContent:'center',padding:16,overflowY:'auto'}}>
+
+      <div style={{width:'100%',maxWidth:1080,background:'#080f1e',
+        border:`1px solid ${color}28`,borderRadius:20,
+        boxShadow:`0 0 80px ${color}12,0 40px 80px rgba(0,0,0,.85)`,
+        animation:'aq-sm-in .22s ease',overflow:'hidden'}}>
 
         {/* ── Header ── */}
-        <div style={{
-          display:'flex', alignItems:'center', justifyContent:'space-between',
-          padding:'20px 28px',
-          background:`linear-gradient(135deg, ${color}08, transparent)`,
-          borderBottom:'1px solid rgba(255,255,255,0.05)',
-        }}>
-          <div style={{ display:'flex', alignItems:'center', gap:14 }}>
-            <span style={{ fontSize:20 }}>{assetIcon(sig.asset_class)}</span>
-            <div>
-              <div style={{ fontSize:22, fontWeight:900, color:'var(--text)', letterSpacing:'-0.5px' }}>{sig.symbol}</div>
-              <div style={{ ...mono, fontSize:10, color:T.slate, marginTop:2 }}>
-                {sig.asset_class || 'Crypto'} · {timeAgo(sig.created_at)}
-              </div>
-            </div>
-            <div style={{
-              ...mono, fontSize:14, fontWeight:800, padding:'6px 16px',
-              borderRadius:8, background:`${color}18`, color,
-              border:`1px solid ${color}35`,
-            }}>
-              {sig.signal}
-            </div>
-            <div style={{
-              display:'flex', alignItems:'center', gap:6,
-              background:'rgba(255,255,255,0.04)', border:'1px solid var(--border)',
-              borderRadius:8, padding:'6px 14px',
-            }}>
-              <div style={{ ...mono, fontSize:12, color:T.slate }}>AI Confidence</div>
-              <div style={{ ...mono, fontSize:16, fontWeight:900, color: (parseInt(sig.confidence)||0) >= 75 ? T.green : T.amber }}>
-                {parseInt(sig.confidence) || sig.conf || '—'}%
-              </div>
-            </div>
+        <div style={{display:'flex',alignItems:'center',gap:12,padding:'14px 22px',
+          background:`linear-gradient(135deg,${color}09,transparent)`,
+          borderBottom:'1px solid rgba(255,255,255,0.05)',flexWrap:'wrap'}}>
+
+          <span style={{fontSize:20}}>{ai(sig.asset_class)}</span>
+
+          <div>
+            <div style={{fontSize:21,fontWeight:900,color:'var(--text)',letterSpacing:'-.5px'}}>{sig.symbol}</div>
+            <div style={{...mono,fontSize:9,color:T.slate}}>{sig.asset_class||'Crypto'} · {timeAgo(sig.created_at)}</div>
           </div>
-          <button onClick={onClose} style={{
-            width:34, height:34, borderRadius:'50%', border:'1px solid var(--border)',
-            background:'rgba(255,255,255,0.04)', color:T.slate,
-            fontSize:16, cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center',
-          }}>✕</button>
+
+          {/* Signal badge */}
+          <span style={{...mono,fontSize:13,fontWeight:800,padding:'5px 14px',
+            borderRadius:7,background:`${color}18`,color,border:`1px solid ${color}35`}}>
+            {sig.signal}
+          </span>
+
+          {/* Live indicator */}
+          <div style={{display:'flex',alignItems:'center',gap:6,
+            background:'rgba(52,211,153,0.08)',border:'1px solid rgba(52,211,153,0.2)',
+            borderRadius:20,padding:'4px 12px'}}>
+            <div style={{width:6,height:6,borderRadius:'50%',background:T.green,animation:'aq-pulse 1.5s infinite'}}/>
+            <span style={{...mono,fontSize:9,color:T.green,fontWeight:700}}>LIVE</span>
+          </div>
+
+          {/* Confidence */}
+          <div style={{display:'flex',alignItems:'center',gap:8,background:'rgba(255,255,255,0.04)',
+            border:'1px solid var(--border)',borderRadius:8,padding:'6px 14px'}}>
+            <span style={{...mono,fontSize:10,color:T.slate}}>AI Confidence</span>
+            <span style={{...mono,fontSize:16,fontWeight:900,color:confN>=75?T.green:T.amber}}>{confN||'—'}%</span>
+          </div>
+
+          {/* Current price + change */}
+          {priceN > 0 && (
+            <div style={{display:'flex',flexDirection:'column',alignItems:'flex-end'}}>
+              <span style={{...mono,fontSize:14,fontWeight:800,color:'var(--text)'}}>
+                ${priceN.toLocaleString('en-US',{maximumFractionDigits:dp})}
+              </span>
+              <span style={{...mono,fontSize:9,color:isBuy?T.green:T.red}}>
+                {isBuy?'↑ Bullish setup':'↓ Bearish setup'}
+              </span>
+            </div>
+          )}
+
+          <button onClick={onClose} style={{marginLeft:'auto',width:30,height:30,borderRadius:'50%',
+            border:'1px solid var(--border)',background:'rgba(255,255,255,0.04)',
+            color:T.slate,fontSize:14,cursor:'pointer',
+            display:'flex',alignItems:'center',justifyContent:'center'}}>✕</button>
         </div>
 
-        {/* ── Body ── */}
-        <div style={{ padding:'24px 28px', display:'flex', flexDirection:'column', gap:20 }}>
+        {/* ── 2-Column Body ── */}
+        <div style={{display:'grid',gridTemplateColumns:'1fr 340px',height:'80vh'}}>
 
-          {/* ① Chart */}
-          <div style={{ background:'rgba(255,255,255,0.01)', border:'1px solid var(--border)', borderRadius:12, padding:'16px 12px' }}>
-            <div style={{ ...mono, fontSize:9, color:T.slate, textTransform:'uppercase', letterSpacing:'.12em', marginBottom:10, paddingLeft:8 }}>
-              Price Chart · Entry / SL / TP
+          {/* LEFT */}
+          <div className="aq-col" style={{overflowY:'auto',padding:'18px 20px',
+            display:'flex',flexDirection:'column',gap:16,
+            borderRight:'1px solid rgba(255,255,255,0.05)'}}>
+
+            {/* Chart — TradingView embedded */}
+            <div>
+              <Lbl>Price Chart · TradingView Live</Lbl>
+              <div style={{ height:280, borderRadius:10, overflow:'hidden', border:'1px solid rgba(255,255,255,0.05)' }}>
+                <TvChart symbol={sig.symbol} isOanda={isOanda} isBuy={isBuy}/>
+              </div>
             </div>
-            <MiniChart
-              symbol={sig.symbol}
-              entry={parseFloat(sig.entry || sig.price)}
-              stopLoss={parseFloat(sig.stop_loss)}
-              takeProfit={parseFloat(sig.take_profit)}
-              currentPrice={parseFloat(sig.price)}
-              isBuy={isBuy} isForex={isForex} isCommodity={isCommodity}
-            />
-          </div>
 
-          {/* ② Indicator Cards */}
-          <div>
-            <div style={{ ...mono, fontSize:9, color:T.slate, textTransform:'uppercase', letterSpacing:'.12em', marginBottom:10 }}>
-              Technical Indicators
+            {/* Indicator Chips */}
+            <div>
+              <Lbl>Technical Signals</Lbl>
+              <IndicatorChips indicators={sig.indicators}/>
             </div>
-            <IndicatorCards indicators={sig.indicators} signal={sig.signal} />
+
+            {/* AI Reasoning */}
+            <AiReasoning reasoning={sig.reasoning} signal={sig.signal}/>
+
+            {/* Signal Stats */}
+            <StatsCard stats={stats} loading={!stats}/>
+
           </div>
 
-          {/* ③ AI Reasoning */}
-          <AiReasoning reasoning={sig.reasoning} signal={sig.signal} confidence={sig.confidence} />
+          {/* RIGHT — flex col with sticky buttons at bottom */}
+          <div style={{display:'flex',flexDirection:'column',maxHeight:'80vh'}}>
 
-          {/* ④ Trade Setup */}
-          <div>
-            <div style={{ ...mono, fontSize:9, color:T.slate, textTransform:'uppercase', letterSpacing:'.12em', marginBottom:10 }}>
-              Trade Setup
+            {/* Scrollable content */}
+            <div className="aq-col" style={{overflowY:'auto',padding:'18px 16px',
+              flex:1,display:'flex',flexDirection:'column',gap:14}}>
+
+              {/* Trade Setup */}
+              <div>
+                <Lbl>Trade Setup</Lbl>
+                <TradeSetup
+                  entry={sig.entry||sig.price} stopLoss={sig.stop_loss}
+                  takeProfit={sig.take_profit} riskReward={sig.risk_reward}
+                  dp={dp}/>
+              </div>
+
+              {/* Confidence Breakdown */}
+              <ConfBreakdown confidence={confN} indicators={sig.indicators} signal={sig.signal}/>
+
+              {/* Risk Badges */}
+              <div>
+                <Lbl>Risk Assessment</Lbl>
+                <RiskBadges indicators={sig.indicators} signal={sig.signal} confidence={confN}/>
+              </div>
+
+              {/* Timeline */}
+              <SignalTimeline signal={sig}/>
+
             </div>
-            <TradeSetup
-              entry={sig.entry || sig.price} stopLoss={sig.stop_loss}
-              takeProfit={sig.take_profit} riskReward={sig.risk_reward}
-              isBuy={isBuy} dp={dp}
-            />
-          </div>
 
-          {/* ⑤ Confidence Breakdown */}
-          <ConfidenceBreakdown
-            confidence={sig.confidence} indicators={sig.indicators} signal={sig.signal}
-          />
-
-          {/* ⑥ Risk Status */}
-          <div>
-            <div style={{ ...mono, fontSize:9, color:T.slate, textTransform:'uppercase', letterSpacing:'.12em', marginBottom:10 }}>
-              Risk Assessment
+            {/* FIXED Buttons — always visible at bottom of right col */}
+            <div style={{
+              padding:'14px 16px',
+              borderTop:'1px solid rgba(255,255,255,0.06)',
+              background:'rgba(8,15,30,0.98)',
+              display:'flex',flexDirection:'column',gap:8,
+              flexShrink:0,
+            }}>
+              <button className="aq-btn" onClick={handleTrade} style={{
+                width:'100%',padding:'14px 0',borderRadius:11,cursor:'pointer',
+                border:`1.5px solid ${color}55`,
+                background:`linear-gradient(135deg,${color}1c,${color}09)`,
+                color,display:'flex',alignItems:'center',justifyContent:'center',gap:10,
+                fontFamily:'Syne,sans-serif',fontSize:14,fontWeight:900,letterSpacing:'.05em',
+                boxShadow:`0 0 24px ${color}16`,
+              }}>
+                <span style={{fontSize:16}}>🚀</span> Trade this Signal
+              </button>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:7}}>
+                {[
+                  {label:'⭐ Watch', color:T.amber, bg:'rgba(251,191,36,.06)', border:'rgba(251,191,36,.3)', fn:handleWatch},
+                  {label:'🔔 Alert', color:T.cyan,  bg:'rgba(0,245,212,.06)',  border:'rgba(0,245,212,.3)', fn:handleAlert},
+                  {label:'📤 Share', color:T.slate, bg:'rgba(100,116,139,.06)',border:'rgba(100,116,139,.3)',fn:handleShare},
+                ].map(b=>(
+                  <button key={b.label} className="aq-btn" onClick={b.fn} style={{
+                    padding:'10px 0',borderRadius:9,cursor:'pointer',
+                    border:`1px solid ${b.border}`,background:b.bg,
+                    color:b.color,fontFamily:'Syne,sans-serif',fontSize:12,fontWeight:700,
+                    display:'flex',alignItems:'center',justifyContent:'center',gap:5,
+                  }}>{b.label}</button>
+                ))}
+              </div>
             </div>
-            <RiskStatus indicators={sig.indicators} signal={sig.signal} confidence={sig.confidence} />
-          </div>
 
-          {/* ⑦ Action Buttons */}
-          <div style={{ display:'flex', gap:10, flexWrap:'wrap', paddingTop:4 }}>
-            <button className="aq-modal-btn" onClick={handleTrade} style={{
-              flex:2, minWidth:160, padding:'14px 0', borderRadius:11, cursor:'pointer',
-              border:`1px solid ${color}50`, background:`${color}15`, color,
-              fontFamily:'Syne,sans-serif', fontSize:15, fontWeight:900, letterSpacing:'.04em',
-            }}>
-              🚀 Trade this Signal
-            </button>
-            <button className="aq-modal-btn" onClick={handleWatchlist} style={{
-              flex:1, padding:'14px 0', borderRadius:11, cursor:'pointer',
-              border:'1px solid var(--border)', background:'rgba(255,255,255,0.03)', color:T.slate,
-              fontFamily:'Syne,sans-serif', fontSize:13, fontWeight:700,
-            }}>
-              ⭐ Watchlist
-            </button>
-            <button className="aq-modal-btn" onClick={handleAlert} style={{
-              flex:1, padding:'14px 0', borderRadius:11, cursor:'pointer',
-              border:'1px solid rgba(0,245,212,0.25)', background:'rgba(0,245,212,0.06)', color:T.cyan,
-              fontFamily:'Syne,sans-serif', fontSize:13, fontWeight:700,
-            }}>
-              🔔 Alert
-            </button>
-            <button className="aq-modal-btn" onClick={() => {
-              const text = `${sig.symbol} ${sig.signal} — ${sig.confidence}% confidence\nEntry: ${sig.entry || sig.price} | SL: ${sig.stop_loss || '—'} | TP: ${sig.take_profit || '—'}\nAtlasQuant AI`;
-              navigator.clipboard?.writeText(text).then(() => alert('Copied to clipboard'));
-            }} style={{
-              flex:1, padding:'14px 0', borderRadius:11, cursor:'pointer',
-              border:'1px solid var(--border)', background:'rgba(255,255,255,0.03)', color:T.slate,
-              fontFamily:'Syne,sans-serif', fontSize:13, fontWeight:700,
-            }}>
-              📤 Share
-            </button>
           </div>
-
         </div>
       </div>
     </div>

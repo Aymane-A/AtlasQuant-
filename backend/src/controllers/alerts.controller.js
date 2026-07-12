@@ -19,20 +19,26 @@ const TYPE_MAP = {
   typePct:    'percent',
 };
 
+// ✅ Fix Bug 2: 'ai_signal' n'était listé nulle part ici — les alertes
+// auto-générées par signalAlert.service.js tombaient dans le fallback
+// `TYPE_LABELS[r.type] || r.type`, affichant le texte brut "ai_signal" sans
+// couleur ni icône dédiées.
 const TYPE_LABELS = {
-  price:   'typePrice',
-  rsi:     'typeRsi',
-  macd:    'typeMacd',
-  volume:  'typeVolume',
-  percent: 'typePct',
+  price:     'typePrice',
+  rsi:       'typeRsi',
+  macd:      'typeMacd',
+  volume:    'typeVolume',
+  percent:   'typePct',
+  ai_signal: 'typeAiSignal',
 };
 
 const COLORS = {
-  price:   'var(--cyan)',
-  rsi:     'var(--amber)',
-  macd:    'var(--purple)',
-  volume:  'var(--green)',
-  percent: 'var(--red)',
+  price:     'var(--cyan)',
+  rsi:       'var(--amber)',
+  macd:      'var(--purple)',
+  volume:    'var(--green)',
+  percent:   'var(--red)',
+  ai_signal: 'var(--purple-bright)',
 };
 
 // ── Forex/Commodity symbol → Yahoo Finance ticker map ───────
@@ -111,6 +117,34 @@ function isNear(condition, currentPrice, target) {
   return Math.abs(currentPrice - t) / t <= 0.02;
 }
 
+// ✅ Fix Bug 2: construit un message lisible pour une alerte, en tenant
+// compte du cas particulier 'ai_signal' (utilise metadata.signal/confidence
+// au lieu d'afficher "ai_signal above X" tel quel).
+function buildNotificationContent(row) {
+  const isAiSignal = row.type === 'ai_signal';
+  const meta = row.metadata || {};
+
+  if (isAiSignal) {
+    const direction = meta.signal ? (meta.signal === 'BUY' ? 'BUY / LONG' : 'SELL / SHORT') : 'signal';
+    const conf = meta.confidence != null ? `${meta.confidence}%` : '—';
+    return {
+      title: `${row.symbol} — AI ${direction} detected`,
+      desc:  `Confidence ${conf} · Entry ≈ $${parseFloat(row.target).toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 })}`,
+      icon:  '🤖',
+      bg:    'rgba(167,139,250,0.12)',
+      color: 'var(--purple-bright)',
+    };
+  }
+
+  return {
+    title: `${row.symbol} alert triggered`,
+    desc:  `${TYPE_LABELS[row.type] || row.type} ${row.condition} ${row.target}`,
+    icon:  '🔔',
+    bg:    'rgba(251,191,36,0.12)',
+    color: 'var(--amber)',
+  };
+}
+
 // ── GET /api/alerts ───────────────────────────────────────
 async function getAlerts(req, res) {
   try {
@@ -130,23 +164,28 @@ async function getAlerts(req, res) {
       FROM alerts WHERE user_id = $1
     `, [userId]);
 
+    // ✅ Fix Bug 2: on récupère `metadata` pour pouvoir construire un message
+    // lisible pour les alertes 'ai_signal' (direction + confidence).
     const { rows: triggered } = await db.query(`
-      SELECT symbol, type, condition, target, triggered_at
+      SELECT symbol, type, condition, target, triggered_at, metadata
       FROM alerts WHERE user_id = $1 AND triggered = true
       ORDER BY triggered_at DESC LIMIT 10
     `, [userId]);
 
-    const notifications = triggered.map(r => ({
-      title:  `${r.symbol} alert triggered`,
-      desc:   `${TYPE_LABELS[r.type] || r.type} ${r.condition} ${r.target}`,
-      time:   r.triggered_at
-        ? new Date(r.triggered_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
-        : '—',
-      unread: true,
-      icon:   '🔔',
-      bg:     'rgba(251,191,36,0.12)',
-      color:  'var(--amber)',
-    }));
+    const notifications = triggered.map(r => {
+      const content = buildNotificationContent(r);
+      return {
+        title:  content.title,
+        desc:   content.desc,
+        time:   r.triggered_at
+          ? new Date(r.triggered_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
+          : '—',
+        unread: true,
+        icon:   content.icon,
+        bg:     content.bg,
+        color:  content.color,
+      };
+    });
 
     const activeAlerts  = alerts.filter(a => !a.triggered && !a.paused);
     const uniqueSymbols = [...new Set(activeAlerts.map(a => a.symbol))];
@@ -204,25 +243,31 @@ async function getHistory(req, res) {
 
     const { rows } = await db.query(`
       SELECT id, symbol, type, condition, target, triggered_at, created_at,
-             notify_email, notify_telegram
+             notify_email, notify_telegram, metadata
       FROM alerts
       WHERE user_id = $1 AND triggered = true
       ORDER BY triggered_at DESC
       LIMIT $2
     `, [userId, limit]);
 
-    const history = rows.map(r => ({
-      id:             r.id,
-      sym:            r.symbol,
-      typeKey:        TYPE_LABELS[r.type] || r.type,
-      condition:      r.condition,
-      target:         `$${parseFloat(r.target).toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 })}`,
-      triggeredAt:    r.triggered_at,
-      createdAt:      r.created_at,
-      notifyEmail:    r.notify_email,
-      notifyTelegram: r.notify_telegram,
-      color:          COLORS[r.type] || 'var(--cyan)',
-    }));
+    const history = rows.map(r => {
+      const isAiSignal = r.type === 'ai_signal';
+      const meta = r.metadata || {};
+      return {
+        id:             r.id,
+        sym:            r.symbol,
+        typeKey:        TYPE_LABELS[r.type] || r.type,
+        // ✅ Fix Bug 2: pour un ai_signal, on affiche la direction détectée
+        // (BUY/SELL) plutôt que la "condition" générique (toujours 'above').
+        condition:      isAiSignal ? (meta.signal || r.condition) : r.condition,
+        target:         `$${parseFloat(r.target).toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 })}`,
+        triggeredAt:    r.triggered_at,
+        createdAt:      r.created_at,
+        notifyEmail:    r.notify_email,
+        notifyTelegram: r.notify_telegram,
+        color:          COLORS[r.type] || 'var(--cyan)',
+      };
+    });
 
     res.json({ success: true, history });
   } catch (err) {

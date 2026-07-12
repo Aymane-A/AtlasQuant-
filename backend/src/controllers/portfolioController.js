@@ -7,6 +7,7 @@ const db           = require('../config/db');
 const axios        = require('axios');
 const logger       = require('../utils/logger');
 const exchangesSvc = require('../services/exchanges.service');
+const { getBenchmarkHistory } = require('../services/marketData.service'); // ✅ new — Benchmark Comparison
 
 const COLORS = ['#00f5d4','#a78bfa','#f59e0b','#f43f5e','#38bdf8','#34d399','#fb923c','#e879f9'];
 
@@ -213,6 +214,62 @@ function mergePositions(dbPositions, exchangeBalances) {
   return { positions: Object.values(merged), stableCash };
 }
 
+// ── Benchmark curve builder (date-aligned, forward-filled) ────────────────────
+// ✅ Feature: compare la performance du portefeuille à un benchmark (BTC, SPY,
+// forex, commodités — tout ce que getBenchmarkHistory supporte).
+//
+// Aligné par DATE (pas par index) : Yahoo ne renvoie aucune candle le week-end
+// pour SPY/forex/commodités (marché fermé), alors que portfolio_snapshots peut
+// en avoir un tous les jours. On fait un lookup par date (YYYY-MM-DD) avec
+// forward-fill du dernier close connu pour les jours de marché fermé.
+//
+// toDateKey utilise les getters UTC plutôt que toISOString() sur un Date déjà
+// construit — évite tout décalage d'un jour si le serveur tourne dans un
+// timezone non-UTC (ex: Maroc, UTC+1) quand Postgres renvoie une colonne DATE.
+function toDateKey(d) {
+  const dt = new Date(d);
+  const y = dt.getUTCFullYear();
+  const m = String(dt.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(dt.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function buildBenchmarkCurve(equityCurve, benchmarkCandles) {
+  if (!benchmarkCandles.length || !equityCurve.length) return { curve: [], alpha: null };
+
+  const byDate = new Map(
+    benchmarkCandles.map(c => [toDateKey(c.date), c.close])
+  );
+
+  let lastKnownClose = null;
+  for (const c of benchmarkCandles) {
+    const d = toDateKey(c.date);
+    if (d <= equityCurve[0].date) lastKnownClose = c.close;
+    else break;
+  }
+
+  const firstPortfolio = equityCurve[0].v;
+  let firstBenchmark    = null;
+
+  const curve = equityCurve.map(point => {
+    if (byDate.has(point.date)) lastKnownClose = byDate.get(point.date);
+    if (firstBenchmark === null && lastKnownClose != null) firstBenchmark = lastKnownClose;
+
+    return {
+      t:         point.t,
+      portfolio: firstPortfolio > 0 ? ((point.v - firstPortfolio) / firstPortfolio) * 100 : 0,
+      benchmark: (lastKnownClose != null && firstBenchmark)
+        ? ((lastKnownClose - firstBenchmark) / firstBenchmark) * 100
+        : null,
+    };
+  });
+
+  const last  = curve.at(-1);
+  const alpha = (last && last.benchmark != null) ? (last.portfolio - last.benchmark) : null;
+
+  return { curve, alpha };
+}
+
 // ── GET /api/portfolio/data ───────────────────────────────────────────────────
 async function getPortfolioData(req, res) {
   try {
@@ -257,9 +314,9 @@ async function getPortfolioData(req, res) {
     const dbCash = accountRows.length ? parseFloat(accountRows[0].cash_balance) : 0;
     const cash   = dbCash + stableCash;
 
-    // 6.5. Realized P&L (lifetime) — ✅ Feature: somme des trades fermés via
-    // removePosition (voir plus bas). Isolé du système de paper trading
-    // partagé (side IN ('long','short')), même filtre que getTradeHistory.
+    // 6.5. Realized P&L (lifetime) — somme des trades fermés via removePosition
+    // (voir plus bas). Isolé du système de paper trading partagé
+    // (side IN ('long','short')), même filtre que getTradeHistory.
     const { rows: realizedRows } = await db.query(
       `SELECT COALESCE(SUM(pnl), 0) AS total
        FROM trades WHERE user_id=$1 AND status='closed' AND side IN ('long','short')`,
@@ -268,15 +325,40 @@ async function getPortfolioData(req, res) {
     const realizedPnLRaw = parseFloat(realizedRows[0]?.total) || 0;
 
     // 7. Equity curve
+    // ✅ Fix: node-postgres parse les colonnes DATE via le timezone LOCAL du
+    // serveur — un simple new Date(r.snapshot_date).toISOString() décale la
+    // date d'un jour dès que le serveur n'est pas en UTC+0. On récupère la
+    // date exacte via TO_CHAR directement en SQL pour le matching benchmark.
     const { rows: curveRows } = await db.query(
-      `SELECT snapshot_date, total_value FROM portfolio_snapshots
+      `SELECT snapshot_date, total_value,
+              TO_CHAR(snapshot_date, 'YYYY-MM-DD') AS date_key
+       FROM portfolio_snapshots
        WHERE user_id=$1 ORDER BY snapshot_date DESC LIMIT 30`,
       [userId]
     );
     const equityCurve = curveRows.reverse().map(r => ({
-      t: new Date(r.snapshot_date).toLocaleDateString('en-US', { month:'short', day:'numeric' }),
-      v: parseFloat(r.total_value),
+      t:    new Date(r.snapshot_date).toLocaleDateString('en-US', { month:'short', day:'numeric' }),
+      v:    parseFloat(r.total_value),
+      date: r.date_key, // ✅ exact SQL string — used for benchmark date alignment
     }));
+
+    // 7.5. Benchmark comparison (Portfolio vs BTC/SPY/...)
+    // ✅ Feature: try/catch isole un ?benchmark=XYZ invalide (getBenchmarkHistory
+    // throw sur symbole inconnu) du reste de la route — toute la page ne doit
+    // pas planter juste parce que la carte benchmark ne peut pas se rendre.
+    const benchmarkSymbol = (req.query.benchmark || 'BTC').toUpperCase();
+    let benchmarkCurve = [];
+    let alpha = null;
+
+    try {
+      const benchmarkCandles = await getBenchmarkHistory(benchmarkSymbol, equityCurve.length + 5);
+      const built = buildBenchmarkCurve(equityCurve, benchmarkCandles);
+      benchmarkCurve = built.curve;
+      alpha          = built.alpha;
+    } catch (e) {
+      logger.warn(`[portfolio] Benchmark fetch failed (${benchmarkSymbol}): ${e.message}`);
+      // benchmarkCurve reste [] — le frontend retombe sur l'equity curve $ normale
+    }
 
     // 8. Process positions
     let totalCost = 0, totalValue = cash, todayPnLRaw = 0;
@@ -335,9 +417,8 @@ async function getPortfolioData(req, res) {
       dayReturn:     fmtPct(dayRetPct),
       totalPnL:      fmtUSD(totalPnLRaw),
       totalReturn:   fmtPct(totalRetPct),
-      // ✅ Feature: realizedPnL = trades fermés (lifetime), lifetimePnL = les
-      // deux combinés. totalPnL ci-dessus reste "unrealized only", inchangé,
-      // pour ne pas casser ce qui lit déjà ce champ.
+      // realizedPnL = trades fermés (lifetime), lifetimePnL = les deux
+      // combinés. totalPnL ci-dessus reste "unrealized only", inchangé.
       realizedPnL:   fmtUSD(realizedPnLRaw),
       lifetimePnL:   fmtUSD(totalPnLRaw + realizedPnLRaw),
       openPositions: positions.length,
@@ -419,6 +500,7 @@ async function getPortfolioData(req, res) {
     res.status(200).json({
       success: true,
       hero, allocations, holdings, allPositions, risks, sectors, equityCurve,
+      benchmarkCurve, benchmarkSymbol, alpha, // ✅ new — Benchmark Comparison
       connectedExchanges,
       _meta: {
         pricesFrom:       Object.keys(livePrices),

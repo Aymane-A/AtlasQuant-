@@ -1,10 +1,19 @@
 import { useEffect, useState, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { alertsAPI } from '../services/api';
+import api from '../services/api';
+
+const ASSET_CLASSES = ['Crypto', 'Forex', 'Commodity', 'Indices'];
 
 export default function Alerts() {
   const { t } = useTranslation();
   const a = key => t(`alerts.${key}`);
+
+  // ✅ Fix Bug 2: 'typeAiSignal' n'existe probablement pas dans les fichiers
+  // de traduction (type ajouté après coup, généré par le backend, jamais
+  // choisi via le formulaire). On l'affiche directement en clair plutôt que
+  // de risquer d'afficher la clé brute "alerts.typeAiSignal" non traduite.
+  const typeLabel = key => key === 'typeAiSignal' ? 'AI Signal' : a(key);
 
   const [form, setForm]         = useState({ symbol:'', type:'typePrice', condition:'above', value:'', notify:'once' });
   const [channels, setChannels] = useState({ inapp:true, email:true, telegram:false, sms:false });
@@ -19,6 +28,12 @@ export default function Alerts() {
   const [error, setError]         = useState('');
   const [data, setData]           = useState({ stats:null, notifications:[], alerts:[] });
   const [history, setHistory]     = useState([]);
+
+  // ✅ Feature: préférences AI Signal Alerts — Follow All vs Custom (classes choisies)
+  const [alertPrefs, setAlertPrefs]     = useState({ mode:'all', classes:ASSET_CLASSES });
+  const [prefsLoading, setPrefsLoading] = useState(true);
+  const [prefsSaving, setPrefsSaving]   = useState(false);
+  const [prefsSaved, setPrefsSaved]     = useState(false);
 
   const loadAlerts = async () => {
     try {
@@ -43,9 +58,26 @@ export default function Alerts() {
     } catch {}
   };
 
+  // ✅ Feature: charge les préférences AI Signal Alerts existantes
+  const loadAlertPrefs = async () => {
+    setPrefsLoading(true);
+    try {
+      const res = await api.get('/settings');
+      const s = res.data?.settings || {};
+      setAlertPrefs({
+        mode:    s.signal_alert_mode === 'custom' ? 'custom' : 'all',
+        classes: Array.isArray(s.signal_alert_classes) && s.signal_alert_classes.length > 0
+          ? s.signal_alert_classes
+          : ASSET_CLASSES,
+      });
+    } catch { /* garde les valeurs par défaut si l'appel échoue */ }
+    finally { setPrefsLoading(false); }
+  };
+
   useEffect(() => {
     loadAlerts();
     loadHistory();
+    loadAlertPrefs();
     const id = setInterval(() => { loadAlerts(); loadHistory(); }, 30000);
     return () => clearInterval(id);
   }, []);
@@ -80,6 +112,41 @@ export default function Alerts() {
       loadAlerts();
     } catch (err) {
       setError(err?.response?.data?.error || 'Failed to create alert');
+    }
+  };
+
+  // ✅ Feature: toggle une classe d'actifs en mode 'custom'
+  const toggleAssetClass = (cls) => {
+    setPrefsSaved(false);
+    setAlertPrefs(p => {
+      const has = p.classes.includes(cls);
+      const next = has ? p.classes.filter(c => c !== cls) : [...p.classes, cls];
+      return { ...p, classes: next };
+    });
+  };
+
+  const setPrefsMode = (mode) => {
+    setPrefsSaved(false);
+    setAlertPrefs(p => ({ ...p, mode }));
+  };
+
+  const savePrefs = async () => {
+    if (alertPrefs.mode === 'custom' && alertPrefs.classes.length === 0) {
+      setError('Select at least one asset class');
+      return;
+    }
+    setPrefsSaving(true);
+    try {
+      await api.post('/settings/update', {
+        section: 'signalAlerts',
+        payload: { mode: alertPrefs.mode, classes: alertPrefs.classes },
+      });
+      setPrefsSaved(true);
+      setError('');
+    } catch (err) {
+      setError(err?.response?.data?.error || 'Failed to save alert preferences');
+    } finally {
+      setPrefsSaving(false);
     }
   };
 
@@ -173,6 +240,83 @@ export default function Alerts() {
         >
           {a('newAlert')}
         </button>
+      </div>
+
+      {/* ══ AI SIGNAL ALERT PREFERENCES ══ */}
+      {/* ✅ Feature: choix entre "suivre tout" et "suivre seulement certaines
+          classes d'actifs" pour les alertes AI auto-générées (signalAlert.service.js) */}
+      <div className="panel" style={{ padding:20 }}>
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:14, flexWrap:'wrap', gap:10 }}>
+          <div>
+            <div style={{ fontSize:13, fontWeight:600, display:'flex', alignItems:'center', gap:8, marginBottom:3 }}>
+              <div style={{ width:6, height:6, borderRadius:'50%', background:'var(--purple-bright, #a78bfa)' }} />
+              🤖 AI Signal Alerts
+            </div>
+            <div style={{ fontSize:11, color:'var(--text-muted)', fontFamily:'JetBrains Mono,monospace' }}>
+              Auto-alerts for high-confidence signals (≥75%) — choose what to follow
+            </div>
+          </div>
+          {!prefsLoading && (
+            <button onClick={savePrefs} disabled={prefsSaving} style={{
+              padding:'8px 18px', borderRadius:8, border:'1px solid var(--cyan-dim)',
+              background: prefsSaved ? 'rgba(52,211,153,0.1)' : 'var(--cyan-glow)',
+              color: prefsSaved ? 'var(--green)' : 'var(--cyan)',
+              fontFamily:'Syne,sans-serif', fontSize:12, fontWeight:700,
+              cursor: prefsSaving ? 'not-allowed' : 'pointer', opacity: prefsSaving ? 0.7 : 1,
+            }}>
+              {prefsSaving ? 'Saving...' : prefsSaved ? '✓ Saved' : 'Save preferences'}
+            </button>
+          )}
+        </div>
+
+        {prefsLoading ? (
+          <div style={{ fontSize:11, color:'var(--text-muted)', fontFamily:'JetBrains Mono,monospace' }}>Loading preferences...</div>
+        ) : (
+          <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
+            {/* Mode choice */}
+            <div style={{ display:'flex', gap:10 }}>
+              {[
+                { val:'all',    label:'Follow Everything', desc:'Get alerted on every high-confidence signal, any asset class' },
+                { val:'custom', label:'Custom',             desc:'Only follow specific asset classes' },
+              ].map(opt => (
+                <button key={opt.val} onClick={() => setPrefsMode(opt.val)} style={{
+                  flex:1, textAlign:'left', padding:'12px 16px', borderRadius:10, cursor:'pointer',
+                  border:`1px solid ${alertPrefs.mode===opt.val ? 'var(--cyan-dim)' : 'var(--border)'}`,
+                  background: alertPrefs.mode===opt.val ? 'rgba(0,245,212,0.06)' : 'transparent',
+                  transition:'all .15s',
+                }}>
+                  <div style={{ fontSize:12, fontWeight:700, color: alertPrefs.mode===opt.val ? 'var(--cyan)' : 'var(--text-primary)', marginBottom:3 }}>
+                    {alertPrefs.mode===opt.val ? '● ' : '○ '}{opt.label}
+                  </div>
+                  <div style={{ fontSize:10, color:'var(--text-muted)', fontFamily:'JetBrains Mono,monospace', lineHeight:1.5 }}>
+                    {opt.desc}
+                  </div>
+                </button>
+              ))}
+            </div>
+
+            {/* Asset class picker — only when 'custom' */}
+            {alertPrefs.mode === 'custom' && (
+              <div style={{ display:'flex', gap:8, flexWrap:'wrap', padding:'12px 14px', background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:10 }}>
+                {ASSET_CLASSES.map(cls => {
+                  const active = alertPrefs.classes.includes(cls);
+                  return (
+                    <button key={cls} onClick={() => toggleAssetClass(cls)} style={{
+                      padding:'7px 16px', borderRadius:20, cursor:'pointer',
+                      fontFamily:'JetBrains Mono,monospace', fontSize:11, fontWeight:600,
+                      border:`1px solid ${active ? 'var(--cyan-dim)' : 'rgba(255,255,255,0.08)'}`,
+                      background: active ? 'rgba(0,245,212,0.1)' : 'transparent',
+                      color: active ? 'var(--cyan)' : 'var(--text-muted)',
+                      transition:'all .15s',
+                    }}>
+                      {active ? '✓ ' : ''}{cls}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Stats */}
@@ -322,7 +466,7 @@ export default function Alerts() {
                 <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', marginBottom:10 }}>
                   <div>
                     <div style={{ fontSize:17, fontWeight:700 }}>{card.sym}</div>
-                    <div style={{ fontSize:11, color:'var(--text-secondary)', fontFamily:'JetBrains Mono,monospace', marginTop:2 }}>{a(card.typeKey)}</div>
+                    <div style={{ fontSize:11, color:'var(--text-secondary)', fontFamily:'JetBrains Mono,monospace', marginTop:2 }}>{typeLabel(card.typeKey)}</div>
                   </div>
                   <span style={{ fontSize:10, fontFamily:'JetBrains Mono,monospace', padding:'3px 9px', borderRadius:5, background:card.near?'rgba(251,191,36,0.12)':'rgba(0,245,212,0.08)', color:card.near?'var(--amber)':'var(--cyan)', fontWeight:600 }}>
                     {card.near ? a('near') : a('active')}
@@ -370,7 +514,7 @@ export default function Alerts() {
                 {/* Symbol */}
                 <div style={{ minWidth:80 }}>
                   <div style={{ fontSize:14, fontWeight:700 }}>{h.sym}</div>
-                  <div style={{ fontSize:10, color:'var(--text-muted)', fontFamily:'JetBrains Mono,monospace' }}>{a(h.typeKey)}</div>
+                  <div style={{ fontSize:10, color:'var(--text-muted)', fontFamily:'JetBrains Mono,monospace' }}>{typeLabel(h.typeKey)}</div>
                 </div>
                 {/* Condition + target */}
                 <div style={{ flex:1 }}>

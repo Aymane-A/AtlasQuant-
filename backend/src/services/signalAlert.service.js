@@ -135,10 +135,15 @@ async function sendSignalTelegram({ symbol, signal, confidence, entry, stop_loss
 // ── Main: check new high-confidence signals ───────────────
 async function checkSignalAlerts() {
   try {
-    // Get all users with notifications enabled
+    // ✅ Feature: on récupère aussi les préférences d'alertes AI de chaque
+    // utilisateur (signal_alert_mode: 'all'|'custom', signal_alert_classes:
+    // liste des classes d'actifs suivies en mode 'custom'). Définies via
+    // POST /api/settings/update { section:'signalAlerts', payload:{mode,classes} }.
     const { rows: users } = await db.query(`
       SELECT u.id, u.email, u.name,
-             COALESCE(us.notifications, true) AS notifications
+             COALESCE(us.notifications, true)         AS notifications,
+             COALESCE(us.signal_alert_mode, 'all')     AS alert_mode,
+             COALESCE(us.signal_alert_classes, '["Crypto","Forex","Commodity","Indices"]'::jsonb) AS alert_classes
       FROM users u
       LEFT JOIN user_settings us ON us.user_id = u.id
       WHERE COALESCE(us.notifications, true) = true
@@ -149,34 +154,52 @@ async function checkSignalAlerts() {
     // ✅ Fix: DISTINCT ON (symbol) — si plusieurs scans dans les 4 dernières
     // heures ont produit plusieurs signaux pour le même symbole (cron +
     // refresh manuel par ex.), on ne garde que le plus confiant, pas un par
-    // ligne. Et le NOT EXISTS compare maintenant sur symbol + fenêtre de
-    // cooldown (ALERT_COOLDOWN_HOURS), pas sur l'id du signal — qui change
-    // à chaque scan et rendait l'ancien dedup inopérant.
+    // ligne. `asset_class` est sélectionné pour le filtrage par préférence
+    // utilisateur ci-dessous. Le dedup global par symbole a été retiré d'ici
+    // et déplacé au niveau utilisateur (voir recentSet plus bas) — plus
+    // correct pour un système multi-utilisateurs : chaque utilisateur a son
+    // propre cooldown, indépendant des alertes déjà envoyées à quelqu'un d'autre.
     const { rows: signals } = await db.query(`
       SELECT DISTINCT ON (symbol)
              id, symbol, signal, confidence, price, entry,
-             stop_loss, take_profit, risk_reward, reasoning, created_at
+             stop_loss, take_profit, risk_reward, reasoning, asset_class, created_at
       FROM signals
       WHERE confidence >= $1
         AND signal IN ('BUY', 'SELL')
         AND created_at >= NOW() - INTERVAL '4 hours'
-        AND NOT EXISTS (
-          SELECT 1 FROM alerts a
-          WHERE a.type = 'ai_signal'
-            AND a.symbol = signals.symbol
-            AND a.created_at >= NOW() - ($2 || ' hours')::INTERVAL
-        )
       ORDER BY symbol, confidence DESC, created_at DESC
-      LIMIT 10
-    `, [MIN_CONFIDENCE, ALERT_COOLDOWN_HOURS]);
+      LIMIT 30
+    `, [MIN_CONFIDENCE]);
 
     if (signals.length === 0) return;
 
-    logger.info(`[signalAlert] ${signals.length} new high-confidence signal(s) found`);
+    // ✅ Fix: une seule requête pour récupérer tous les cooldowns actifs
+    // (user_id + symbol) plutôt qu'une requête par combinaison utilisateur ×
+    // signal — évite de spammer la DB, et sert aussi de garde anti-doublon
+    // pour la même exécution (on ajoute au Set dès l'insertion décidée).
+    const { rows: recentAlerts } = await db.query(`
+      SELECT user_id, symbol FROM alerts
+      WHERE type = 'ai_signal' AND created_at >= NOW() - ($1 || ' hours')::INTERVAL
+    `, [ALERT_COOLDOWN_HOURS]);
+    const recentSet = new Set(recentAlerts.map(r => `${r.user_id}:${r.symbol}`));
+
+    logger.info(`[signalAlert] ${signals.length} candidate signal(s) this run`);
 
     for (const sig of signals) {
-      // Create auto-alert in DB for each user (type = 'ai_signal')
       for (const user of users) {
+        // ✅ Feature: si l'utilisateur a choisi "custom", on ignore les
+        // signaux hors de ses classes d'actifs sélectionnées.
+        if (user.alert_mode === 'custom') {
+          const classes = Array.isArray(user.alert_classes)
+            ? user.alert_classes
+            : (() => { try { return JSON.parse(user.alert_classes); } catch { return []; } })();
+          if (!classes.includes(sig.asset_class)) continue;
+        }
+
+        const cooldownKey = `${user.id}:${sig.symbol}`;
+        if (recentSet.has(cooldownKey)) continue;
+        recentSet.add(cooldownKey);
+
         await db.query(`
           INSERT INTO alerts (user_id, symbol, type, condition, target, triggered, triggered_at, notify_email, notify_telegram, metadata)
           VALUES ($1, $2, 'ai_signal', 'above', $3, true, NOW(), true, true, $4)
@@ -185,7 +208,7 @@ async function checkSignalAlerts() {
           user.id,
           sig.symbol,
           sig.entry || sig.price,
-          JSON.stringify({ signal_id: sig.id, signal: sig.signal, confidence: sig.confidence }),
+          JSON.stringify({ signal_id: sig.id, signal: sig.signal, confidence: sig.confidence, asset_class: sig.asset_class }),
         ]);
 
         const payload = {

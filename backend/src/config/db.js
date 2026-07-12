@@ -30,12 +30,18 @@ function buildPoolConfig() {
 // checkAlerts toutes les minutes) tournait en même temps que le trafic frontend
 // (polling analytics/alerts/settings). Résultat : "Connection terminated due to
 // connection timeout" dès que les 10 connexions étaient toutes occupées plus de
-// 5s. On augmente la taille du pool et on garde un timeout raisonnable — la vraie
-// capacité de la base (vérifier max_connections côté PostgreSQL) doit rester
-// au-dessus de ce chiffre.
+// 5s. On augmente la taille du pool et on garde un timeout raisonnable.
+//
+// ⚠️ DB_POOL_MAX est configurable via .env car la limite dépend de l'hébergeur
+// PostgreSQL (souvent bien plus basse sur les tiers gratuits : Render ~22,
+// Supabase free ~60 partagées, Neon/Railway variable). Si tu déploies avec
+// plusieurs instances de l'app, chaque instance a SON PROPRE pool — vérifie
+// (instances × DB_POOL_MAX) contre le max_connections réel de ta base avant
+// de passer en public/prod, sinon tu retrouveras le même timeout mais côté
+// hébergeur cette fois.
 const pool = new Pool({
   ...buildPoolConfig(),
-  max: 20,
+  max: Number(process.env.DB_POOL_MAX) || 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 8000,
 });
@@ -281,28 +287,16 @@ async function migrate() {
     ALTER TABLE alerts ADD COLUMN IF NOT EXISTS notify_telegram BOOLEAN DEFAULT FALSE;
     ALTER TABLE alerts ADD COLUMN IF NOT EXISTS metadata        JSONB;
 
+    -- ✅ Feature: préférences utilisateur pour les alertes AI auto-générées
+    -- (signalAlert.service.js). mode='all' = tout suivre, mode='custom' =
+    -- suivre seulement les classes d'actifs listées dans signal_alert_classes.
+    ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS signal_alert_mode    VARCHAR(10) NOT NULL DEFAULT 'all';
+    ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS signal_alert_classes JSONB       NOT NULL DEFAULT '["Crypto","Forex","Commodity","Indices"]'::jsonb;
+
     ALTER TABLE signals ADD COLUMN IF NOT EXISTS asset_class TEXT NOT NULL DEFAULT 'Crypto';
   `);
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_signals_asset_class ON signals(asset_class);
-  `);
-
-  // ✅ Stop-Loss / Take-Profit bracket support (Trading page — SL/TP fields
-  // on the order form, paper-trade monitor cron auto-closes at target).
-  // close_reason distinguishes manual cancels from stop_loss/take_profit
-  // auto-closes in the Orders panel / history.
-  await pool.query(`
-    ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS stop_loss    NUMERIC(20, 8);
-    ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS take_profit  NUMERIC(20, 8);
-    ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS close_reason TEXT;
-
-    ALTER TABLE live_orders  ADD COLUMN IF NOT EXISTS stop_loss    NUMERIC(20, 8);
-    ALTER TABLE live_orders  ADD COLUMN IF NOT EXISTS take_profit  NUMERIC(20, 8);
-  `);
-  await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_paper_trades_open_bracket
-      ON paper_trades (status)
-      WHERE status = 'open' AND (stop_loss IS NOT NULL OR take_profit IS NOT NULL);
   `);
 
   logger.info('[db] ✅ Tables PostgreSQL prêtes');
