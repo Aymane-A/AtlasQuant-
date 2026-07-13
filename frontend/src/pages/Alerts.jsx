@@ -3,6 +3,32 @@ import { useTranslation } from 'react-i18next';
 import { alertsAPI } from '../services/api';
 import api from '../services/api';
 
+// ✅ Feature: petit Levenshtein maison — pas de dépendance externe pour un
+// besoin aussi simple. Sert à proposer des corrections quand ce que tape
+// l'utilisateur ne matche aucun symbole connu exactement (fautes de frappe).
+function levenshtein(a, b) {
+  const dp = Array.from({ length: a.length + 1 }, () => new Array(b.length + 1).fill(0));
+  for (let i = 0; i <= a.length; i++) dp[i][0] = i;
+  for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1]
+        ? dp[i - 1][j - 1]
+        : 1 + Math.min(dp[i - 1][j - 1], dp[i - 1][j], dp[i][j - 1]);
+    }
+  }
+  return dp[a.length][b.length];
+}
+
+// ✅ Feature: wildcards de classe — couvrent toute une classe d'actifs sans
+// devoir taper chaque ticker un par un.
+const WILDCARDS = [
+  { key:'ALL_CRYPTO',    label:'All Crypto'    },
+  { key:'ALL_FOREX',     label:'All Forex'     },
+  { key:'ALL_COMMODITY', label:'All Commodity' },
+  { key:'ALL_INDICES',   label:'All Indices'   },
+];
+
 export default function Alerts() {
   const { t } = useTranslation();
   const a = key => t(`alerts.${key}`);
@@ -34,6 +60,31 @@ export default function Alerts() {
   const [prefsLoading, setPrefsLoading] = useState(true);
   const [prefsSaving, setPrefsSaving]   = useState(false);
   const [prefsSaved, setPrefsSaved]     = useState(false);
+
+  // ✅ Feature: liste des symboles réellement scannés par AtlasQuant (crypto +
+  // forex + commodities + indices), utilisée pour l'autocomplete/fuzzy-match
+  // afin que l'utilisateur ne puisse pas taper un ticker inexistant sans s'en
+  // rendre compte.
+  const [knownSymbols, setKnownSymbols] = useState([]);
+  useEffect(() => {
+    api.get('/signals/meta/supported')
+      .then(res => { if (res.data?.success) setKnownSymbols(res.data.symbols || []); })
+      .catch(() => { /* autocomplete juste indisponible, pas bloquant */ });
+  }, []);
+
+  // Suggestions: substring match en priorité, sinon fuzzy (distance ≤ 3) pour
+  // couvrir les fautes de frappe (ex. "BYC" → "BTC").
+  const symbolSuggestions = useMemo(() => {
+    const q = symbolInput.toUpperCase().trim();
+    if (!q || knownSymbols.length === 0) return [];
+    const substringMatches = knownSymbols.filter(s => s.symbol?.toUpperCase().includes(q));
+    if (substringMatches.length > 0) return substringMatches.slice(0, 6);
+    return knownSymbols
+      .map(s => ({ ...s, _dist: levenshtein(q, (s.symbol || '').toUpperCase()) }))
+      .sort((x, y) => x._dist - y._dist)
+      .filter(s => s._dist <= 3)
+      .slice(0, 6);
+  }, [symbolInput, knownSymbols]);
 
   const loadAlerts = async () => {
     try {
@@ -113,14 +164,16 @@ export default function Alerts() {
     }
   };
 
-  // ✅ Feature: ajoute/retire un symbole de la liste suivie en mode 'custom'
-  const addSymbol = () => {
-    const sym = symbolInput.toUpperCase().trim();
+  // ✅ Feature: ajoute un symbole (ou un wildcard de classe) à la liste suivie
+  const addSymbolValue = (raw) => {
+    const sym = String(raw).toUpperCase().trim();
     if (!sym) return;
     setPrefsSaved(false);
     setAlertPrefs(p => p.symbols.includes(sym) ? p : { ...p, symbols: [...p.symbols, sym] });
     setSymbolInput('');
   };
+
+  const addSymbol = () => addSymbolValue(symbolInput);
 
   const removeSymbol = (sym) => {
     setPrefsSaved(false);
@@ -130,7 +183,16 @@ export default function Alerts() {
   const handleSymbolKeyDown = (e) => {
     if (e.key === 'Enter' || e.key === ',') {
       e.preventDefault();
-      addSymbol();
+      // Si une suggestion existe et que ce qui est tapé ne matche aucun
+      // symbole connu exactement, on prend la meilleure suggestion — évite
+      // d'ajouter un ticker mal orthographié tel quel.
+      const q = symbolInput.toUpperCase().trim();
+      const exact = knownSymbols.find(s => s.symbol?.toUpperCase() === q);
+      if (!exact && symbolSuggestions[0]) {
+        addSymbolValue(symbolSuggestions[0].symbol);
+      } else {
+        addSymbol();
+      }
     }
   };
 
@@ -307,39 +369,96 @@ export default function Alerts() {
             {/* Symbol watchlist — only when 'custom' */}
             {alertPrefs.mode === 'custom' && (
               <div style={{ padding:'12px 14px', background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:10 }}>
-                <div style={{ display:'flex', gap:8, marginBottom: alertPrefs.symbols.length > 0 ? 10 : 0 }}>
-                  <input
-                    style={{ ...inp, flex:1 }}
-                    placeholder="Type a symbol and press Enter (BTC, AAPL, EURUSD...)"
-                    value={symbolInput}
-                    onChange={e => setSymbolInput(e.target.value)}
-                    onKeyDown={handleSymbolKeyDown}
-                  />
-                  <button onClick={addSymbol} style={{
-                    padding:'0 18px', borderRadius:8, border:'1px solid var(--cyan-dim)',
-                    background:'rgba(0,245,212,0.08)', color:'var(--cyan)',
-                    fontFamily:'JetBrains Mono,monospace', fontSize:12, fontWeight:700, cursor:'pointer',
-                  }}>
-                    + Add
-                  </button>
+
+                {/* Wildcard quick-add */}
+                <div style={{ display:'flex', gap:6, flexWrap:'wrap', marginBottom:10 }}>
+                  {WILDCARDS.map(w => {
+                    const active = alertPrefs.symbols.includes(w.key);
+                    return (
+                      <button key={w.key} onClick={() => addSymbolValue(w.key)} disabled={active} style={{
+                        padding:'5px 12px', borderRadius:20, cursor: active ? 'default' : 'pointer',
+                        fontFamily:'JetBrains Mono,monospace', fontSize:10, fontWeight:600,
+                        border:`1px solid ${active ? 'rgba(167,139,250,0.15)' : 'rgba(167,139,250,0.3)'}`,
+                        background: active ? 'rgba(167,139,250,0.05)' : 'rgba(167,139,250,0.1)',
+                        color: active ? 'rgba(167,139,250,0.4)' : '#a78bfa',
+                        opacity: active ? 0.6 : 1,
+                      }}>
+                        🌐 {w.label}{active ? ' ✓' : ''}
+                      </button>
+                    );
+                  })}
                 </div>
+
+                {/* Text input + autocomplete dropdown */}
+                <div style={{ position:'relative' }}>
+                  <div style={{ display:'flex', gap:8 }}>
+                    <input
+                      style={{ ...inp, flex:1 }}
+                      placeholder="Type a symbol (BTC, AAPL, EURUSD...) — suggestions appear below"
+                      value={symbolInput}
+                      onChange={e => setSymbolInput(e.target.value)}
+                      onKeyDown={handleSymbolKeyDown}
+                    />
+                    <button onClick={addSymbol} style={{
+                      padding:'0 18px', borderRadius:8, border:'1px solid var(--cyan-dim)',
+                      background:'rgba(0,245,212,0.08)', color:'var(--cyan)',
+                      fontFamily:'JetBrains Mono,monospace', fontSize:12, fontWeight:700, cursor:'pointer',
+                    }}>
+                      + Add
+                    </button>
+                  </div>
+
+                  {/* Live suggestions — ✅ Feature: le système propose les
+                      symboles réellement suivis par AtlasQuant, tolère les
+                      fautes de frappe via fuzzy match */}
+                  {symbolSuggestions.length > 0 && (
+                    <div style={{
+                      position:'absolute', top:'calc(100% + 4px)', left:0, right:90, zIndex:20,
+                      background:'#0a0f1e', border:'1px solid var(--cyan-dim)', borderRadius:8,
+                      boxShadow:'0 8px 24px rgba(0,0,0,0.5)', overflow:'hidden',
+                    }}>
+                      {symbolSuggestions.map(s => (
+                        <div key={s.symbol} onClick={() => addSymbolValue(s.symbol)} style={{
+                          padding:'8px 14px', cursor:'pointer', display:'flex',
+                          justifyContent:'space-between', alignItems:'center',
+                          fontFamily:'JetBrains Mono,monospace', fontSize:11,
+                          borderBottom:'1px solid rgba(255,255,255,0.05)',
+                        }}
+                          onMouseEnter={e => e.currentTarget.style.background='rgba(0,245,212,0.06)'}
+                          onMouseLeave={e => e.currentTarget.style.background='transparent'}
+                        >
+                          <span style={{ color:'var(--text-primary)', fontWeight:700 }}>{s.symbol}</span>
+                          <span style={{ color:'var(--text-muted)', fontSize:9 }}>{s.asset_class}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Chips */}
                 {alertPrefs.symbols.length === 0 ? (
-                  <div style={{ fontSize:10, color:'var(--text-muted)', fontFamily:'JetBrains Mono,monospace' }}>
-                    No symbols yet — add the tickers you want AI signal alerts for.
+                  <div style={{ fontSize:10, color:'var(--text-muted)', fontFamily:'JetBrains Mono,monospace', marginTop:10 }}>
+                    No symbols yet — add tickers above, or use "All Crypto" / "All Forex" / etc.
                   </div>
                 ) : (
-                  <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
-                    {alertPrefs.symbols.map(sym => (
-                      <span key={sym} style={{
-                        display:'flex', alignItems:'center', gap:6,
-                        padding:'6px 10px 6px 14px', borderRadius:20,
-                        border:'1px solid var(--cyan-dim)', background:'rgba(0,245,212,0.1)',
-                        color:'var(--cyan)', fontFamily:'JetBrains Mono,monospace', fontSize:11, fontWeight:600,
-                      }}>
-                        {sym}
-                        <span onClick={() => removeSymbol(sym)} style={{ cursor:'pointer', opacity:0.7, fontWeight:700, padding:'0 2px' }}>✕</span>
-                      </span>
-                    ))}
+                  <div style={{ display:'flex', gap:8, flexWrap:'wrap', marginTop:10 }}>
+                    {alertPrefs.symbols.map(sym => {
+                      const isWildcard = sym.startsWith('ALL_');
+                      const wLabel = isWildcard ? WILDCARDS.find(w => w.key === sym)?.label || sym : sym;
+                      return (
+                        <span key={sym} style={{
+                          display:'flex', alignItems:'center', gap:6,
+                          padding:'6px 10px 6px 14px', borderRadius:20,
+                          border:`1px solid ${isWildcard ? 'rgba(167,139,250,0.3)' : 'var(--cyan-dim)'}`,
+                          background: isWildcard ? 'rgba(167,139,250,0.1)' : 'rgba(0,245,212,0.1)',
+                          color: isWildcard ? '#a78bfa' : 'var(--cyan)',
+                          fontFamily:'JetBrains Mono,monospace', fontSize:11, fontWeight:600,
+                        }}>
+                          {isWildcard ? '🌐 ' : ''}{wLabel}
+                          <span onClick={() => removeSymbol(sym)} style={{ cursor:'pointer', opacity:0.7, fontWeight:700, padding:'0 2px' }}>✕</span>
+                        </span>
+                      );
+                    })}
                   </div>
                 )}
               </div>

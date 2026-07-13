@@ -172,7 +172,7 @@ async function checkSignalAlerts() {
     const { rows: signals } = await db.query(`
       SELECT DISTINCT ON (symbol)
              id, symbol, signal, confidence, price, entry,
-             stop_loss, take_profit, risk_reward, reasoning, created_at
+             stop_loss, take_profit, risk_reward, reasoning, asset_class, created_at
       FROM signals
       WHERE confidence >= $1
         AND signal IN ('BUY', 'SELL')
@@ -198,15 +198,25 @@ async function checkSignalAlerts() {
     for (const sig of signals) {
       for (const user of users) {
         // ✅ Feature: si l'utilisateur a choisi "custom", on ignore les
-        // signaux dont le symbole n'est pas dans sa liste de tickers suivis.
-        // Comparaison insensible à la casse (le symbole en DB est déjà en
-        // majuscules, mais on normalise au cas où).
+        // signaux dont le symbole n'est pas dans sa liste — sauf si un
+        // wildcard de classe (ALL_CRYPTO/ALL_FOREX/ALL_COMMODITY/ALL_INDICES)
+        // couvre la classe d'actifs du signal. Comparaison insensible à la
+        // casse (le symbole en DB est déjà en majuscules, mais on normalise
+        // au cas où).
         if (user.alert_mode === 'custom') {
-          const symbols = Array.isArray(user.alert_symbols)
+          const raw = Array.isArray(user.alert_symbols)
             ? user.alert_symbols
             : (() => { try { return JSON.parse(user.alert_symbols); } catch { return []; } })();
-          const followedSet = new Set(symbols.map(s => String(s).toUpperCase().trim()));
-          if (!followedSet.has(sig.symbol.toUpperCase())) continue;
+          const entries = raw.map(s => String(s).toUpperCase().trim());
+
+          const followedClasses = entries
+            .filter(e => CLASS_WILDCARDS[e])
+            .map(e => CLASS_WILDCARDS[e]);
+          const followedSymbols = new Set(entries.filter(e => !CLASS_WILDCARDS[e]));
+
+          const matchesClass  = followedClasses.includes(sig.asset_class);
+          const matchesSymbol = followedSymbols.has(sig.symbol.toUpperCase());
+          if (!matchesClass && !matchesSymbol) continue;
         }
 
         const cooldownKey = `${user.id}:${sig.symbol}`;
