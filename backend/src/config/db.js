@@ -286,16 +286,13 @@ async function migrate() {
     ALTER TABLE alerts ADD COLUMN IF NOT EXISTS notify_email    BOOLEAN DEFAULT TRUE;
     ALTER TABLE alerts ADD COLUMN IF NOT EXISTS notify_telegram BOOLEAN DEFAULT FALSE;
     ALTER TABLE alerts ADD COLUMN IF NOT EXISTS metadata        JSONB;
+    ALTER TABLE alerts ADD COLUMN IF NOT EXISTS read BOOLEAN DEFAULT FALSE;
 
-    -- ✅ Feature: préférences utilisateur pour les alertes AI auto-générées
-    -- (signalAlert.service.js). mode='all' = tout suivre, mode='custom' =
-    -- suivre uniquement les symboles listés dans signal_alert_symbols
-    -- (ex. ["BTCUSDT","AAPL","EURUSD"]) — une liste de tickers précis choisis
-    -- par l'utilisateur, pas des classes d'actifs entières.
     ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS signal_alert_mode    VARCHAR(10) NOT NULL DEFAULT 'all';
     ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS signal_alert_symbols JSONB       NOT NULL DEFAULT '[]'::jsonb;
 
     ALTER TABLE signals ADD COLUMN IF NOT EXISTS asset_class TEXT NOT NULL DEFAULT 'Crypto';
+    ALTER TABLE alerts ADD COLUMN IF NOT EXISTS paused_until TIMESTAMP;
   `);
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_signals_asset_class ON signals(asset_class);

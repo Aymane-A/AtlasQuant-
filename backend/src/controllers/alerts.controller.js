@@ -1,13 +1,11 @@
 /**
  * src/controllers/alerts.controller.js — AtlasQuant AI
- * Full version: live prices, delete, pause, reset, history
+ * Full version: live prices, delete, pause, snooze, reset, history, read tracking
  */
 
 const db     = require('../config/db');
 const logger = require('../utils/logger');
 
-// yahoo-finance2 v3+ requires explicit instantiation — instance kept
-// at module scope instead of re-created on every fetchPrice() call.
 const YahooFinance = require('yahoo-finance2').default;
 const yahooFinance  = new YahooFinance({ suppressNotices: ['yahooSurvey'] });
 
@@ -19,10 +17,6 @@ const TYPE_MAP = {
   typePct:    'percent',
 };
 
-// ✅ Fix Bug 2: 'ai_signal' n'était listé nulle part ici — les alertes
-// auto-générées par signalAlert.service.js tombaient dans le fallback
-// `TYPE_LABELS[r.type] || r.type`, affichant le texte brut "ai_signal" sans
-// couleur ni icône dédiées.
 const TYPE_LABELS = {
   price:     'typePrice',
   rsi:       'typeRsi',
@@ -41,9 +35,6 @@ const COLORS = {
   ai_signal: 'var(--purple-bright)',
 };
 
-// ── Forex/Commodity symbol → Yahoo Finance ticker map ───────
-// Same mapping as watchlist.controller.js — kept in sync manually
-// for now (see refactor note at the bottom of this file).
 const YF_MAP = {
   'XAU/USD': 'GC=F',     'XAG/USD': 'SI=F',
   'OIL/USD': 'CL=F',     'EUR/USD':  'EURUSD=X',
@@ -53,10 +44,11 @@ const YF_MAP = {
   'NGAS':    'NG=F',
 };
 
-// Handles symbols stored without a slash (e.g. "EURUSD" → "EUR/USD")
-// so YF_MAP lookups don't silently miss and fall through to an
-// invalid raw ticker (this was causing forex/commodity alerts to
-// always show "—" for current price).
+// ✅ Feature: durées de snooze acceptées côté serveur — whitelist stricte pour
+// éviter qu'un body malformé/malveillant ne pousse un paused_until absurde
+// (ex. hours=99999 ou négatif).
+const SNOOZE_ALLOWED_HOURS = [1, 4, 24];
+
 function normalizeForexSymbol(sym) {
   if (!sym) return sym;
   const clean = sym.toUpperCase().trim();
@@ -81,7 +73,6 @@ function normalizeForexSymbol(sym) {
 }
 
 async function fetchPrice(symbol) {
-  // Try Yahoo Finance first (forex/commodities/indices/stocks)
   try {
     const normalized = normalizeForexSymbol(symbol);
     const yfSym       = YF_MAP[normalized] || YF_MAP[symbol] || normalized;
@@ -91,7 +82,6 @@ async function fetchPrice(symbol) {
     logger.error(`[alerts] fetchPrice yahoo(${symbol}): ${err.message}`);
   }
 
-  // Fallback: Binance (crypto)
   try {
     const res  = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}USDT`);
     const data = await res.json();
@@ -117,9 +107,6 @@ function isNear(condition, currentPrice, target) {
   return Math.abs(currentPrice - t) / t <= 0.02;
 }
 
-// ✅ Fix Bug 2: construit un message lisible pour une alerte, en tenant
-// compte du cas particulier 'ai_signal' (utilise metadata.signal/confidence
-// au lieu d'afficher "ai_signal above X" tel quel).
 function buildNotificationContent(row) {
   const isAiSignal = row.type === 'ai_signal';
   const meta = row.metadata || {};
@@ -145,13 +132,30 @@ function buildNotificationContent(row) {
   };
 }
 
+// ✅ Feature: lève automatiquement les snoozes expirés avant toute lecture —
+// évite d'avoir besoin d'un cron dédié: dès que l'utilisateur recharge la
+// page (polling 30s côté front), les alertes dont paused_until est passé
+// redeviennent actives.
+async function releaseExpiredSnoozes(userId) {
+  try {
+    await db.query(`
+      UPDATE alerts SET paused = false, paused_until = NULL
+      WHERE user_id = $1 AND paused_until IS NOT NULL AND paused_until <= NOW()
+    `, [userId]);
+  } catch (err) {
+    logger.error(`[alerts] releaseExpiredSnoozes: ${err.message}`);
+  }
+}
+
 // ── GET /api/alerts ───────────────────────────────────────
 async function getAlerts(req, res) {
   try {
     const userId = req.user.id;
 
+    await releaseExpiredSnoozes(userId);
+
     const { rows: alerts } = await db.query(`
-      SELECT id, symbol, type, condition, target, triggered, paused,
+      SELECT id, symbol, type, condition, target, triggered, paused, paused_until,
              notify_email, notify_telegram, triggered_at, created_at
       FROM alerts WHERE user_id = $1 ORDER BY created_at DESC
     `, [userId]);
@@ -164,10 +168,10 @@ async function getAlerts(req, res) {
       FROM alerts WHERE user_id = $1
     `, [userId]);
 
-    // ✅ Fix Bug 2: on récupère `metadata` pour pouvoir construire un message
-    // lisible pour les alertes 'ai_signal' (direction + confidence).
+    // ✅ Fix "unread": on récupère id + read pour construire un badge réel
+    // et permettre de marquer une alerte précise comme lue (PATCH /:id/read).
     const { rows: triggered } = await db.query(`
-      SELECT symbol, type, condition, target, triggered_at, metadata
+      SELECT id, symbol, type, condition, target, triggered_at, metadata, read
       FROM alerts WHERE user_id = $1 AND triggered = true
       ORDER BY triggered_at DESC LIMIT 10
     `, [userId]);
@@ -175,12 +179,13 @@ async function getAlerts(req, res) {
     const notifications = triggered.map(r => {
       const content = buildNotificationContent(r);
       return {
+        id:     r.id,
         title:  content.title,
         desc:   content.desc,
         time:   r.triggered_at
           ? new Date(r.triggered_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
           : '—',
-        unread: true,
+        unread: !r.read,
         icon:   content.icon,
         bg:     content.bg,
         color:  content.color,
@@ -257,8 +262,6 @@ async function getHistory(req, res) {
         id:             r.id,
         sym:            r.symbol,
         typeKey:        TYPE_LABELS[r.type] || r.type,
-        // ✅ Fix Bug 2: pour un ai_signal, on affiche la direction détectée
-        // (BUY/SELL) plutôt que la "condition" générique (toujours 'above').
         condition:      isAiSignal ? (meta.signal || r.condition) : r.condition,
         target:         `$${parseFloat(r.target).toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 })}`,
         triggeredAt:    r.triggered_at,
@@ -328,8 +331,11 @@ async function togglePause(req, res) {
     const userId  = req.user.id;
     const alertId = parseInt(req.params.id, 10);
 
+    // ✅ Fix: un pause manuel doit aussi effacer un éventuel paused_until
+    // hérité d'un ancien snooze, sinon releaseExpiredSnoozes le dé-pause
+    // tout seul plus tard sans que l'utilisateur l'ait demandé.
     const { rows, rowCount } = await db.query(`
-      UPDATE alerts SET paused = NOT paused
+      UPDATE alerts SET paused = NOT paused, paused_until = NULL
       WHERE id = $1 AND user_id = $2 RETURNING paused
     `, [alertId, userId]);
 
@@ -341,15 +347,51 @@ async function togglePause(req, res) {
   }
 }
 
+// ── PATCH /api/alerts/:id/snooze ──────────────────────────
+// ✅ Feature: Snooze — met l'alerte en pause pour une durée précise (1h/4h/24h)
+// au lieu d'une pause indéfinie. Réutilise la colonne "paused" existante pour
+// que les stats/filtres déjà en place la traitent naturellement comme
+// "Paused", + paused_until pour savoir quand la relever automatiquement
+// (voir releaseExpiredSnoozes, appelé à chaque GET /api/alerts).
+async function snoozeAlert(req, res) {
+  try {
+    const userId  = req.user.id;
+    const alertId = parseInt(req.params.id, 10);
+    const hours   = parseInt(req.body.hours, 10);
+
+    if (!SNOOZE_ALLOWED_HOURS.includes(hours)) {
+      return res.status(400).json({ success: false, error: `hours must be one of: ${SNOOZE_ALLOWED_HOURS.join(', ')}` });
+    }
+
+    const { rows, rowCount } = await db.query(`
+      UPDATE alerts
+      SET paused = true, paused_until = NOW() + ($1 || ' hours')::interval
+      WHERE id = $2 AND user_id = $3
+      RETURNING paused, paused_until
+    `, [hours, alertId, userId]);
+
+    if (rowCount === 0) return res.status(404).json({ success: false, error: 'Alert not found' });
+    res.json({ success: true, paused: rows[0].paused, pausedUntil: rows[0].paused_until });
+  } catch (err) {
+    logger.error(`[alerts.controller] Snooze Error: ${err.message}`);
+    res.status(500).json({ success: false, error: 'Failed to snooze alert' });
+  }
+}
+
 // ── PATCH /api/alerts/:id/reset ──────────────────────────
 async function resetAlert(req, res) {
   try {
     const userId  = req.user.id;
     const alertId = parseInt(req.params.id, 10);
 
+    // ✅ read reset à false aussi: si l'alerte se redéclenche plus tard,
+    // elle doit réapparaître comme "unread", pas rester marquée lue pour
+    // toujours à cause d'un ancien déclenchement déjà vu.
+    // ✅ paused_until aussi nettoyé, au cas où un reset arrive sur une
+    // alerte encore snoozée.
     const { rowCount } = await db.query(`
       UPDATE alerts
-      SET triggered = false, triggered_at = NULL, paused = false
+      SET triggered = false, triggered_at = NULL, paused = false, paused_until = NULL, read = false
       WHERE id = $1 AND user_id = $2
     `, [alertId, userId]);
 
@@ -361,7 +403,61 @@ async function resetAlert(req, res) {
   }
 }
 
-module.exports = { getAlerts, getHistory, createAlert, deleteAlert, togglePause, resetAlert };
+// ── PATCH /api/alerts/:id/read ────────────────────────────
+// ✅ Fix "unread" mzawer: marque une notification précise comme lue.
+async function markAsRead(req, res) {
+  try {
+    const userId  = req.user.id;
+    const alertId = parseInt(req.params.id, 10);
+
+    const { rowCount } = await db.query(
+      `UPDATE alerts SET read = true WHERE id = $1 AND user_id = $2`,
+      [alertId, userId]
+    );
+
+    if (rowCount === 0) return res.status(404).json({ success: false, error: 'Alert not found' });
+    res.json({ success: true });
+  } catch (err) {
+    logger.error(`[alerts.controller] MarkRead Error: ${err.message}`);
+    res.status(500).json({ success: false, error: 'Failed to mark alert as read' });
+  }
+}
+
+// ── PATCH /api/alerts/read-all ────────────────────────────
+async function markAllRead(req, res) {
+  try {
+    const userId = req.user.id;
+    const { rowCount } = await db.query(
+      `UPDATE alerts SET read = true WHERE user_id = $1 AND triggered = true AND read = false`,
+      [userId]
+    );
+    res.json({ success: true, updated: rowCount });
+  } catch (err) {
+    logger.error(`[alerts.controller] MarkAllRead Error: ${err.message}`);
+    res.status(500).json({ success: false, error: 'Failed to mark alerts as read' });
+  }
+}
+
+// ── DELETE /api/alerts/triggered/all ──────────────────────
+async function clearAllTriggered(req, res) {
+  try {
+    const userId = req.user.id;
+    const { rowCount } = await db.query(
+      `DELETE FROM alerts WHERE user_id = $1 AND triggered = true`,
+      [userId]
+    );
+    res.json({ success: true, deleted: rowCount });
+  } catch (err) {
+    logger.error(`[alerts.controller] ClearAll Error: ${err.message}`);
+    res.status(500).json({ success: false, error: 'Failed to clear alerts' });
+  }
+}
+
+module.exports = {
+  getAlerts, getHistory, createAlert, deleteAlert,
+  togglePause, snoozeAlert, resetAlert, clearAllTriggered,
+  markAsRead, markAllRead,
+};
 
 // ── Refactor note ─────────────────────────────────────────
 // YF_MAP + normalizeForexSymbol are now duplicated in both

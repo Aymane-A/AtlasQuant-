@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { alertsAPI } from '../services/api';
 import api from '../services/api';
@@ -29,6 +29,147 @@ const WILDCARDS = [
   { key:'ALL_INDICES',   label:'All Indices'   },
 ];
 
+// ✅ Feature: durées de snooze proposées pour les alertes actives
+const SNOOZE_OPTS = [
+  { label:'1h',  hours:1  },
+  { label:'4h',  hours:4  },
+  { label:'24h', hours:24 },
+];
+
+// ✅ Feature: petit beep synthétique (Web Audio API) — pas de fichier audio à
+// héberger, marche offline, taille zéro.
+function playAlertBeep() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = new Ctx();
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.connect(g);
+    g.connect(ctx.destination);
+    o.type = 'sine';
+    o.frequency.value = 880;
+    g.gain.setValueAtTime(0.001, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.15, ctx.currentTime + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
+    o.start();
+    o.stop(ctx.currentTime + 0.35);
+    setTimeout(() => ctx.close(), 500);
+  } catch { /* environnement sans Web Audio, non-bloquant */ }
+}
+
+// ✅ Fix: modal de confirmation custom qui respecte le design de l'app
+// (dark/neon), remplace window.confirm() natif qui cassait le style SaaS
+// (barre de titre "Code", boutons OS par défaut). Réutilisable pour
+// n'importe quelle action destructive dans l'app.
+function ConfirmModal({ open, title, message, confirmLabel = 'Confirm', danger = true, onConfirm, onCancel }) {
+  if (!open) return null;
+
+  return (
+    <div
+      onClick={onCancel}
+      style={{
+        position:'fixed', inset:0, zIndex:1000,
+        background:'rgba(5,8,16,0.72)', backdropFilter:'blur(3px)',
+        display:'flex', alignItems:'center', justifyContent:'center',
+        animation:'fadeIn .15s ease',
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          width:'min(400px, 90vw)', background:'var(--surface, #0a0f1e)',
+          border:`1px solid ${danger ? 'rgba(248,113,113,0.3)' : 'var(--cyan-dim)'}`,
+          borderRadius:14, padding:24,
+          boxShadow:`0 20px 60px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.03)`,
+          animation:'slideUp .18s ease',
+        }}
+      >
+        <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:12 }}>
+          <div style={{
+            width:32, height:32, borderRadius:8, flexShrink:0,
+            display:'flex', alignItems:'center', justifyContent:'center', fontSize:15,
+            background: danger ? 'rgba(248,113,113,0.12)' : 'rgba(0,245,212,0.1)',
+            color: danger ? 'var(--red)' : 'var(--cyan)',
+          }}>
+            {danger ? '⚠️' : 'ℹ️'}
+          </div>
+          <div style={{ fontSize:14, fontWeight:700, fontFamily:'Syne,sans-serif' }}>{title}</div>
+        </div>
+
+        <div style={{ fontSize:12, color:'var(--text-secondary)', fontFamily:'JetBrains Mono,monospace', lineHeight:1.6, marginBottom:22 }}>
+          {message}
+        </div>
+
+        <div style={{ display:'flex', gap:8, justifyContent:'flex-end' }}>
+          <button
+            onClick={onCancel}
+            style={{
+              padding:'9px 18px', borderRadius:8, border:'1px solid var(--border)',
+              background:'transparent', color:'var(--text-secondary)',
+              fontFamily:'JetBrains Mono,monospace', fontSize:12, fontWeight:600, cursor:'pointer',
+              transition:'all .15s',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor='rgba(255,255,255,0.25)'; e.currentTarget.style.color='var(--text-primary)'; }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor='var(--border)'; e.currentTarget.style.color='var(--text-secondary)'; }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            style={{
+              padding:'9px 18px', borderRadius:8, border:`1px solid ${danger ? 'rgba(248,113,113,0.4)' : 'var(--cyan-dim)'}`,
+              background: danger ? 'rgba(248,113,113,0.12)' : 'var(--cyan-glow)',
+              color: danger ? 'var(--red)' : 'var(--cyan)',
+              fontFamily:'Syne,sans-serif', fontSize:12, fontWeight:700, cursor:'pointer',
+              transition:'all .15s',
+            }}
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+
+      <style>{`
+        @keyframes fadeIn { from { opacity:0 } to { opacity:1 } }
+        @keyframes slideUp { from { opacity:0; transform:translateY(8px) scale(.98) } to { opacity:1; transform:translateY(0) scale(1) } }
+      `}</style>
+    </div>
+  );
+}
+
+// ✅ Feature: toasts in-app pour les nouveaux triggers — marchent MÊME si
+// l'utilisateur n'a jamais accordé la permission navigateur (contrairement
+// à Notification API), donc c'est le canal garanti. Empilés en haut à droite,
+// auto-dismiss après 6s.
+function ToastStack({ toasts, onDismiss }) {
+  if (toasts.length === 0) return null;
+  return (
+    <div style={{
+      position:'fixed', top:20, right:20, zIndex:900,
+      display:'flex', flexDirection:'column', gap:8, width:320, maxWidth:'90vw',
+    }}>
+      {toasts.map(toast => (
+        <div key={toast.id} style={{
+          display:'flex', gap:10, alignItems:'flex-start',
+          background:'var(--surface, #0a0f1e)', border:'1px solid var(--cyan-dim)',
+          borderRadius:10, padding:'12px 14px',
+          boxShadow:'0 10px 30px rgba(0,0,0,0.5)',
+          animation:'toastIn .2s ease',
+        }}>
+          <div style={{ fontSize:16 }}>🤖</div>
+          <div style={{ flex:1 }}>
+            <div style={{ fontSize:12, fontWeight:700, marginBottom:2 }}>{toast.title}</div>
+            <div style={{ fontSize:10, color:'var(--text-secondary)', fontFamily:'JetBrains Mono,monospace' }}>{toast.desc}</div>
+          </div>
+          <span onClick={() => onDismiss(toast.id)} style={{ cursor:'pointer', color:'var(--text-muted)', fontSize:12, padding:'2px 4px' }}>✕</span>
+        </div>
+      ))}
+      <style>{`@keyframes toastIn { from { opacity:0; transform:translateX(20px) } to { opacity:1; transform:translateX(0) } }`}</style>
+    </div>
+  );
+}
+
 export default function Alerts() {
   const { t } = useTranslation();
   const a = key => t(`alerts.${key}`);
@@ -53,9 +194,64 @@ export default function Alerts() {
   const [data, setData]           = useState({ stats:null, notifications:[], alerts:[] });
   const [history, setHistory]     = useState([]);
 
+  // ✅ Fix: state du ConfirmModal (remplace window.confirm natif)
+  const [confirmState, setConfirmState] = useState({ open:false, title:'', message:'', onConfirm:null });
+  const closeConfirm = () => setConfirmState(s => ({ ...s, open:false }));
+  const askConfirm = ({ title, message, confirmLabel, danger, onConfirm }) => {
+    setConfirmState({
+      open:true, title, message, confirmLabel, danger,
+      onConfirm: async () => { closeConfirm(); await onConfirm(); },
+    });
+  };
+
+  // ✅ Feature: notifications navigateur + son quand un nouvel alert AI se
+  // déclenche, sans dépendre d'un WebSocket dédié — on compare simplement les
+  // IDs entre deux polls (déjà à 30s) et on notifie ce qui est nouveau.
+  const [notifyEnabled, setNotifyEnabled] = useState(
+    typeof Notification !== 'undefined' && Notification.permission === 'granted'
+  );
+  const notifyEnabledRef = useRef(notifyEnabled);
+  useEffect(() => { notifyEnabledRef.current = notifyEnabled; }, [notifyEnabled]);
+  const knownNotifIdsRef = useRef(null); // null = premier chargement, on ne spam pas au démarrage
+
+  const enableBrowserNotifications = async () => {
+    if (typeof Notification === 'undefined') return;
+    try {
+      const perm = await Notification.requestPermission();
+      setNotifyEnabled(perm === 'granted');
+    } catch { /* refusé ou non-supporté, on ignore silencieusement */ }
+  };
+
+  // ✅ Feature: "soft-ask" — explique le bénéfice AVANT de déclencher le
+  // popup natif du navigateur (celui-ci ne peut pas être stylé, c'est une
+  // protection du navigateur contre le spoofing). Rend le flow moins abrupt:
+  // l'utilisateur voit d'abord notre modal, PUIS le popup natif s'il accepte.
+  const askEnableNotifications = () => {
+    if (notifyEnabled) return;
+    askConfirm({
+      title: 'Enable browser notifications',
+      message: "Get notified the instant a high-confidence AI signal triggers, even when this tab isn't focused. Your browser will ask you to confirm this next.",
+      confirmLabel: 'Continue',
+      danger: false,
+      onConfirm: enableBrowserNotifications,
+    });
+  };
+
+  // ✅ Feature: toasts in-app — canal garanti, indépendant de la permission
+  // navigateur.
+  const [toasts, setToasts] = useState([]);
+  const pushToast = (title, desc) => {
+    const id = `${Date.now()}-${Math.random()}`;
+    setToasts(ts => [...ts, { id, title, desc }].slice(-4));
+    setTimeout(() => setToasts(ts => ts.filter(t => t.id !== id)), 6000);
+  };
+  const dismissToast = (id) => setToasts(ts => ts.filter(t => t.id !== id));
+
   // ✅ Feature: préférences AI Signal Alerts — Follow All vs Custom (liste de
-  // symboles précis tapés par l'utilisateur, ex. BTC, AAPL, EURUSD)
+  // symboles précis tapés par l'utilisateur, ex. BTC, AAPL, EURUSD) + seuil
+  // de confiance minimum
   const [alertPrefs, setAlertPrefs]     = useState({ mode:'all', symbols:[] });
+  const [minConfidence, setMinConfidence] = useState(75);
   const [symbolInput, setSymbolInput]   = useState('');
   const [prefsLoading, setPrefsLoading] = useState(true);
   const [prefsSaving, setPrefsSaving]   = useState(false);
@@ -89,10 +285,28 @@ export default function Alerts() {
   const loadAlerts = async () => {
     try {
       const res = await alertsAPI.getAll();
+      const newNotifs = res.data.notifications || [];
+
+      // ✅ Feature: détecte les nouveaux triggers vs. le poll précédent
+      if (knownNotifIdsRef.current) {
+        const freshOnes = newNotifs.filter(n => !knownNotifIdsRef.current.has(n.id));
+        if (freshOnes.length > 0) {
+          // Toast in-app: toujours affiché, indépendant de la permission navigateur
+          freshOnes.slice(0, 3).forEach(n => pushToast(n.title, n.desc));
+          if (notifyEnabledRef.current && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+            freshOnes.slice(0, 3).forEach(n => {
+              try { new Notification(n.title, { body: n.desc, icon: '/favicon.ico', tag: `alert-${n.id}` }); } catch {}
+            });
+          }
+          if (notifyEnabledRef.current) playAlertBeep();
+        }
+      }
+      knownNotifIdsRef.current = new Set(newNotifs.map(n => n.id));
+
       setData({
         stats:         res.data.stats,
-        notifications: res.data.notifications || [],
-        alerts:        res.data.alerts        || [],
+        notifications: newNotifs,
+        alerts:        res.data.alerts || [],
       });
       setError('');
     } catch (err) {
@@ -119,6 +333,9 @@ export default function Alerts() {
         mode:    s.signal_alert_mode === 'custom' ? 'custom' : 'all',
         symbols: Array.isArray(s.signal_alert_symbols) ? s.signal_alert_symbols : [],
       });
+      setMinConfidence(
+        Number.isFinite(s.signal_alert_min_confidence) ? s.signal_alert_min_confidence : 75
+      );
     } catch { /* garde les valeurs par défaut si l'appel échoue */ }
     finally { setPrefsLoading(false); }
   };
@@ -131,9 +348,20 @@ export default function Alerts() {
     return () => clearInterval(id);
   }, []);
 
-  const handleDelete = async (id) => {
-    try { await alertsAPI.remove(id); loadAlerts(); loadHistory(); }
-    catch { setError('Failed to delete alert'); }
+  // ✅ Fix: delete/reset individuels passent aussi par le ConfirmModal —
+  // cohérence UX (avant: delete silencieux en un clic, clear-all seul avec
+  // confirm natif — asymétrie corrigée)
+  const handleDelete = (id, sym) => {
+    askConfirm({
+      title: 'Delete alert',
+      message: `Delete the alert for ${sym || 'this symbol'}? This can't be undone.`,
+      confirmLabel: 'Delete',
+      danger: true,
+      onConfirm: async () => {
+        try { await alertsAPI.remove(id); loadAlerts(); loadHistory(); }
+        catch { setError('Failed to delete alert'); }
+      },
+    });
   };
 
   const handlePause = async (id) => {
@@ -141,9 +369,70 @@ export default function Alerts() {
     catch { setError('Failed to pause alert'); }
   };
 
+  // ✅ Feature: Snooze — met l'alerte en pause pour une durée précise plutôt
+  // qu'indéfiniment. NÉCESSITE un endpoint backend PATCH /api/alerts/:id/snooze
+  // qui accepte { hours } et calcule paused_until = NOW() + hours. Voir note
+  // en fin de réponse pour le snippet à ajouter côté alerts.controller.js.
+  const [snoozeMenuId, setSnoozeMenuId] = useState(null);
+  const handleSnooze = async (id, hours) => {
+    setSnoozeMenuId(null);
+    try {
+      await api.patch(`/alerts/${id}/snooze`, { hours });
+      loadAlerts();
+    } catch {
+      setError('Failed to snooze alert — backend endpoint may be missing');
+    }
+  };
+
   const handleReset = async (id) => {
     try { await alertsAPI.reset(id); loadAlerts(); loadHistory(); }
     catch { setError('Failed to reset alert'); }
+  };
+
+  // ✅ Feature: "Clear All" — supprime tous les alerts déclenchés d'un coup
+  // (Notification Feed ET History, car ils partagent les mêmes lignes
+  // triggered=true côté backend). Passe par le ConfirmModal custom.
+  const handleClearAll = () => {
+    if (notifications.length === 0) return;
+    askConfirm({
+      title: 'Clear all triggered alerts',
+      message: `Clear all ${notifications.length} triggered alerts? This also removes them from History.`,
+      confirmLabel: 'Clear All',
+      danger: true,
+      onConfirm: async () => {
+        try {
+          await api.delete('/alerts/triggered/all');
+          loadAlerts();
+          loadHistory();
+        } catch {
+          setError('Failed to clear alerts');
+        }
+      },
+    });
+  };
+
+  // ✅ Fix "unread" mzawer: marque une notification comme lue au clic
+  const handleMarkRead = async (id) => {
+    try {
+      await api.patch(`/alerts/${id}/read`);
+      setData(d => ({
+        ...d,
+        notifications: d.notifications.map(n => n.id === id ? { ...n, unread: false } : n),
+      }));
+    } catch { /* non-bloquant */ }
+  };
+
+  const handleMarkAllRead = async () => {
+    if (notifications.filter(n => n.unread).length === 0) return;
+    try {
+      await api.patch('/alerts/read-all');
+      setData(d => ({
+        ...d,
+        notifications: d.notifications.map(n => ({ ...n, unread: false })),
+      }));
+    } catch {
+      setError('Failed to mark alerts as read');
+    }
   };
 
   const handleCreate = async () => {
@@ -201,6 +490,11 @@ export default function Alerts() {
     setAlertPrefs(p => ({ ...p, mode }));
   };
 
+  const handleConfidenceChange = (e) => {
+    setPrefsSaved(false);
+    setMinConfidence(Number(e.target.value));
+  };
+
   const savePrefs = async () => {
     if (alertPrefs.mode === 'custom' && alertPrefs.symbols.length === 0) {
       setError('Add at least one symbol to follow');
@@ -210,7 +504,7 @@ export default function Alerts() {
     try {
       await api.post('/settings/update', {
         section: 'signalAlerts',
-        payload: { mode: alertPrefs.mode, symbols: alertPrefs.symbols },
+        payload: { mode: alertPrefs.mode, symbols: alertPrefs.symbols, minConfidence },
       });
       setPrefsSaved(true);
       setError('');
@@ -231,6 +525,52 @@ export default function Alerts() {
     history.filter(h =>
       !search || h.sym.toLowerCase().includes(search.toLowerCase())
     ), [history, search]);
+
+  // ✅ Feature: grouping de l'History par symbole (utile quand un même ticker
+  // se déclenche plusieurs fois en peu de temps, ex. FILUSDT x5)
+  const [groupBySymbol, setGroupBySymbol] = useState(false);
+  const [expandedGroups, setExpandedGroups] = useState(new Set());
+  const toggleGroup = (sym) => setExpandedGroups(s => {
+    const next = new Set(s);
+    next.has(sym) ? next.delete(sym) : next.add(sym);
+    return next;
+  });
+  const groupedHistory = useMemo(() => {
+    const map = new Map();
+    filteredHistory.forEach(h => {
+      if (!map.has(h.sym)) map.set(h.sym, []);
+      map.get(h.sym).push(h);
+    });
+    return Array.from(map.entries())
+      .map(([sym, items]) => ({ sym, items }))
+      .sort((x, y) => y.items.length - x.items.length);
+  }, [filteredHistory]);
+
+  // ✅ Feature: export History en CSV, généré côté client — pas besoin
+  // d'endpoint backend dédié.
+  const handleExportCSV = () => {
+    if (filteredHistory.length === 0) return;
+    const headers = ['Symbol', 'Type', 'Condition', 'Target', 'Triggered At'];
+    const rows = filteredHistory.map(h => [
+      h.sym,
+      typeLabel(h.typeKey),
+      h.condition ?? '',
+      h.target ?? '',
+      h.triggeredAt ? new Date(h.triggeredAt).toISOString() : '',
+    ]);
+    const csv = [headers, ...rows]
+      .map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(','))
+      .join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `atlasquant-alerts-history-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
 
   const inp = {
     width:'100%', padding:'10px 13px', borderRadius:8,
@@ -282,8 +622,25 @@ export default function Alerts() {
     transition: 'all .15s',
   });
 
+  const smallBtn = {
+    background:'transparent', border:'1px solid rgba(255,255,255,0.1)',
+    color:'var(--text-muted)', fontSize:9, fontFamily:'JetBrains Mono,monospace',
+    padding:'3px 10px', borderRadius:5, cursor:'pointer', transition:'all .15s',
+  };
+
   return (
     <>
+      <ConfirmModal
+        open={confirmState.open}
+        title={confirmState.title}
+        message={confirmState.message}
+        confirmLabel={confirmState.confirmLabel}
+        danger={confirmState.danger}
+        onConfirm={confirmState.onConfirm}
+        onCancel={closeConfirm}
+      />
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
+
       {loading && (
         <div style={{ padding:'10px 14px', border:'1px solid var(--border)', borderRadius:10, color:'var(--text-secondary)', fontFamily:'JetBrains Mono,monospace', fontSize:11 }}>
           Loading alerts...
@@ -305,12 +662,30 @@ export default function Alerts() {
             {a('pageSubtitle')}
           </div>
         </div>
-        <button
-          onClick={() => { setShowForm(true); setSubmitted(false); }}
-          style={{ padding:'10px 22px', borderRadius:8, border:'1px solid var(--cyan-dim)', background:'var(--cyan-glow)', color:'var(--cyan)', fontFamily:'Syne,sans-serif', fontSize:13, fontWeight:700, cursor:'pointer' }}
-        >
-          {a('newAlert')}
-        </button>
+        <div style={{ display:'flex', gap:10, alignItems:'center' }}>
+          {/* ✅ Feature: notifications navigateur + son */}
+          <button
+            onClick={askEnableNotifications}
+            disabled={notifyEnabled}
+            title={notifyEnabled ? 'Browser notifications enabled' : 'Enable browser notifications for new alerts'}
+            style={{
+              padding:'9px 14px', borderRadius:8, cursor: notifyEnabled ? 'default' : 'pointer',
+              border:`1px solid ${notifyEnabled ? 'rgba(52,211,153,0.3)' : 'var(--border)'}`,
+              background: notifyEnabled ? 'rgba(52,211,153,0.08)' : 'transparent',
+              color: notifyEnabled ? 'var(--green)' : 'var(--text-secondary)',
+              fontFamily:'JetBrains Mono,monospace', fontSize:11, fontWeight:600,
+              display:'flex', alignItems:'center', gap:6,
+            }}
+          >
+            {notifyEnabled ? '🔔 Notifications on' : '🔕 Enable notifications'}
+          </button>
+          <button
+            onClick={() => { setShowForm(true); setSubmitted(false); }}
+            style={{ padding:'10px 22px', borderRadius:8, border:'1px solid var(--cyan-dim)', background:'var(--cyan-glow)', color:'var(--cyan)', fontFamily:'Syne,sans-serif', fontSize:13, fontWeight:700, cursor:'pointer' }}
+          >
+            {a('newAlert')}
+          </button>
+        </div>
       </div>
 
       {/* ══ AI SIGNAL ALERT PREFERENCES ══ */}
@@ -324,7 +699,7 @@ export default function Alerts() {
               🤖 AI Signal Alerts
             </div>
             <div style={{ fontSize:11, color:'var(--text-muted)', fontFamily:'JetBrains Mono,monospace' }}>
-              Auto-alerts for high-confidence signals (≥75%) — choose what to follow
+              Auto-alerts for high-confidence signals — choose what to follow
             </div>
           </div>
           {!prefsLoading && (
@@ -364,6 +739,27 @@ export default function Alerts() {
                   </div>
                 </button>
               ))}
+            </div>
+
+            {/* ✅ Feature: seuil de confiance minimum, s'applique aux deux modes */}
+            <div style={{ padding:'12px 14px', background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:10 }}>
+              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:10 }}>
+                <span style={{ fontSize:11, color:'var(--text-secondary)', fontFamily:'JetBrains Mono,monospace' }}>
+                  Minimum confidence to alert
+                </span>
+                <span style={{ fontSize:14, fontWeight:700, color:'var(--cyan)', fontFamily:'JetBrains Mono,monospace' }}>
+                  {minConfidence}%
+                </span>
+              </div>
+              <input
+                type="range" min={50} max={95} step={5}
+                value={minConfidence} onChange={handleConfidenceChange}
+                style={{ width:'100%', accentColor:'var(--cyan, #00f5d4)' }}
+              />
+              <div style={{ display:'flex', justifyContent:'space-between', fontSize:9, color:'var(--text-muted)', fontFamily:'JetBrains Mono,monospace', marginTop:4 }}>
+                <span>50% (more alerts)</span>
+                <span>95% (only strongest signals)</span>
+              </div>
             </div>
 
             {/* Symbol watchlist — only when 'custom' */}
@@ -484,23 +880,35 @@ export default function Alerts() {
 
         {/* Notification Feed */}
         <div className="panel" style={{ padding:22 }}>
-          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:18 }}>
-            <div style={{ fontSize:13, fontWeight:600, display:'flex', alignItems:'center', gap:8 }}>
-              <div style={{ width:6, height:6, borderRadius:'50%', background:'var(--amber)' }} />
-              {a('feedTitle')}
+          <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+              <span style={{ background:'rgba(248,113,113,0.15)', color:'var(--red)', fontSize:10, fontFamily:'JetBrains Mono,monospace', padding:'2px 8px', borderRadius:5 }}>
+                {t('alerts.unread', { count: unreadCount })}
+              </span>
+              {unreadCount > 0 && (
+                <button onClick={handleMarkAllRead} title="Mark all as read" style={smallBtn}
+                  onMouseEnter={e => { e.currentTarget.style.borderColor='var(--cyan-dim)'; e.currentTarget.style.color='var(--cyan)'; }}
+                  onMouseLeave={e => { e.currentTarget.style.borderColor='rgba(255,255,255,0.1)'; e.currentTarget.style.color='var(--text-muted)'; }}
+                >
+                  ✓ Mark all read
+                </button>
+              )}
+              {notifications.length > 0 && (
+                <button onClick={handleClearAll} title="Delete all triggered alerts" style={smallBtn}
+                  onMouseEnter={e => { e.currentTarget.style.borderColor='rgba(244,63,94,0.4)'; e.currentTarget.style.color='var(--red)'; }}
+                  onMouseLeave={e => { e.currentTarget.style.borderColor='rgba(255,255,255,0.1)'; e.currentTarget.style.color='var(--text-muted)'; }}
+                >
+                  🗑 Clear All
+                </button>
+              )}
             </div>
-            <span style={{ background:'rgba(248,113,113,0.15)', color:'var(--red)', fontSize:10, fontFamily:'JetBrains Mono,monospace', padding:'2px 8px', borderRadius:5 }}>
-              {t('alerts.unread', { count: unreadCount })}
-            </span>
-          </div>
           <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
             {notifications.length === 0 && (
               <div style={{ padding:'20px 0', textAlign:'center', color:'var(--text-muted)', fontFamily:'JetBrains Mono,monospace', fontSize:11 }}>
                 No triggered alerts yet
               </div>
             )}
-            {notifications.map((n, i) => (
-              <div key={i} style={{ display:'flex', alignItems:'flex-start', gap:12, padding:'12px 14px', borderRadius:10, background: n.unread ? 'rgba(251,191,36,0.03)' : 'rgba(255,255,255,0.02)', border:`1px solid ${n.unread ? 'rgba(251,191,36,0.25)' : 'var(--border)'}` }}>
+            {notifications.map((n) => (
+              <div key={n.id} onClick={() => n.unread && handleMarkRead(n.id)} style={{ display:'flex', alignItems:'flex-start', gap:12, padding:'12px 14px', borderRadius:10, cursor: n.unread ? 'pointer' : 'default', background: n.unread ? 'rgba(251,191,36,0.03)' : 'rgba(255,255,255,0.02)', border:`1px solid ${n.unread ? 'rgba(251,191,36,0.25)' : 'var(--border)'}` }}>
                 <div style={{ width:34, height:34, borderRadius:8, display:'flex', alignItems:'center', justifyContent:'center', fontSize:14, background:n.bg, color:n.color, flexShrink:0 }}>
                   {n.icon}
                 </div>
@@ -576,8 +984,8 @@ export default function Alerts() {
         )}
       </div>
 
-      {/* Tabs + Search */}
-      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:12 }}>
+      {/* Tabs + Search + Group/Export */}
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:12, flexWrap:'wrap' }}>
         {/* Tabs */}
         <div style={{ display:'flex', gap:4, background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:9, padding:3 }}>
           <button style={tabStyle('active')} onClick={() => setActiveTab('active')}>
@@ -588,15 +996,38 @@ export default function Alerts() {
           </button>
         </div>
 
-        {/* Search */}
-        <div style={{ position:'relative', flex:1, maxWidth:260 }}>
-          <span style={{ position:'absolute', left:10, top:'50%', transform:'translateY(-50%)', color:'var(--text-muted)', fontSize:12 }}>🔍</span>
-          <input
-            style={{ ...inp, paddingLeft:30, width:'100%' }}
-            placeholder="Filter by symbol..."
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-          />
+        <div style={{ display:'flex', alignItems:'center', gap:10, flex:1, justifyContent:'flex-end' }}>
+          {/* ✅ Feature: group-by-symbol + export, seulement pertinents pour History */}
+          {activeTab === 'history' && (
+            <>
+              <button onClick={() => setGroupBySymbol(g => !g)} style={{
+                ...smallBtn, padding:'7px 12px', fontSize:10,
+                border:`1px solid ${groupBySymbol ? 'var(--cyan-dim)' : 'rgba(255,255,255,0.1)'}`,
+                color: groupBySymbol ? 'var(--cyan)' : 'var(--text-muted)',
+                background: groupBySymbol ? 'rgba(0,245,212,0.06)' : 'transparent',
+              }}>
+                {groupBySymbol ? '☑' : '☐'} Group by symbol
+              </button>
+              <button onClick={handleExportCSV} disabled={filteredHistory.length === 0} style={{
+                ...smallBtn, padding:'7px 12px', fontSize:10,
+                opacity: filteredHistory.length === 0 ? 0.4 : 1,
+                cursor: filteredHistory.length === 0 ? 'not-allowed' : 'pointer',
+              }}>
+                ⬇ Export CSV
+              </button>
+            </>
+          )}
+
+          {/* Search */}
+          <div style={{ position:'relative', flex:1, maxWidth:260 }}>
+            <span style={{ position:'absolute', left:10, top:'50%', transform:'translateY(-50%)', color:'var(--text-muted)', fontSize:12 }}>🔍</span>
+            <input
+              style={{ ...inp, paddingLeft:30, width:'100%' }}
+              placeholder="Filter by symbol..."
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+            />
+          </div>
         </div>
       </div>
 
@@ -635,9 +1066,41 @@ export default function Alerts() {
                 </div>
                 <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', fontSize:11, fontFamily:'JetBrains Mono,monospace' }}>
                   <span style={{ color:'var(--text-secondary)' }}>{t('alerts.threshold', { pct: card.pct })}</span>
-                  <div style={{ display:'flex', gap:2 }}>
-                    <button {...iconBtn(() => handlePause(card.id), 'Pause', 'var(--amber)')}>⏸</button>
-                    <button {...iconBtn(() => handleDelete(card.id), 'Delete', 'var(--red)')}>🗑</button>
+                  <div style={{ display:'flex', gap:2, position:'relative' }}>
+                    {/* ✅ Feature: Snooze dropdown au lieu d'un simple Pause */}
+                    <button
+                      {...iconBtn(() => setSnoozeMenuId(id => id === card.id ? null : card.id), 'Snooze / Pause', 'var(--amber)')}
+                    >⏸</button>
+                    {snoozeMenuId === card.id && (
+                      <div style={{
+                        position:'absolute', bottom:'calc(100% + 6px)', right:0, zIndex:30,
+                        background:'#0a0f1e', border:'1px solid var(--border)', borderRadius:8,
+                        boxShadow:'0 8px 24px rgba(0,0,0,0.5)', overflow:'hidden', minWidth:130,
+                      }}>
+                        {SNOOZE_OPTS.map(opt => (
+                          <div key={opt.hours} onClick={() => handleSnooze(card.id, opt.hours)} style={{
+                            padding:'8px 14px', cursor:'pointer', fontSize:11,
+                            fontFamily:'JetBrains Mono,monospace', color:'var(--text-secondary)',
+                            borderBottom:'1px solid rgba(255,255,255,0.05)',
+                          }}
+                            onMouseEnter={e => e.currentTarget.style.background='rgba(251,191,36,0.06)'}
+                            onMouseLeave={e => e.currentTarget.style.background='transparent'}
+                          >
+                            Snooze {opt.label}
+                          </div>
+                        ))}
+                        <div onClick={() => { setSnoozeMenuId(null); handlePause(card.id); }} style={{
+                          padding:'8px 14px', cursor:'pointer', fontSize:11,
+                          fontFamily:'JetBrains Mono,monospace', color:'var(--red)',
+                        }}
+                          onMouseEnter={e => e.currentTarget.style.background='rgba(248,113,113,0.06)'}
+                          onMouseLeave={e => e.currentTarget.style.background='transparent'}
+                        >
+                          Pause indefinitely
+                        </div>
+                      </div>
+                    )}
+                    <button {...iconBtn(() => handleDelete(card.id, card.sym), 'Delete', 'var(--red)')}>🗑</button>
                   </div>
                 </div>
               </div>
@@ -654,39 +1117,81 @@ export default function Alerts() {
               {search ? `No history matching "${search}"` : 'No triggered alerts yet'}
             </div>
           )}
-          <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-            {filteredHistory.map(h => (
-              <div key={h.id} style={{ background:'var(--surface)', border:'1px solid var(--border)', borderRadius:10, padding:'14px 18px', display:'flex', alignItems:'center', gap:16 }}>
-                {/* Color dot */}
-                <div style={{ width:8, height:8, borderRadius:'50%', background:h.color, flexShrink:0 }} />
-                {/* Symbol */}
-                <div style={{ minWidth:80 }}>
-                  <div style={{ fontSize:14, fontWeight:700 }}>{h.sym}</div>
-                  <div style={{ fontSize:10, color:'var(--text-muted)', fontFamily:'JetBrains Mono,monospace' }}>{typeLabel(h.typeKey)}</div>
-                </div>
-                {/* Condition + target */}
-                <div style={{ flex:1 }}>
-                  <div style={{ fontSize:12, fontFamily:'JetBrains Mono,monospace', color:'var(--text-secondary)' }}>
-                    {h.condition} {h.target}
+
+          {/* Row renderer réutilisé (flat ou groupé) */}
+          {!groupBySymbol && filteredHistory.length > 0 && (
+            <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+              {filteredHistory.map(h => (
+                <div key={h.id} style={{ background:'var(--surface)', border:'1px solid var(--border)', borderRadius:10, padding:'14px 18px', display:'flex', alignItems:'center', gap:16 }}>
+                  <div style={{ width:8, height:8, borderRadius:'50%', background:h.color, flexShrink:0 }} />
+                  <div style={{ minWidth:80 }}>
+                    <div style={{ fontSize:14, fontWeight:700 }}>{h.sym}</div>
+                    <div style={{ fontSize:10, color:'var(--text-muted)', fontFamily:'JetBrains Mono,monospace' }}>{typeLabel(h.typeKey)}</div>
                   </div>
+                  <div style={{ flex:1 }}>
+                    <div style={{ fontSize:12, fontFamily:'JetBrains Mono,monospace', color:'var(--text-secondary)' }}>
+                      {h.condition} {h.target}
+                    </div>
+                  </div>
+                  <div style={{ fontSize:11, fontFamily:'JetBrains Mono,monospace', color:'var(--text-muted)', textAlign:'right' }}>
+                    <div style={{ color:'var(--amber)', marginBottom:2 }}>✓ Triggered</div>
+                    <div>{h.triggeredAt ? new Date(h.triggeredAt).toLocaleString('en-GB', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' }) : '—'}</div>
+                  </div>
+                  <div style={{ display:'flex', gap:4 }}>
+                    {h.notifyEmail    && <span style={{ fontSize:9, padding:'2px 6px', borderRadius:4, background:'rgba(0,245,212,0.08)', color:'var(--cyan)', border:'1px solid var(--cyan-dim)', fontFamily:'JetBrains Mono,monospace' }}>📧</span>}
+                    {h.notifyTelegram && <span style={{ fontSize:9, padding:'2px 6px', borderRadius:4, background:'rgba(99,102,241,0.08)', color:'#818cf8', border:'1px solid rgba(99,102,241,0.25)', fontFamily:'JetBrains Mono,monospace' }}>✈️</span>}
+                  </div>
+                  <button {...iconBtn(() => handleReset(h.id), 'Reset alert — watch again', 'var(--cyan)')}>↺</button>
+                  <button {...iconBtn(() => handleDelete(h.id, h.sym), 'Delete', 'var(--red)')}>🗑</button>
                 </div>
-                {/* Triggered at */}
-                <div style={{ fontSize:11, fontFamily:'JetBrains Mono,monospace', color:'var(--text-muted)', textAlign:'right' }}>
-                  <div style={{ color:'var(--amber)', marginBottom:2 }}>✓ Triggered</div>
-                  <div>{h.triggeredAt ? new Date(h.triggeredAt).toLocaleString('en-GB', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' }) : '—'}</div>
-                </div>
-                {/* Channels */}
-                <div style={{ display:'flex', gap:4 }}>
-                  {h.notifyEmail    && <span style={{ fontSize:9, padding:'2px 6px', borderRadius:4, background:'rgba(0,245,212,0.08)', color:'var(--cyan)', border:'1px solid var(--cyan-dim)', fontFamily:'JetBrains Mono,monospace' }}>📧</span>}
-                  {h.notifyTelegram && <span style={{ fontSize:9, padding:'2px 6px', borderRadius:4, background:'rgba(99,102,241,0.08)', color:'#818cf8', border:'1px solid rgba(99,102,241,0.25)', fontFamily:'JetBrains Mono,monospace' }}>✈️</span>}
-                </div>
-                {/* Reset button */}
-                <button {...iconBtn(() => handleReset(h.id), 'Reset alert — watch again', 'var(--cyan)')}>↺</button>
-                {/* Delete */}
-                <button {...iconBtn(() => handleDelete(h.id), 'Delete', 'var(--red)')}>🗑</button>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
+
+          {/* ✅ Feature: vue groupée par symbole, collapsible */}
+          {groupBySymbol && filteredHistory.length > 0 && (
+            <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+              {groupedHistory.map(({ sym, items }) => {
+                const isOpen = expandedGroups.has(sym);
+                return (
+                  <div key={sym} style={{ background:'var(--surface)', border:'1px solid var(--border)', borderRadius:10, overflow:'hidden' }}>
+                    <div onClick={() => toggleGroup(sym)} style={{
+                      display:'flex', alignItems:'center', justifyContent:'space-between',
+                      padding:'12px 18px', cursor:'pointer',
+                    }}>
+                      <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+                        <span style={{ fontSize:11, color:'var(--text-muted)', transform: isOpen ? 'rotate(90deg)' : 'none', transition:'transform .15s', display:'inline-block' }}>▶</span>
+                        <span style={{ fontSize:14, fontWeight:700 }}>{sym}</span>
+                        <span style={{ fontSize:10, fontFamily:'JetBrains Mono,monospace', padding:'2px 8px', borderRadius:5, background:'rgba(251,191,36,0.12)', color:'var(--amber)' }}>
+                          {items.length} triggered
+                        </span>
+                      </div>
+                      <div style={{ fontSize:10, fontFamily:'JetBrains Mono,monospace', color:'var(--text-muted)' }}>
+                        Last: {items[0]?.triggeredAt ? new Date(items[0].triggeredAt).toLocaleString('en-GB', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' }) : '—'}
+                      </div>
+                    </div>
+                    {isOpen && (
+                      <div style={{ borderTop:'1px solid var(--border)', display:'flex', flexDirection:'column' }}>
+                        {items.map(h => (
+                          <div key={h.id} style={{ display:'flex', alignItems:'center', gap:16, padding:'10px 18px 10px 42px', borderBottom:'1px solid rgba(255,255,255,0.03)' }}>
+                            <div style={{ width:6, height:6, borderRadius:'50%', background:h.color, flexShrink:0 }} />
+                            <div style={{ flex:1, fontSize:11, fontFamily:'JetBrains Mono,monospace', color:'var(--text-secondary)' }}>
+                              {typeLabel(h.typeKey)} · {h.condition} {h.target}
+                            </div>
+                            <div style={{ fontSize:10, fontFamily:'JetBrains Mono,monospace', color:'var(--text-muted)' }}>
+                              {h.triggeredAt ? new Date(h.triggeredAt).toLocaleString('en-GB', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' }) : '—'}
+                            </div>
+                            <button {...iconBtn(() => handleReset(h.id), 'Reset alert', 'var(--cyan)')}>↺</button>
+                            <button {...iconBtn(() => handleDelete(h.id, h.sym), 'Delete', 'var(--red)')}>🗑</button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
     </>
