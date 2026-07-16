@@ -104,7 +104,7 @@ function toYahooTicker(symbol) {
 
 /**
  * Devise de cotation d'un symbole — utilisée par le moteur de backtest
- * pour formater correctement les montants (avoid tout hardcoder en $).
+ * pour formater correctement les montants (éviter tout hardcoder en $).
  */
 function getQuoteCurrency(symbol, assetClass) {
   if (assetClass === 'forex') return symbol.split('/')[1]?.trim().toUpperCase() || 'USD';

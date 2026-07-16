@@ -16,6 +16,10 @@ const { runSimulation, aggregatePortfolio } = require('../services/backtestEngin
 
 const MAX_SYMBOLS = 8;
 
+/**
+ * Parse la valeur capital envoyée par le frontend.
+ * Le formulaire envoie une string formatée ("100,000") → on la nettoie.
+ */
 function parseCapital(raw) {
   if (typeof raw === 'number') return raw;
   const cleaned = String(raw || '100000').replace(/[^0-9.]/g, '');
@@ -23,6 +27,11 @@ function parseCapital(raw) {
   return Number.isFinite(value) && value > 0 ? value : 100000;
 }
 
+/**
+ * Le frontend envoie un univers de symboles séparés par virgule
+ * (ex: "SPY, QQQ, AAPL"). On garde jusqu'à MAX_SYMBOLS symboles uniques,
+ * dans l'ordre saisi par l'utilisateur.
+ */
 function parseUniverse(universe) {
   if (!universe) return [];
   const symbols = [...new Set(
@@ -141,6 +150,10 @@ async function runBacktest(req, res) {
   }
 }
 
+/**
+ * Récupère un backtest précédemment sauvegardé par son ID.
+ * Utile si le frontend veut recharger/partager un résultat.
+ */
 async function getBacktestById(req, res) {
   try {
     const userId = req.user.id;
@@ -148,7 +161,8 @@ async function getBacktestById(req, res) {
 
     const { rows } = await db.query(
       `SELECT id, symbol, strategy, result, created_at
-       FROM backtest_history WHERE id = $1 AND user_id = $2`,
+       FROM backtest_history
+       WHERE id = $1 AND user_id = $2`,
       [id, userId]
     );
 

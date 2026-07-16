@@ -15,6 +15,11 @@ const monoSm   = { fontFamily: 'JetBrains Mono,monospace', fontSize: 12 };
 const label10  = { fontSize: 10, letterSpacing: '.15em', textTransform: 'uppercase', fontFamily: 'JetBrains Mono,monospace', color: 'var(--text-muted)' };
 const panel    = { background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 14, padding: 22 };
 const baseOpts = { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } };
+
+// ── Formatage currency-aware ──────────────────────────────────────────
+// Le backend renvoie metrics.quoteCurrency (USD/EUR/GBP/...) et chaque
+// trade porte son propre tr.qc. Pour un portefeuille multi-devises,
+// le backend renvoie 'MIXED' (pas de symbole unique possible).
 const CURRENCY_SYMBOLS = { USD: '$', EUR: '€', GBP: '£', JPY: '¥', CHF: 'CHF ', AUD: 'A$', CAD: 'C$', MIXED: '' };
 
 function fmtAmount(value, currency = 'USD') {
@@ -38,8 +43,8 @@ export default function Backtester() {
   const [running, setRunning]   = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError]       = useState(null);
-  const [warning, setWarning] = useState(null);
-  const [skipped, setSkipped] = useState(null);
+  const [warning, setWarning]   = useState(null);
+  const [skipped, setSkipped]   = useState(null);
 
   // Si on arrive depuis Markets.jsx (clic sur un symbole), on pré-remplit
   // l'univers avec ce symbole plutôt que la liste par défaut.
@@ -60,7 +65,7 @@ export default function Backtester() {
   const [metrics, setMetrics] = useState({
     totalReturn: '0.0%', sharpe: '0.00', maxDrawdown: '0.0%',
     winRate: '0.0%', avgRR: '1:0.0', totalTrades: '0',
-    avgWin: '+$0', avgLoss: '−$0', avgHold: '0d'
+    avgWin: '+0', avgLoss: '-0', avgHold: '0d', quoteCurrency: 'USD'
   });
 
   const [backtestData, setBacktestData] = useState({
@@ -76,6 +81,8 @@ export default function Backtester() {
   const runBacktest = async () => {
     setRunning(true);
     setError(null);
+    setWarning(null);
+    setSkipped(null);
     setProgress(5);
 
     try {
@@ -102,6 +109,7 @@ export default function Backtester() {
       };
 
       const res = await api.post('/backtest', payload);
+
       clearInterval(progressInterval);
       const result = res.data;
 
@@ -118,6 +126,7 @@ export default function Backtester() {
           trades: result.trades || []
         });
       } else {
+        console.error('Backtest engine error:', result.error);
         setError(result.error || t('backtester.genericError'));
       }
     } catch (err) {
@@ -133,6 +142,8 @@ export default function Backtester() {
     runBacktest();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const qc = metrics.quoteCurrency || 'USD';
 
   const eqChartData = {
     labels: backtestData.stratData.map((_, i) => i),
@@ -159,7 +170,6 @@ export default function Backtester() {
     }],
   };
 
-  const qc = metrics.quoteCurrency || 'USD';
   const METRICS_LIST = [
     { key: 'totalReturn', v: metrics.totalReturn, c: 'var(--green)' },
     { key: 'sharpe',      v: metrics.sharpe,      c: 'var(--cyan)' },
@@ -217,6 +227,7 @@ export default function Backtester() {
         </div>
       )}
 
+      {/* ── Bandeau d'avertissement (fallback timeframe, symboles skippés) ── */}
       {warning && (
         <div style={{
           marginBottom: 16, padding: '12px 16px', borderRadius: 10,
@@ -225,7 +236,13 @@ export default function Backtester() {
           display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
         }}>
           <span>{warning}</span>
-          <button onClick={() => setWarning(null)} style={{ background: 'transparent', border: 'none', color: 'var(--amber)', cursor: 'pointer', fontSize: 14, lineHeight: 1 }} aria-label="dismiss">×</button>
+          <button
+            onClick={() => setWarning(null)}
+            style={{ background: 'transparent', border: 'none', color: 'var(--amber)', cursor: 'pointer', fontSize: 14, lineHeight: 1 }}
+            aria-label="dismiss"
+          >
+            ×
+          </button>
         </div>
       )}
 
@@ -247,6 +264,9 @@ export default function Backtester() {
               <input style={inpStyle} value={form[f.key]} onChange={set(f.key)} />
             </div>
           ))}
+          <div style={{ marginTop: -8, marginBottom: 14, fontSize: 10, color: 'var(--text-muted)', fontFamily: 'JetBrains Mono,monospace' }}>
+            Crypto, forex (EUR/USD) et commodities (GOLD, WTI...) supportés — max 8 symboles, capital équipondéré.
+          </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
             <div>
@@ -294,7 +314,8 @@ export default function Backtester() {
 
           <div style={{ height: 1, background: 'var(--border)', margin: '18px 0' }} />
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 16 }}>
+          {/* ── Position Size — connecté au backend (Fixed % / Fixed $ / Kelly) ── */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: form.posSizeMode !== 'kelly' ? 10 : 16 }}>
             <div>
               <div style={{ ...label10, marginBottom: 5 }}>{t('backtester.posSize')}</div>
               <select
@@ -325,8 +346,14 @@ export default function Backtester() {
               <input style={inpStyle} value={form.posSizeValue} onChange={set('posSizeValue')} />
             </div>
           ) : (
-            <div style={{ marginBottom: 16, fontSize: 10.5, color: 'var(--text-muted)', fontFamily: 'JetBrains Mono,monospace' }}>
-              Half-Kelly, auto-calculé après 5 trades clôturés (cap 25%)
+            <div style={{ marginBottom: 16, fontSize: 10.5, color: 'var(--text-muted)', fontFamily: 'JetBrains Mono,monospace', lineHeight: 1.5 }}>
+              Half-Kelly, auto-calculé à partir de 5 trades clôturés (cap 25% du capital). Avant ça, fallback sur 10% fixe.
+            </div>
+          )}
+
+          {skipped && skipped.length > 0 && (
+            <div style={{ marginBottom: 12, fontSize: 10, color: 'var(--text-muted)', fontFamily: 'JetBrains Mono,monospace' }}>
+              {skipped.length} symbole(s) ignoré(s) : {skipped.map(s => s.symbol).join(', ')}
             </div>
           )}
 
@@ -346,23 +373,7 @@ export default function Backtester() {
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          {skipped && skipped.length > 0 && (
-            <div
-              style={{
-                fontSize: 10,
-                color: 'var(--text-muted)',
-                marginBottom: 8,
-                padding: '10px 12px',
-                border: '1px solid var(--border)',
-                borderRadius: 8,
-                background: 'rgba(255,255,255,0.02)',
-                fontFamily: 'JetBrains Mono, monospace',
-              }}
-            >
-              {skipped.length} symbole(s) ignoré(s):{' '}
-              {skipped.map(s => s.symbol).join(', ')}
-            </div>
-          )}
+
           <div style={panel}>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 18, display: 'flex', alignItems: 'center', gap: 8 }}>
               <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--green)' }} />
@@ -396,7 +407,7 @@ export default function Backtester() {
               </div>
             </div>
             <div style={{ position: 'relative', height: 190 }}>
-              <Line data={eqChartData} options={{ ...baseOpts, animation: { duration: 1000 }, scales: { x: { display: false }, y: { grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { maxTicksLimit: 4, font: { size: 10 }, callback: v => fmtAmount(v, metrics.quoteCurrency) } } } }} />
+              <Line data={eqChartData} options={{ ...baseOpts, animation: { duration: 1000 }, scales: { x: { display: false }, y: { grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { maxTicksLimit: 4, font: { size: 10 }, callback: v => fmtAmount(v, qc) } } } }} />
             </div>
           </div>
 
@@ -453,7 +464,7 @@ export default function Backtester() {
                     </tr>
                   ) : (
                     backtestData.trades.map(tr => (
-                      <tr key={tr.n} style={{ borderBottom: '1px solid rgba(255,255,255,0.03)' }}>
+                      <tr key={`${tr.sym}-${tr.n}-${tr.exitDate}`} style={{ borderBottom: '1px solid rgba(255,255,255,0.03)' }}>
                         <td style={{ padding: '9px 12px', ...monoSm, color: 'var(--text-muted)' }}>{tr.n}</td>
                         <td style={{ padding: '9px 12px', ...monoSm }}>
                           <span style={{ background: 'rgba(0,245,212,0.08)', color: 'var(--cyan)', border: '1px solid rgba(0,245,212,0.15)', padding: '2px 7px', borderRadius: 4, fontSize: 10, fontWeight: 600 }}>{tr.sym}</span>
@@ -463,23 +474,9 @@ export default function Backtester() {
                             {tr.type || 'LONG'}
                           </span>
                         </td>
-                        <td style={{ padding: '9px 12px', ...monoSm }}>
-                          {fmtAmount(tr.entry, tr.qc)}
-                        </td>
-
-                        <td style={{ padding: '9px 12px', ...monoSm }}>
-                          {fmtAmount(tr.exit, tr.qc)}
-                        </td>
-
-                        <td
-                          style={{
-                            padding: '9px 12px',
-                            ...monoSm,
-                            color: tr.isW ? 'var(--green)' : 'var(--red)',
-                          }}
-                        >
-                          {fmtSigned(tr.pnl, tr.qc)}
-                        </td>
+                        <td style={{ padding: '9px 12px', ...monoSm }}>{fmtAmount(tr.entry, tr.qc)}</td>
+                        <td style={{ padding: '9px 12px', ...monoSm }}>{fmtAmount(tr.exit, tr.qc)}</td>
+                        <td style={{ padding: '9px 12px', ...monoSm, color: tr.isW ? 'var(--green)' : 'var(--red)' }}>{fmtSigned(tr.pnl, tr.qc)}</td>
                         <td style={{ padding: '9px 12px', ...monoSm, color: tr.isW ? 'var(--amber)' : 'var(--red)' }}>{tr.rr}</td>
                         <td style={{ padding: '9px 12px', ...monoSm, color: 'var(--text-secondary)' }}>{tr.dur}</td>
                       </tr>

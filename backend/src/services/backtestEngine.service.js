@@ -4,7 +4,16 @@
  * Le vrai moteur de backtest. Prend des bougies OHLCV et simule
  * l'exécution d'une stratégie candle par candle.
  *
- * STRATÉGIE PAR DÉFAUT (RSI Momentum Reversion) : voir commentaires plus bas.
+ * STRATÉGIE PAR DÉFAUT (RSI Momentum Reversion) :
+ *   Entrée (LONG) si TOUTES les conditions sont vraies :
+ *     - RSI(14) vient de croiser AU-DESSUS de 30 (sortie de survente)
+ *     - Prix > EMA(200) avec tolérance (emaTolerancePct)
+ *     - Volume > 1.5× moyenne des 20 derniers volumes (optionnel, voir
+ *       requireVolumeConfirmation)
+ *
+ *   Sortie :
+ *     - RSI(14) croise AU-DESSUS de 70 (zone de surachat) → take profit
+ *     - OU prix tombe à -5% du prix d'entrée            → stop loss
  *
  * NOUVEAU :
  *  - Position sizing paramétrable : Fixed % / Fixed $ / Kelly Criterion (half-Kelly)
@@ -34,7 +43,14 @@ const DEFAULT_PARAMS = {
   kellyMinTrades: 5,               // trades minimum avant d'activer Kelly (sinon fallback fixed_pct)
   kellyMaxFraction: 25,            // cap de sécurité (% du cash), half-Kelly déjà appliqué en amont
 
+  // Exiger un pic de volume EXACTEMENT sur la bougie de croisement RSI
+  // est très restrictif (3 événements indépendants doivent coïncider) —
+  // désactivé par défaut, sinon backtests à 0 trade sur Daily/4H.
   requireVolumeConfirmation: false,
+
+  // Tolérance autour de l'EMA200 (voir raisonnement dans le code d'origine :
+  // testé empiriquement, un vrai pullback creuse typiquement -2% à -16%
+  // sous l'EMA200 avant rebond).
   emaTolerancePct: 12,
 
   quoteCurrency: 'USD',            // devise de cotation du symbole (pour affichage frontend)
@@ -165,6 +181,7 @@ function runSimulation(candles, initialCapital = 100000, userParams = {}, symbol
     const vol = candles[i].volume || 0;
     const volAvg = avgVolume(candles, i, params.volumeLookback);
 
+    // ── Gestion de la position ouverte (vérifier sortie) ──────
     if (position) {
       const stopPrice = position.entryPrice * (1 - params.stopLossPct / 100);
       const rsiCrossUp70 = prevRsi !== null && prevRsi <= params.rsiOverbought && rsi > params.rsiOverbought;
@@ -197,6 +214,7 @@ function runSimulation(candles, initialCapital = 100000, userParams = {}, symbol
       }
     }
 
+    // ── Recherche d'un signal d'entrée (si pas déjà en position) ──
     if (!position && rsi !== null && ema !== null) {
       const rsiCrossUp30 = prevRsi !== null && prevRsi <= params.rsiOversold && rsi > params.rsiOversold;
       const aboveEma = price > ema * (1 - params.emaTolerancePct / 100);
@@ -212,6 +230,7 @@ function runSimulation(candles, initialCapital = 100000, userParams = {}, symbol
       }
     }
 
+    // ── Mise à jour des courbes ──
     const positionValue = position ? position.quantity * price : 0;
     const equity = cash + positionValue;
 
@@ -228,6 +247,7 @@ function runSimulation(candles, initialCapital = 100000, userParams = {}, symbol
     prevRsi = rsi;
   }
 
+  // Clôture forcée d'une position encore ouverte à la fin de la période
   if (position) {
     const lastPrice = closes[closes.length - 1];
     const pnl = (lastPrice - position.entryPrice) * position.quantity;
@@ -251,6 +271,7 @@ function runSimulation(candles, initialCapital = 100000, userParams = {}, symbol
     });
   }
 
+  // ── Calcul des métriques agrégées ──
   const finalEquity = equityCurve[equityCurve.length - 1] || initialCapital;
   const totalReturnPct = ((finalEquity - initialCapital) / initialCapital) * 100;
 
