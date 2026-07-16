@@ -1,6 +1,6 @@
 /**
  * src/services/email.service.js — AtlasQuant AI
- * Nodemailer + Gmail SMTP — 2 email templates
+ * Nodemailer + Gmail SMTP — 3 email templates
  */
 
 const nodemailer = require('nodemailer');
@@ -66,6 +66,13 @@ const BASE_STYLES = `
   /* Footer */
   .footer { margin-top:28px; text-align:center; font-size:11px; font-family:'JetBrains Mono',monospace; color:#334155; line-height:1.8; }
   .footer a { color:#475569; text-decoration:none; }
+
+  /* Digest-specific: table de résumé */
+  .digest-table { width:100%; border-collapse:collapse; margin-top:8px; }
+  .digest-table th { text-align:left; padding:10px 12px; font-size:10px; font-family:'JetBrains Mono',monospace; color:#475569; text-transform:uppercase; letter-spacing:.08em; border-bottom:1px solid #ffffff0f; }
+  .digest-table td { padding:12px; font-size:12px; font-family:'JetBrains Mono',monospace; color:#cbd5e1; border-bottom:1px solid #ffffff06; }
+  .digest-table tr:last-child td { border-bottom:none; }
+  .digest-count-badge { display:inline-flex; align-items:center; gap:8px; background:rgba(0,245,212,0.1); border:1px solid rgba(0,245,212,0.22); border-radius:8px; padding:8px 14px; margin-bottom:20px; }
 `;
 
 // ── TEMPLATE 1 — Alert Triggered ─────────────────────────
@@ -102,7 +109,6 @@ ${BASE_STYLES}
 <div class="outer">
   <div class="wrap">
 
-    <!-- Top bar -->
     <div class="topbar">
       <div>
         <div class="logo">Atlas<span>Quant</span> <span style="color:#475569;font-size:13px;font-weight:400">AI</span></div>
@@ -111,7 +117,6 @@ ${BASE_STYLES}
       <div style="font-size:11px;font-family:'JetBrains Mono',monospace;color:#334155">${new Date().toUTCString().slice(0,16)}</div>
     </div>
 
-    <!-- Card -->
     <div class="card">
       <div class="card-hero">
         <div class="hero-badge">
@@ -125,7 +130,6 @@ ${BASE_STYLES}
         </div>
         <div class="subtitle">Your alert condition has been met. Review the details below.</div>
 
-        <!-- Price block -->
         <div class="price-block">
           <div>
             <div style="font-size:11px;font-family:'JetBrains Mono',monospace;color:#64748b;letter-spacing:.1em;margin-bottom:6px">CURRENT PRICE</div>
@@ -139,7 +143,6 @@ ${BASE_STYLES}
       <div class="card-body">
         <div class="divider"></div>
 
-        <!-- Data rows -->
         <div class="data-grid">
           <div class="data-row">
             <div class="data-label">Symbol</div>
@@ -163,7 +166,6 @@ ${BASE_STYLES}
           </div>
         </div>
 
-        <!-- CTA -->
         <div class="cta-wrap">
           <a href="http://localhost:3000/alerts" class="cta-btn" style="background:${accentColor};color:#06060f">
             View Alerts Dashboard →
@@ -249,7 +251,6 @@ ${BASE_STYLES}
 <div class="outer">
   <div class="wrap">
 
-    <!-- Top bar -->
     <div class="topbar">
       <div>
         <div class="logo">Atlas<span>Quant</span> <span style="color:#475569;font-size:13px;font-weight:400">AI</span></div>
@@ -258,10 +259,8 @@ ${BASE_STYLES}
       <div style="font-size:11px;font-family:'JetBrains Mono',monospace;color:#334155">${new Date().toUTCString().slice(0,16)}</div>
     </div>
 
-    <!-- Card -->
     <div class="card">
 
-      <!-- Hero -->
       <div class="signal-hero">
         <div class="signal-badge">
           <div class="signal-badge-text">🤖 AI-Generated Signal</div>
@@ -275,7 +274,6 @@ ${BASE_STYLES}
         <div class="action-pill">${signalEmoji} ${action}</div>
       </div>
 
-      <!-- Confidence bar -->
       <div class="conf-section">
         <div class="divider"></div>
         <div class="conf-label-row">
@@ -287,7 +285,6 @@ ${BASE_STYLES}
         </div>
       </div>
 
-      <!-- Entry / SL / TP -->
       <div class="levels-grid">
         <div class="level-box">
           <div class="level-box-label">Entry</div>
@@ -304,7 +301,6 @@ ${BASE_STYLES}
       </div>
 
       <div class="card-body" style="padding-top:0">
-        <!-- R:R -->
         ${risk_reward ? `
         <div class="divider"></div>
         <div class="data-grid">
@@ -319,7 +315,6 @@ ${BASE_STYLES}
         </div>
         ` : ''}
 
-        <!-- Reasoning -->
         ${reasoning ? `
         <div style="margin-top:20px"></div>
         <div class="reasoning-box">
@@ -328,7 +323,6 @@ ${BASE_STYLES}
         </div>
         ` : ''}
 
-        <!-- CTA -->
         <div class="cta-wrap">
           <a href="http://localhost:3000/signals" class="cta-btn" style="background:${accentColor};color:#06060f">
             View Full Signal →
@@ -362,4 +356,106 @@ ${BASE_STYLES}
   logger.info(`[email] ✅ Signal email → ${to} (${symbol} ${signal} ${confidence}%)`);
 }
 
-module.exports = { sendAlertEmail, sendSignalEmail };
+// ── TEMPLATE 3 — Daily Digest ─────────────────────────────
+// ✅ Feature: résumé quotidien pour les alertes en mode email_frequency='digest'.
+// Reçoit `items` = lignes de alert_digest_queue non-envoyées pour ce user.
+async function sendDigestEmail({ to, name, items }) {
+  const condLabel = (c) => c === 'above' ? 'crossed above' : c === 'below' ? 'dropped below' : 'reached';
+
+  const rows = items.map(it => {
+    const target  = parseFloat(it.target)        || 0;
+    const current = parseFloat(it.current_price)  || 0;
+    const time    = it.triggered_at
+      ? new Date(it.triggered_at).toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit' })
+      : '—';
+    return `
+    <tr>
+      <td style="font-weight:700;color:#e2e8f0">${it.symbol}</td>
+      <td>${it.type || '—'}</td>
+      <td>${condLabel(it.condition)} $${target.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
+      <td style="color:#00f5d4">$${current.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
+      <td style="color:#64748b">${time}</td>
+    </tr>`;
+  }).join('');
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Daily Digest — AtlasQuant AI</title>
+<style>${BASE_STYLES}</style>
+</head>
+<body>
+<div class="outer">
+  <div class="wrap">
+
+    <div class="topbar">
+      <div>
+        <div class="logo">Atlas<span>Quant</span> <span style="color:#475569;font-size:13px;font-weight:400">AI</span></div>
+        <div class="logo-tag">Daily Digest</div>
+      </div>
+      <div style="font-size:11px;font-family:'JetBrains Mono',monospace;color:#334155">${new Date().toUTCString().slice(0,16)}</div>
+    </div>
+
+    <div class="card">
+      <div class="card-hero">
+        <div class="digest-count-badge">
+          <div style="width:8px;height:8px;border-radius:50%;background:#00f5d4"></div>
+          <div style="font-size:11px;font-family:'JetBrains Mono',monospace;color:#00f5d4;letter-spacing:.1em;text-transform:uppercase;font-weight:700">
+            ${items.length} Alert${items.length > 1 ? 's' : ''} Today
+          </div>
+        </div>
+        <div class="eyebrow">Daily Summary</div>
+        <div class="h1">
+          <span>Your alerts</span>
+          <span style="font-size:20px;font-weight:500;color:#94a3b8">from the last 24 hours</span>
+        </div>
+        <div class="subtitle">Hi ${name || 'there'}, here's everything that triggered while you were away.</div>
+      </div>
+
+      <div class="card-body">
+        <div class="divider"></div>
+        <table class="digest-table">
+          <thead>
+            <tr>
+              <th>Symbol</th><th>Type</th><th>Condition</th><th>Price</th><th>Time (UTC)</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+
+        <div class="cta-wrap">
+          <a href="http://localhost:3000/alerts" class="cta-btn" style="background:#00f5d4;color:#06060f">
+            View Alerts Dashboard →
+          </a>
+        </div>
+      </div>
+
+      <div class="card-footer-inner">
+        <div style="font-size:12px;color:#475569;font-family:'JetBrains Mono',monospace;text-align:center">
+          You're receiving this because your alerts are set to "daily digest" · AtlasQuant AI
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">
+      AtlasQuant AI &nbsp;·&nbsp; <a href="#">Manage Alerts</a> &nbsp;·&nbsp; <a href="#">Unsubscribe</a>
+    </div>
+
+  </div>
+</div>
+</body>
+</html>`;
+
+  await transporter.sendMail({
+    from:    `"AtlasQuant AI" <${process.env.EMAIL_USER}>`,
+    to,
+    subject: `📊 Daily Digest — ${items.length} alert${items.length > 1 ? 's' : ''} triggered`,
+    html,
+  });
+
+  logger.info(`[email] ✅ Digest email → ${to} (${items.length} item(s))`);
+}
+
+module.exports = { sendAlertEmail, sendSignalEmail, sendDigestEmail };

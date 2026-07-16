@@ -8,7 +8,7 @@ const { rateLimiter } = require('../middleware/rateLimit.middleware');
 const {
   getAlerts, getHistory, createAlert, updateAlert,
   deleteAlert, togglePause, snoozeAlert, resetAlert,
-  clearAllTriggered, markAsRead, markAllRead,
+  clearAllTriggered, markAsRead, markAllRead, setEmailFrequency,
 } = require('../controllers/alerts.controller');
 
 router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
@@ -33,5 +33,9 @@ router.patch('/:id/pause', protect, rateLimiter(30), togglePause);
 router.patch('/:id/snooze', protect, rateLimiter(20), snoozeAlert);
 
 router.patch('/:id/reset', protect, rateLimiter(30), resetAlert);
+
+// ✅ Feature: toggle rapide Instant/Digest depuis une card, sans passer par
+// l'édition complète — voir alertChecker.service.js pour la logique de queue.
+router.patch('/:id/email-frequency', protect, rateLimiter(30), setEmailFrequency);
 
 module.exports = router;

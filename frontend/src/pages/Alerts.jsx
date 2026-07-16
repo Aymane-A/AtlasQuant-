@@ -62,7 +62,18 @@ function playAlertBeep() {
 // (dark/neon), remplace window.confirm() natif qui cassait le style SaaS
 // (barre de titre "Code", boutons OS par défaut). Réutilisable pour
 // n'importe quelle action destructive dans l'app.
+// ✅ Fix Escape key: la touche Échap fermait tout SAUF ce modal — un
+// window.addEventListener('keydown') attaché tant que `open` est true,
+// nettoyé au démontage/fermeture pour ne pas empiler les listeners entre
+// plusieurs ouvertures successives du modal.
 function ConfirmModal({ open, title, message, confirmLabel = 'Confirm', danger = true, onConfirm, onCancel }) {
+  useEffect(() => {
+    if (!open) return;
+    const handleKey = (e) => { if (e.key === 'Escape') onCancel(); };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [open, onCancel]);
+
   if (!open) return null;
 
   return (
@@ -180,7 +191,9 @@ export default function Alerts() {
   // de risquer d'afficher la clé brute "alerts.typeAiSignal" non traduite.
   const typeLabel = key => key === 'typeAiSignal' ? 'AI Signal' : a(key);
 
-  const [form, setForm]         = useState({ symbol:'', type:'typePrice', condition:'above', value:'', notify:'once' });
+  // ✅ Feature: emailFrequency par défaut 'instant', bascule vers 'digest'
+  // via le toggle du formulaire (visible seulement si le channel email est actif).
+  const [form, setForm]         = useState({ symbol:'', type:'typePrice', condition:'above', value:'', notify:'once', emailFrequency:'instant' });
   const [channels, setChannels] = useState({ inapp:true, email:true, telegram:false, sms:false });
   const set = k => e => setForm(f => ({ ...f, [k]: e.target.value }));
   const toggleChannel = k => setChannels(c => ({ ...c, [k]: !c[k] }));
@@ -370,9 +383,7 @@ export default function Alerts() {
   };
 
   // ✅ Feature: Snooze — met l'alerte en pause pour une durée précise plutôt
-  // qu'indéfiniment. NÉCESSITE un endpoint backend PATCH /api/alerts/:id/snooze
-  // qui accepte { hours } et calcule paused_until = NOW() + hours. Voir note
-  // en fin de réponse pour le snippet à ajouter côté alerts.controller.js.
+  // qu'indéfiniment.
   const [snoozeMenuId, setSnoozeMenuId] = useState(null);
   const handleSnooze = async (id, hours) => {
     setSnoozeMenuId(null);
@@ -383,6 +394,18 @@ export default function Alerts() {
       setError('Failed to snooze alert — backend endpoint may be missing');
     }
   };
+
+  // ✅ Fix Escape key: le dropdown de snooze n'écoutait aucune touche —
+  // seul un click à l'extérieur (géré par les onMouseLeave/click ailleurs
+  // dans la page) le fermait. Même pattern que ConfirmModal: listener actif
+  // uniquement tant qu'un menu est ouvert (snoozeMenuId non-null), nettoyé
+  // à chaque changement pour éviter d'empiler les listeners entre les cards.
+  useEffect(() => {
+    if (snoozeMenuId === null) return;
+    const handleKey = (e) => { if (e.key === 'Escape') setSnoozeMenuId(null); };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [snoozeMenuId]);
 
   const handleReset = async (id) => {
     try { await alertsAPI.reset(id); loadAlerts(); loadHistory(); }
@@ -443,13 +466,26 @@ export default function Alerts() {
         symbol: form.symbol, type: form.type,
         condition: form.condition, value: form.value,
         notify: form.notify, channels: activeChannels,
+        emailFrequency: form.emailFrequency,
       });
       setSubmitted(true);
-      setForm({ symbol:'', type:'typePrice', condition:'above', value:'', notify:'once' });
+      setForm({ symbol:'', type:'typePrice', condition:'above', value:'', notify:'once', emailFrequency:'instant' });
       setChannels({ inapp:true, email:true, telegram:false, sms:false });
       loadAlerts();
     } catch (err) {
       setError(err?.response?.data?.error || 'Failed to create alert');
+    }
+  };
+
+  // ✅ Feature: toggle rapide Instant/Digest depuis une card active, sans
+  // passer par l'édition complète — appelle PATCH .../email-frequency
+  const handleToggleFrequency = async (id, current) => {
+    const next = current === 'digest' ? 'instant' : 'digest';
+    try {
+      await api.patch(`/alerts/${id}/email-frequency`, { emailFrequency: next });
+      loadAlerts();
+    } catch {
+      setError('Failed to update email frequency');
     }
   };
 
@@ -975,6 +1011,33 @@ export default function Alerts() {
                     ))}
                   </div>
                 </div>
+
+                {/* ✅ Feature: Instant vs Daily Digest, visible seulement si email actif */}
+                {channels.email && (
+                  <div style={{ background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:8, padding:'12px 14px' }}>
+                    <div style={{ fontSize:10, letterSpacing:'.1em', color:'var(--text-muted)', textTransform:'uppercase', fontFamily:'JetBrains Mono,monospace', marginBottom:10 }}>
+                      Email delivery
+                    </div>
+                    <div style={{ display:'flex', gap:4, background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:8, padding:3 }}>
+                      {[
+                        { val:'instant', label:'Instant',      desc:'Send right away' },
+                        { val:'digest',  label:'Daily digest', desc:'Bundle into 1 email/day' },
+                      ].map(o => (
+                        <button key={o.val} onClick={() => setForm(f => ({ ...f, emailFrequency:o.val }))}
+                          title={o.desc}
+                          style={{
+                            flex:1, padding:7, borderRadius:6, border:'none', cursor:'pointer',
+                            fontFamily:'JetBrains Mono,monospace', fontSize:11,
+                            background: form.emailFrequency===o.val ? 'rgba(0,245,212,0.12)' : 'transparent',
+                            color: form.emailFrequency===o.val ? 'var(--cyan)' : 'var(--text-secondary)',
+                          }}>
+                          {o.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 <button onClick={handleCreate} style={{ padding:12, borderRadius:8, border:'1px solid var(--cyan-dim)', background:'var(--cyan-glow)', color:'var(--cyan)', fontFamily:'Syne,sans-serif', fontSize:13, fontWeight:700, cursor:'pointer', letterSpacing:'.04em' }}>
                   {a('createBtn')}
                 </button>
@@ -1060,8 +1123,22 @@ export default function Alerts() {
                   <div style={{ height:'100%', width:`${card.pct}%`, background:card.color, borderRadius:2, transition:'width 1s ease' }} />
                 </div>
                 {/* Channel badges */}
-                <div style={{ display:'flex', gap:5, marginBottom:8 }}>
-                  {card.notifyEmail    && <span style={{ fontSize:9, fontFamily:'JetBrains Mono,monospace', padding:'2px 7px', borderRadius:4, background:'rgba(0,245,212,0.08)', color:'var(--cyan)', border:'1px solid var(--cyan-dim)' }}>📧 Email</span>}
+                <div style={{ display:'flex', gap:5, marginBottom:8, flexWrap:'wrap' }}>
+                  {card.notifyEmail && (
+                    <span
+                      onClick={() => handleToggleFrequency(card.id, card.emailFrequency)}
+                      title={card.emailFrequency === 'digest' ? 'Click to switch to instant' : 'Click to switch to daily digest'}
+                      style={{
+                        fontSize:9, fontFamily:'JetBrains Mono,monospace', padding:'2px 7px', borderRadius:4,
+                        background: card.emailFrequency === 'digest' ? 'rgba(167,139,250,0.1)' : 'rgba(0,245,212,0.08)',
+                        color: card.emailFrequency === 'digest' ? '#a78bfa' : 'var(--cyan)',
+                        border: `1px solid ${card.emailFrequency === 'digest' ? 'rgba(167,139,250,0.3)' : 'var(--cyan-dim)'}`,
+                        cursor:'pointer', userSelect:'none',
+                      }}
+                    >
+                      📧 {card.emailFrequency === 'digest' ? 'Digest' : 'Instant'}
+                    </span>
+                  )}
                   {card.notifyTelegram && <span style={{ fontSize:9, fontFamily:'JetBrains Mono,monospace', padding:'2px 7px', borderRadius:4, background:'rgba(99,102,241,0.08)', color:'#818cf8', border:'1px solid rgba(99,102,241,0.25)' }}>✈️ Telegram</span>}
                 </div>
                 <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', fontSize:11, fontFamily:'JetBrains Mono,monospace' }}>

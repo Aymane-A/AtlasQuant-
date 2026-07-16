@@ -25,20 +25,6 @@ function buildPoolConfig() {
   return { host, port: Number(port), database, user, password: String(password) };
 }
 
-// ✅ Fix pool exhaustion: max était à 10, ce qui suffisait à peine en usage normal
-// mais se vidait rapidement dès que le cron (scan crypto + forex/commo/indices,
-// checkAlerts toutes les minutes) tournait en même temps que le trafic frontend
-// (polling analytics/alerts/settings). Résultat : "Connection terminated due to
-// connection timeout" dès que les 10 connexions étaient toutes occupées plus de
-// 5s. On augmente la taille du pool et on garde un timeout raisonnable.
-//
-// ⚠️ DB_POOL_MAX est configurable via .env car la limite dépend de l'hébergeur
-// PostgreSQL (souvent bien plus basse sur les tiers gratuits : Render ~22,
-// Supabase free ~60 partagées, Neon/Railway variable). Si tu déploies avec
-// plusieurs instances de l'app, chaque instance a SON PROPRE pool — vérifie
-// (instances × DB_POOL_MAX) contre le max_connections réel de ta base avant
-// de passer en public/prod, sinon tu retrouveras le même timeout mais côté
-// hébergeur cette fois.
 const pool = new Pool({
   ...buildPoolConfig(),
   max: Number(process.env.DB_POOL_MAX) || 20,
@@ -48,7 +34,6 @@ const pool = new Pool({
 
 pool.on('error', (err) => logger.error(`[db] Pool error: ${err.message}`));
 
-// ── Monitoring léger : alerte si le pool approche de sa capacité max ──
 setInterval(() => {
   const { totalCount, idleCount, waitingCount } = pool;
   if (waitingCount > 0) {
@@ -251,6 +236,23 @@ async function migrate() {
       created_at  TIMESTAMPTZ  DEFAULT NOW()
     );
     CREATE INDEX IF NOT EXISTS idx_screener_presets_user ON screener_presets(user_id);
+
+    -- ✅ Feature: email digest queue — les alertes en mode 'digest' (email_frequency
+    -- sur la table alerts) atterrissent ici au lieu de partir en email instant.
+    -- Flushée 1x/jour par runDailyDigest() dans alertChecker.service.js.
+    CREATE TABLE IF NOT EXISTS alert_digest_queue (
+      id            SERIAL PRIMARY KEY,
+      user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      alert_id      INTEGER REFERENCES alerts(id) ON DELETE SET NULL,
+      symbol        TEXT    NOT NULL,
+      type          TEXT,
+      condition     TEXT,
+      target        NUMERIC,
+      current_price NUMERIC,
+      triggered_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      sent          BOOLEAN     NOT NULL DEFAULT FALSE
+    );
+    CREATE INDEX IF NOT EXISTS idx_digest_queue_unsent ON alert_digest_queue(user_id) WHERE sent = false;
   `);
 
   // ── Triggers ──────────────────────────────────────────────
@@ -285,20 +287,24 @@ async function migrate() {
     ALTER TABLE alerts ADD COLUMN IF NOT EXISTS notify_telegram BOOLEAN DEFAULT FALSE;
     ALTER TABLE alerts ADD COLUMN IF NOT EXISTS metadata        JSONB;
     ALTER TABLE alerts ADD COLUMN IF NOT EXISTS read BOOLEAN DEFAULT FALSE;
-
-    -- ✅ Fix: TIMESTAMPTZ au lieu de TIMESTAMP — tout le reste du schéma
-    -- (triggered_at, created_at, etc.) est en TIMESTAMPTZ. NOW() +
-    -- make_interval(...) produit un timestamptz ; comparer paused_until <=
-    -- NOW() avec une colonne TIMESTAMP réintroduirait le même type de bug
-    -- de timezone déjà rencontré avec node-postgres sur les colonnes DATE.
     ALTER TABLE alerts ADD COLUMN IF NOT EXISTS paused_until TIMESTAMPTZ;
+
+    -- ✅ Feature: mode d'envoi email par alerte — 'instant' (défaut, comportement
+    -- actuel) ou 'digest' (accumulée dans alert_digest_queue, envoyée 1x/jour).
+    -- CHECK plutôt que TEXT libre: évite qu'une valeur non gérée par
+    -- alertChecker.service.js se glisse silencieusement dans la colonne.
+    ALTER TABLE alerts ADD COLUMN IF NOT EXISTS email_frequency VARCHAR(10) NOT NULL DEFAULT 'instant';
+    DO $$ BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'alerts_email_frequency_check'
+      ) THEN
+        ALTER TABLE alerts ADD CONSTRAINT alerts_email_frequency_check
+          CHECK (email_frequency IN ('instant','digest'));
+      END IF;
+    END $$;
 
     ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS signal_alert_mode    VARCHAR(10) NOT NULL DEFAULT 'all';
     ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS signal_alert_symbols JSONB       NOT NULL DEFAULT '[]'::jsonb;
-
-    -- ✅ Feature: seuil de confiance minimum pour les alertes AI
-    -- auto-générées. Séparé du reste des colonnes signal_alert_* pour
-    -- rester cohérent avec la validation côté controller (clamp 50-95).
     ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS signal_alert_min_confidence INTEGER NOT NULL DEFAULT 75;
 
     ALTER TABLE signals ADD COLUMN IF NOT EXISTS asset_class TEXT NOT NULL DEFAULT 'Crypto';
@@ -310,7 +316,6 @@ async function migrate() {
   logger.info('[db] ✅ Tables PostgreSQL prêtes');
 }
 
-// ── Run migration — non-fatal ─────────────────────────────
 migrate().catch((err) => {
   logger.error(`[db] Migration failed: ${err.message}`);
 });

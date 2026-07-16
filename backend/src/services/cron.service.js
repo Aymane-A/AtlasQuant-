@@ -5,7 +5,7 @@
 const cron                          = require('node-cron');
 const { scanAll }                   = require('./signalGenerator.service');
 const { scanAllYF }                 = require('./yahooFinance.service');
-const { checkAlerts }               = require('./alertChecker.service');
+const { checkAlerts, runDailyDigest } = require('./alertChecker.service');
 const { checkSignalAlerts }         = require('./signalAlert.service');
 const { takePortfolioSnapshot }     = require('./portfolioSnapshot.service');
 const paperTradeMonitor             = require('./paperTradeMonitor.service');
@@ -67,6 +67,21 @@ const initCronJobs = () => {
   // ── Alert price checker every minute ───────────────────
   cron.schedule('* * * * *', async () => {
     await checkAlerts();
+  });
+
+  // ── Daily email digest at 08:00 ────────────────────────
+  // ✅ Feature: flush alert_digest_queue vers un email récapitulatif par
+  // utilisateur, pour les alertes en mode email_frequency='digest'
+  // (voir alertChecker.service.js + alerts.controller.js/setEmailFrequency).
+  // Heure serveur — adapte le cron pattern si le serveur ne tourne pas en UTC.
+  cron.schedule('0 8 * * *', async () => {
+    logger.info('[cron] Running daily alert digest...');
+    try {
+      await runDailyDigest();
+      logger.info('[cron] ✅ Daily digest processed');
+    } catch (err) {
+      logger.error(`[cron] Digest error: ${err.message}`);
+    }
   });
 
   // ── Daily portfolio snapshot at midnight ───────────────

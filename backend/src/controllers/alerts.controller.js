@@ -1,7 +1,7 @@
 /**
  * src/controllers/alerts.controller.js — AtlasQuant AI
  * Full version: live prices, delete, pause, snooze, reset, edit,
- * pagination, read tracking, history
+ * pagination, read tracking, history, email digest mode
  */
 
 const db     = require('../config/db');
@@ -49,6 +49,10 @@ const YF_MAP = {
 // éviter qu'un body malformé/malveillant ne pousse un paused_until absurde
 // (ex. hours=99999 ou négatif).
 const SNOOZE_ALLOWED_HOURS = [1, 4, 24];
+
+// ✅ Feature: modes d'envoi email acceptés — cohérent avec le CHECK constraint
+// alerts_email_frequency_check ajouté en migration.
+const EMAIL_FREQUENCY_ALLOWED = ['instant', 'digest'];
 
 function normalizeForexSymbol(sym) {
   if (!sym) return sym;
@@ -160,7 +164,7 @@ async function getAlerts(req, res) {
 
     const { rows: alerts } = await db.query(`
       SELECT id, symbol, type, condition, target, triggered, paused, paused_until,
-             notify_email, notify_telegram, triggered_at, created_at
+             notify_email, notify_telegram, email_frequency, triggered_at, created_at
       FROM alerts WHERE user_id = $1 ORDER BY created_at DESC
     `, [userId]);
 
@@ -229,6 +233,7 @@ async function getAlerts(req, res) {
         near,
         notifyEmail:    a.notify_email,
         notifyTelegram: a.notify_telegram,
+        emailFrequency: a.email_frequency || 'instant',
       };
     });
 
@@ -313,7 +318,7 @@ async function getHistory(req, res) {
 async function createAlert(req, res) {
   try {
     const userId = req.user.id;
-    const { symbol, type, condition, value, channels = [] } = req.body;
+    const { symbol, type, condition, value, channels = [], emailFrequency } = req.body;
     const dbType = TYPE_MAP[type] || type;
 
     if (!symbol || !dbType || !value) {
@@ -322,12 +327,15 @@ async function createAlert(req, res) {
 
     const notifyEmail    = channels.includes('email');
     const notifyTelegram = channels.includes('telegram');
+    // ✅ Feature: whitelist stricte, même pattern que SNOOZE_ALLOWED_HOURS —
+    // évite qu'une valeur non gérée par alertChecker.service.js se glisse en base.
+    const freq = EMAIL_FREQUENCY_ALLOWED.includes(emailFrequency) ? emailFrequency : 'instant';
 
     const { rows } = await db.query(`
-      INSERT INTO alerts (user_id, symbol, type, condition, target, notify_email, notify_telegram)
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
-      RETURNING id, symbol, type, condition, target, notify_email, notify_telegram, triggered, created_at
-    `, [userId, symbol.toUpperCase(), dbType, condition || 'above', value, notifyEmail, notifyTelegram]);
+      INSERT INTO alerts (user_id, symbol, type, condition, target, notify_email, notify_telegram, email_frequency)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING id, symbol, type, condition, target, notify_email, notify_telegram, email_frequency, triggered, created_at
+    `, [userId, symbol.toUpperCase(), dbType, condition || 'above', value, notifyEmail, notifyTelegram, freq]);
 
     res.status(201).json({ success: true, alert: rows[0] });
   } catch (err) {
@@ -356,7 +364,7 @@ async function updateAlert(req, res) {
       UPDATE alerts
       SET symbol = $1, type = $2, condition = $3, target = $4
       WHERE id = $5 AND user_id = $6
-      RETURNING id, symbol, type, condition, target, notify_email, notify_telegram, triggered, created_at
+      RETURNING id, symbol, type, condition, target, notify_email, notify_telegram, email_frequency, triggered, created_at
     `, [symbol.toUpperCase(), dbType, condition || 'above', value, alertId, userId]);
 
     if (rowCount === 0) return res.status(404).json({ success: false, error: 'Alert not found' });
@@ -519,10 +527,40 @@ async function clearAllTriggered(req, res) {
   }
 }
 
+// ── PATCH /api/alerts/:id/email-frequency ─────────────────
+// ✅ Feature: toggle rapide Instant/Digest depuis une card active, sans passer
+// par l'édition complète (qui exige symbol/type/condition/value tous présents).
+// Les alertes déjà en queue (alert_digest_queue, sent=false) au moment du
+// switch instant→digest ou digest→instant ne sont pas rétroactivement
+// affectées — seuls les futurs déclenchements suivent le nouveau mode.
+async function setEmailFrequency(req, res) {
+  try {
+    const userId  = req.user.id;
+    const alertId = parseInt(req.params.id, 10);
+    const { emailFrequency } = req.body;
+
+    if (!EMAIL_FREQUENCY_ALLOWED.includes(emailFrequency)) {
+      return res.status(400).json({ success: false, error: `emailFrequency must be one of: ${EMAIL_FREQUENCY_ALLOWED.join(', ')}` });
+    }
+
+    const { rows, rowCount } = await db.query(`
+      UPDATE alerts SET email_frequency = $1
+      WHERE id = $2 AND user_id = $3
+      RETURNING email_frequency
+    `, [emailFrequency, alertId, userId]);
+
+    if (rowCount === 0) return res.status(404).json({ success: false, error: 'Alert not found' });
+    res.json({ success: true, emailFrequency: rows[0].email_frequency });
+  } catch (err) {
+    logger.error(`[alerts.controller] SetEmailFrequency Error: ${err.message}`);
+    res.status(500).json({ success: false, error: 'Failed to update email frequency' });
+  }
+}
+
 module.exports = {
   getAlerts, getHistory, createAlert, updateAlert, deleteAlert,
   togglePause, snoozeAlert, resetAlert, clearAllTriggered,
-  markAsRead, markAllRead,
+  markAsRead, markAllRead, setEmailFrequency,
 };
 
 // ── Refactor note ─────────────────────────────────────────
