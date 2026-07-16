@@ -49,8 +49,6 @@ const pool = new Pool({
 pool.on('error', (err) => logger.error(`[db] Pool error: ${err.message}`));
 
 // ── Monitoring léger : alerte si le pool approche de sa capacité max ──
-// Permet de repérer une saturation avant qu'elle ne cause des timeouts, sans
-// avoir besoin d'un outil de monitoring externe.
 setInterval(() => {
   const { totalCount, idleCount, waitingCount } = pool;
   if (waitingCount > 0) {
@@ -288,11 +286,22 @@ async function migrate() {
     ALTER TABLE alerts ADD COLUMN IF NOT EXISTS metadata        JSONB;
     ALTER TABLE alerts ADD COLUMN IF NOT EXISTS read BOOLEAN DEFAULT FALSE;
 
+    -- ✅ Fix: TIMESTAMPTZ au lieu de TIMESTAMP — tout le reste du schéma
+    -- (triggered_at, created_at, etc.) est en TIMESTAMPTZ. NOW() +
+    -- make_interval(...) produit un timestamptz ; comparer paused_until <=
+    -- NOW() avec une colonne TIMESTAMP réintroduirait le même type de bug
+    -- de timezone déjà rencontré avec node-postgres sur les colonnes DATE.
+    ALTER TABLE alerts ADD COLUMN IF NOT EXISTS paused_until TIMESTAMPTZ;
+
     ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS signal_alert_mode    VARCHAR(10) NOT NULL DEFAULT 'all';
     ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS signal_alert_symbols JSONB       NOT NULL DEFAULT '[]'::jsonb;
 
+    -- ✅ Feature: seuil de confiance minimum pour les alertes AI
+    -- auto-générées. Séparé du reste des colonnes signal_alert_* pour
+    -- rester cohérent avec la validation côté controller (clamp 50-95).
+    ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS signal_alert_min_confidence INTEGER NOT NULL DEFAULT 75;
+
     ALTER TABLE signals ADD COLUMN IF NOT EXISTS asset_class TEXT NOT NULL DEFAULT 'Crypto';
-    ALTER TABLE alerts ADD COLUMN IF NOT EXISTS paused_until TIMESTAMP;
   `);
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_signals_asset_class ON signals(asset_class);

@@ -1,6 +1,7 @@
 /**
  * src/controllers/alerts.controller.js — AtlasQuant AI
- * Full version: live prices, delete, pause, snooze, reset, history, read tracking
+ * Full version: live prices, delete, pause, snooze, reset, edit,
+ * pagination, read tracking, history
  */
 
 const db     = require('../config/db');
@@ -147,10 +148,13 @@ async function releaseExpiredSnoozes(userId) {
   }
 }
 
-// ── GET /api/alerts ───────────────────────────────────────
+// ── GET /api/alerts?feedLimit=10 ──────────────────────────
 async function getAlerts(req, res) {
   try {
-    const userId = req.user.id;
+    const userId    = req.user.id;
+    // ✅ Feature: pagination du feed — 10 par défaut, "Load more" renvoie
+    // juste une LIMIT plus grande (pas d'offset, pas de doublons de page).
+    const feedLimit = Math.min(parseInt(req.query.feedLimit, 10) || 10, 200);
 
     await releaseExpiredSnoozes(userId);
 
@@ -173,8 +177,8 @@ async function getAlerts(req, res) {
     const { rows: triggered } = await db.query(`
       SELECT id, symbol, type, condition, target, triggered_at, metadata, read
       FROM alerts WHERE user_id = $1 AND triggered = true
-      ORDER BY triggered_at DESC LIMIT 10
-    `, [userId]);
+      ORDER BY triggered_at DESC LIMIT $2
+    `, [userId, feedLimit]);
 
     const notifications = triggered.map(r => {
       const content = buildNotificationContent(r);
@@ -211,6 +215,11 @@ async function getAlerts(req, res) {
         id:             a.id,
         sym:            a.symbol,
         typeKey:        TYPE_LABELS[a.type] || a.type,
+        // ✅ Feature (Edit/Duplicate): valeurs brutes pour pré-remplir le
+        // formulaire — `cur`/`target` ci-dessous sont déjà formatés pour
+        // l'affichage et inutilisables tels quels dans un <input>.
+        condition:      a.condition,
+        targetValue:    target,
         cur:            currentPrice
           ? `$${currentPrice.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 })}`
           : '—',
@@ -223,6 +232,20 @@ async function getAlerts(req, res) {
       };
     });
 
+    // ✅ Feature: cards pausées/snoozées séparées, avec pausedUntil pour
+    // affichage countdown côté frontend ("Resumes in 3h20").
+    const pausedCards = alerts
+      .filter(a => a.paused)
+      .map(a => ({
+        id:          a.id,
+        sym:         a.symbol,
+        typeKey:     TYPE_LABELS[a.type] || a.type,
+        condition:   a.condition,
+        targetValue: parseFloat(a.target) || 0,
+        snoozed:     !!a.paused_until,
+        pausedUntil: a.paused_until,
+      }));
+
     res.json({
       success: true,
       stats: {
@@ -232,7 +255,9 @@ async function getAlerts(req, res) {
         paused:    parseInt(s.paused,    10) || 0,
       },
       notifications,
+      hasMoreNotifications: feedLimit < (parseInt(s.triggered, 10) || 0),
       alerts: alertCards,
+      pausedAlerts: pausedCards,
     });
   } catch (err) {
     logger.error(`[alerts.controller] Get Error: ${err.message}`);
@@ -240,11 +265,11 @@ async function getAlerts(req, res) {
   }
 }
 
-// ── GET /api/alerts/history ───────────────────────────────
+// ── GET /api/alerts/history?limit=50 ──────────────────────
 async function getHistory(req, res) {
   try {
     const userId = req.user.id;
-    const limit  = parseInt(req.query.limit, 10) || 50;
+    const limit  = Math.min(parseInt(req.query.limit, 10) || 50, 500);
 
     const { rows } = await db.query(`
       SELECT id, symbol, type, condition, target, triggered_at, created_at,
@@ -254,6 +279,11 @@ async function getHistory(req, res) {
       ORDER BY triggered_at DESC
       LIMIT $2
     `, [userId, limit]);
+
+    // ✅ Feature: total count pour savoir s'il faut afficher "Load more"
+    const { rows: [c] } = await db.query(`
+      SELECT COUNT(*)::int AS total FROM alerts WHERE user_id = $1 AND triggered = true
+    `, [userId]);
 
     const history = rows.map(r => {
       const isAiSignal = r.type === 'ai_signal';
@@ -272,7 +302,7 @@ async function getHistory(req, res) {
       };
     });
 
-    res.json({ success: true, history });
+    res.json({ success: true, history, total: c.total, hasMore: limit < c.total });
   } catch (err) {
     logger.error(`[alerts.controller] History Error: ${err.message}`);
     res.status(500).json({ success: false, error: 'Failed to fetch history' });
@@ -303,6 +333,37 @@ async function createAlert(req, res) {
   } catch (err) {
     logger.error(`[alerts.controller] Create Error: ${err.message}`);
     res.status(500).json({ success: false, error: 'Failed to create alert' });
+  }
+}
+
+// ── PATCH /api/alerts/:id ─────────────────────────────────
+// ✅ Feature: Edit alert — modifie symbol/type/condition/target d'une alerte
+// existante sans devoir la supprimer et en recréer une. Les canaux de notif
+// (email/telegram) ne sont volontairement pas touchés ici — ils restent ceux
+// définis à la création (édition limitée aux specs de déclenchement).
+async function updateAlert(req, res) {
+  try {
+    const userId  = req.user.id;
+    const alertId = parseInt(req.params.id, 10);
+    const { symbol, type, condition, value } = req.body;
+    const dbType = TYPE_MAP[type] || type;
+
+    if (!symbol || !dbType || !value) {
+      return res.status(400).json({ success: false, error: 'symbol, type, and value are required' });
+    }
+
+    const { rows, rowCount } = await db.query(`
+      UPDATE alerts
+      SET symbol = $1, type = $2, condition = $3, target = $4
+      WHERE id = $5 AND user_id = $6
+      RETURNING id, symbol, type, condition, target, notify_email, notify_telegram, triggered, created_at
+    `, [symbol.toUpperCase(), dbType, condition || 'above', value, alertId, userId]);
+
+    if (rowCount === 0) return res.status(404).json({ success: false, error: 'Alert not found' });
+    res.json({ success: true, alert: rows[0] });
+  } catch (err) {
+    logger.error(`[alerts.controller] Update Error: ${err.message}`);
+    res.status(500).json({ success: false, error: 'Failed to update alert' });
   }
 }
 
@@ -353,6 +414,11 @@ async function togglePause(req, res) {
 // que les stats/filtres déjà en place la traitent naturellement comme
 // "Paused", + paused_until pour savoir quand la relever automatiquement
 // (voir releaseExpiredSnoozes, appelé à chaque GET /api/alerts).
+//
+// ✅ Fix vs version précédente: `NOW() + ($1 || ' hours')::interval` plantait
+// avec "operator does not exist: integer || text" — $1 arrive en integer côté
+// pg, pas en text, donc || (concat text) ne matchait aucun opérateur. Remplacé
+// par make_interval(hours => $1), qui prend directement un integer.
 async function snoozeAlert(req, res) {
   try {
     const userId  = req.user.id;
@@ -365,7 +431,7 @@ async function snoozeAlert(req, res) {
 
     const { rows, rowCount } = await db.query(`
       UPDATE alerts
-      SET paused = true, paused_until = NOW() + ($1 || ' hours')::interval
+      SET paused = true, paused_until = NOW() + make_interval(hours => $1)
       WHERE id = $2 AND user_id = $3
       RETURNING paused, paused_until
     `, [hours, alertId, userId]);
@@ -454,7 +520,7 @@ async function clearAllTriggered(req, res) {
 }
 
 module.exports = {
-  getAlerts, getHistory, createAlert, deleteAlert,
+  getAlerts, getHistory, createAlert, updateAlert, deleteAlert,
   togglePause, snoozeAlert, resetAlert, clearAllTriggered,
   markAsRead, markAllRead,
 };

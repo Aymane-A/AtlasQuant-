@@ -18,7 +18,7 @@ async function getSettings(req, res) {
     const { rows: settingsRows } = await db.query(
       `SELECT theme, notifications, api_keys_enabled,
               default_capital, default_risk_pct, default_timeframe,
-              signal_alert_mode, signal_alert_symbols
+              signal_alert_mode, signal_alert_symbols, signal_alert_min_confidence
        FROM user_settings WHERE user_id = $1`,
       [userId]
     );
@@ -34,6 +34,7 @@ async function getSettings(req, res) {
       // pour les comptes existants sans préférence explicite).
       signal_alert_mode: 'all',
       signal_alert_symbols: [],
+      signal_alert_min_confidence: 75,
     };
 
     res.json({ success: true, profile: userRows[0] || {}, settings });
@@ -97,7 +98,7 @@ async function updateSettings(req, res) {
     }
 
     // ✅ Feature: préférences d'alertes AI auto-générées (signalAlert.service.js)
-    // payload: { mode: 'all' | 'custom', symbols: ['BTCUSDT','AAPL','EURUSD',...] }
+    // payload: { mode: 'all' | 'custom', symbols: ['BTCUSDT','AAPL','EURUSD',...], minConfidence: 50-95 }
     // 'symbols' est une liste libre de tickers précis choisis par l'utilisateur,
     // pas des classes d'actifs — l'utilisateur tape exactement ce qu'il veut suivre.
     if (section === 'signalAlerts') {
@@ -112,16 +113,25 @@ async function updateSettings(req, res) {
         return res.status(400).json({ success: false, error: 'Add at least one symbol to follow' });
       }
 
+      // ✅ Feature: seuil de confiance — on clamp au lieu de rejeter, car
+      // c'est un slider continu côté UI (step 5, 50→95), pas un choix parmi
+      // des valeurs fixes comme SNOOZE_ALLOWED_HOURS. Tolère un léger écart
+      // (ex. 73) plutôt que de renvoyer une erreur 400 pour ça.
+      let minConfidence = parseInt(payload.minConfidence, 10);
+      if (!Number.isFinite(minConfidence)) minConfidence = 75;
+      minConfidence = Math.min(95, Math.max(50, minConfidence));
+
       await db.query(
-        `INSERT INTO user_settings (user_id, signal_alert_mode, signal_alert_symbols)
-         VALUES ($1, $2, $3)
+        `INSERT INTO user_settings (user_id, signal_alert_mode, signal_alert_symbols, signal_alert_min_confidence)
+         VALUES ($1, $2, $3, $4)
          ON CONFLICT (user_id) DO UPDATE SET
-           signal_alert_mode    = EXCLUDED.signal_alert_mode,
-           signal_alert_symbols = EXCLUDED.signal_alert_symbols,
-           updated_at           = NOW()`,
-        [userId, mode, JSON.stringify(symbols)]
+           signal_alert_mode           = EXCLUDED.signal_alert_mode,
+           signal_alert_symbols        = EXCLUDED.signal_alert_symbols,
+           signal_alert_min_confidence = EXCLUDED.signal_alert_min_confidence,
+           updated_at                  = NOW()`,
+        [userId, mode, JSON.stringify(symbols), minConfidence]
       );
-      return res.json({ success: true, message: 'Préférences d\'alertes mises à jour', mode, symbols });
+      return res.json({ success: true, message: 'Préférences d\'alertes mises à jour', mode, symbols, minConfidence });
     }
 
     return res.status(400).json({ success: false, error: `Section inconnue: ${section}` });

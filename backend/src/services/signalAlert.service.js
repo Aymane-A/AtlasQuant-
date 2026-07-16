@@ -8,12 +8,15 @@ const logger                = require('../utils/logger');
 const { sendAlertEmail }    = require('./email.service');
 const { sendTelegramAlert } = require('./telegram.service');
 
-const MIN_CONFIDENCE = 75; // Only alert on signals >= 75% confidence
+// ✅ Fix: MIN_CONFIDENCE était un seuil global fixe (75%), identique pour
+// tout le monde — impossible à changer depuis le slider "Minimum confidence"
+// ajouté dans Alerts.jsx (signal_alert_min_confidence, 50-95, par user).
+// GLOBAL_FLOOR_CONFIDENCE reste comme plancher de requête SQL (le seuil le
+// plus permissif possible, 50%, correspond au min du slider) — le filtrage
+// précis par utilisateur se fait ensuite dans la boucle, par user.minConfidence.
+const GLOBAL_FLOOR_CONFIDENCE = 50;
+const DEFAULT_MIN_CONFIDENCE  = 75; // fallback si un user n'a jamais réglé le slider
 
-// ✅ Feature: tokens spéciaux qu'un utilisateur peut ajouter à sa liste de
-// symboles suivis pour couvrir toute une classe d'actifs d'un coup, sans
-// devoir taper chaque ticker un par un (ex. "ALL_CRYPTO" au lieu de BTC,
-// ETH, SOL, ... un par un).
 const CLASS_WILDCARDS = {
   ALL_CRYPTO:    'Crypto',
   ALL_FOREX:     'Forex',
@@ -21,13 +24,6 @@ const CLASS_WILDCARDS = {
   ALL_INDICES:   'Indices',
 };
 
-// ✅ Fix: fenêtre de cooldown par symbole. `signals` est une table insert-only
-// (chaque scan crée une nouvelle ligne avec un nouvel id, même pour un signal
-// quasi identique). L'ancien dedup comparait sur `id`, qui est TOUJOURS
-// différent d'un scan à l'autre — résultat : une alerte + email + Telegram à
-// chaque cycle de scan pour le même symbole (ex. FILUSDT alerté 5 fois dans
-// la même journée avec des confidences à peine différentes). Le dedup se fait
-// maintenant sur symbole + fenêtre de temps, indépendamment de l'id du signal.
 const ALERT_COOLDOWN_HOURS = 12;
 
 // ── Email template for AI signals ────────────────────────
@@ -146,15 +142,18 @@ async function sendSignalTelegram({ symbol, signal, confidence, entry, stop_loss
 // ── Main: check new high-confidence signals ───────────────
 async function checkSignalAlerts() {
   try {
-    // ✅ Feature: on récupère aussi les préférences d'alertes AI de chaque
-    // utilisateur (signal_alert_mode: 'all'|'custom', signal_alert_symbols:
-    // liste de tickers précis suivis en mode 'custom', ex. ["BTCUSDT","AAPL"]).
-    // Définies via POST /api/settings/update { section:'signalAlerts', payload:{mode,symbols} }.
+    // ✅ Fix: on récupère aussi signal_alert_min_confidence par utilisateur —
+    // avant, le seuil était le même (75%, MIN_CONFIDENCE) pour tout le
+    // monde, quel que soit ce que l'utilisateur avait réglé sur son slider
+    // dans Alerts.jsx. COALESCE à DEFAULT_MIN_CONFIDENCE pour les comptes
+    // qui n'ont jamais touché au slider (colonne existe mais valeur par
+    // défaut DB déjà à 75, ce COALESCE est une deuxième sécurité).
     const { rows: users } = await db.query(`
       SELECT u.id, u.email, u.name,
-             COALESCE(us.notifications, true)         AS notifications,
-             COALESCE(us.signal_alert_mode, 'all')     AS alert_mode,
-             COALESCE(us.signal_alert_symbols, '[]'::jsonb) AS alert_symbols
+             COALESCE(us.notifications, true)              AS notifications,
+             COALESCE(us.signal_alert_mode, 'all')          AS alert_mode,
+             COALESCE(us.signal_alert_symbols, '[]'::jsonb) AS alert_symbols,
+             COALESCE(us.signal_alert_min_confidence, ${DEFAULT_MIN_CONFIDENCE}) AS min_confidence
       FROM users u
       LEFT JOIN user_settings us ON us.user_id = u.id
       WHERE COALESCE(us.notifications, true) = true
@@ -162,13 +161,12 @@ async function checkSignalAlerts() {
 
     if (users.length === 0) return;
 
-    // ✅ Fix: DISTINCT ON (symbol) — si plusieurs scans dans les 4 dernières
-    // heures ont produit plusieurs signaux pour le même symbole (cron +
-    // refresh manuel par ex.), on ne garde que le plus confiant, pas un par
-    // ligne. Le dedup global par symbole a été retiré d'ici et déplacé au
-    // niveau utilisateur (voir recentSet plus bas) — plus correct pour un
-    // système multi-utilisateurs : chaque utilisateur a son propre cooldown,
-    // indépendant des alertes déjà envoyées à quelqu'un d'autre.
+    // ✅ Fix: la requête SQL filtre maintenant sur GLOBAL_FLOOR_CONFIDENCE
+    // (50%, le seuil le plus bas possible côté slider) plutôt que sur
+    // l'ancien MIN_CONFIDENCE fixe à 75%. Sinon, un utilisateur ayant réglé
+    // son seuil à 50% ou 60% ne recevrait jamais les signaux entre 50% et
+    // 74% — ils étaient filtrés avant même d'arriver jusqu'à la boucle
+    // per-user ci-dessous.
     const { rows: signals } = await db.query(`
       SELECT DISTINCT ON (symbol)
              id, symbol, signal, confidence, price, entry,
@@ -179,14 +177,10 @@ async function checkSignalAlerts() {
         AND created_at >= NOW() - INTERVAL '4 hours'
       ORDER BY symbol, confidence DESC, created_at DESC
       LIMIT 30
-    `, [MIN_CONFIDENCE]);
+    `, [GLOBAL_FLOOR_CONFIDENCE]);
 
     if (signals.length === 0) return;
 
-    // ✅ Fix: une seule requête pour récupérer tous les cooldowns actifs
-    // (user_id + symbol) plutôt qu'une requête par combinaison utilisateur ×
-    // signal — évite de spammer la DB, et sert aussi de garde anti-doublon
-    // pour la même exécution (on ajoute au Set dès l'insertion décidée).
     const { rows: recentAlerts } = await db.query(`
       SELECT user_id, symbol FROM alerts
       WHERE type = 'ai_signal' AND created_at >= NOW() - ($1 || ' hours')::INTERVAL
@@ -197,12 +191,12 @@ async function checkSignalAlerts() {
 
     for (const sig of signals) {
       for (const user of users) {
-        // ✅ Feature: si l'utilisateur a choisi "custom", on ignore les
-        // signaux dont le symbole n'est pas dans sa liste — sauf si un
-        // wildcard de classe (ALL_CRYPTO/ALL_FOREX/ALL_COMMODITY/ALL_INDICES)
-        // couvre la classe d'actifs du signal. Comparaison insensible à la
-        // casse (le symbole en DB est déjà en majuscules, mais on normalise
-        // au cas où).
+        // ✅ Fix: seuil de confiance propre à chaque utilisateur — un signal
+        // à 68% de confiance passe pour un user réglé à 50%, mais est ignoré
+        // pour un user réglé à 75%, même si le signal a déjà passé le floor
+        // SQL global.
+        if (sig.confidence < user.min_confidence) continue;
+
         if (user.alert_mode === 'custom') {
           const raw = Array.isArray(user.alert_symbols)
             ? user.alert_symbols
@@ -245,14 +239,12 @@ async function checkSignalAlerts() {
           reasoning:   sig.reasoning,
         };
 
-        // Send email
         try {
           await sendSignalEmail({ to: user.email, ...payload });
         } catch (e) {
           logger.error(`[signalAlert] Email failed: ${e.message}`);
         }
 
-        // Send Telegram
         try {
           await sendSignalTelegram(payload);
         } catch (e) {

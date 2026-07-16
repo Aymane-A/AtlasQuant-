@@ -15,6 +15,21 @@ const monoSm   = { fontFamily: 'JetBrains Mono,monospace', fontSize: 12 };
 const label10  = { fontSize: 10, letterSpacing: '.15em', textTransform: 'uppercase', fontFamily: 'JetBrains Mono,monospace', color: 'var(--text-muted)' };
 const panel    = { background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 14, padding: 22 };
 const baseOpts = { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } };
+const CURRENCY_SYMBOLS = { USD: '$', EUR: '€', GBP: '£', JPY: '¥', CHF: 'CHF ', AUD: 'A$', CAD: 'C$', MIXED: '' };
+
+function fmtAmount(value, currency = 'USD') {
+  const sym = CURRENCY_SYMBOLS[currency] ?? '';
+  const num = parseFloat(value);
+  return `${sym}${Number.isFinite(num) ? num.toLocaleString(undefined, { maximumFractionDigits: 2 }) : value}`;
+}
+
+function fmtSigned(str, currency = 'USD') {
+  if (!str) return str;
+  const sign = str[0] === '+' || str[0] === '-' ? str[0] : '';
+  const rest = str.replace(/^[+-]/, '');
+  const sym = CURRENCY_SYMBOLS[currency] ?? '';
+  return `${sign}${sym}${rest}`;
+}
 
 export default function Backtester() {
   const { t } = useTranslation();
@@ -23,6 +38,8 @@ export default function Backtester() {
   const [running, setRunning]   = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError]       = useState(null);
+  const [warning, setWarning] = useState(null);
+  const [skipped, setSkipped] = useState(null);
 
   // Si on arrive depuis Markets.jsx (clic sur un symbole), on pré-remplit
   // l'univers avec ce symbole plutôt que la liste par défaut.
@@ -36,6 +53,8 @@ export default function Backtester() {
     tf: '4H',
     capital: '100,000',
     maxPos: '5',
+    posSizeMode: 'fixed_pct',   // 'fixed_pct' | 'fixed_dollar' | 'kelly'
+    posSizeValue: '10',
   });
 
   const [metrics, setMetrics] = useState({
@@ -78,16 +97,19 @@ export default function Backtester() {
         to: form.to,
         capital: form.capital,
         maxPos: form.maxPos,
+        positionSizeMode: form.posSizeMode,
+        positionSizeValue: form.posSizeValue,
       };
 
       const res = await api.post('/backtest', payload);
-
       clearInterval(progressInterval);
       const result = res.data;
 
       if (result.success) {
         setProgress(100);
         setMetrics(result.metrics);
+        setWarning(result.warning || null);
+        setSkipped(result.skipped || null);
         setBacktestData({
           stratData: result.charts?.stratData || [],
           bhData: result.charts?.bhData || [],
@@ -96,7 +118,6 @@ export default function Backtester() {
           trades: result.trades || []
         });
       } else {
-        console.error('Backtest engine error:', result.error);
         setError(result.error || t('backtester.genericError'));
       }
     } catch (err) {
@@ -138,6 +159,7 @@ export default function Backtester() {
     }],
   };
 
+  const qc = metrics.quoteCurrency || 'USD';
   const METRICS_LIST = [
     { key: 'totalReturn', v: metrics.totalReturn, c: 'var(--green)' },
     { key: 'sharpe',      v: metrics.sharpe,      c: 'var(--cyan)' },
@@ -145,8 +167,8 @@ export default function Backtester() {
     { key: 'winRate',     v: metrics.winRate,     c: 'var(--amber)' },
     { key: 'avgRR',       v: metrics.avgRR,       c: 'var(--purple-bright)' },
     { key: 'totalTrades', v: metrics.totalTrades, c: 'var(--text-primary)' },
-    { key: 'avgWin',      v: metrics.avgWin,      c: 'var(--green)' },
-    { key: 'avgLoss',     v: metrics.avgLoss,     c: 'var(--red)' },
+    { key: 'avgWin',      v: fmtSigned(metrics.avgWin, qc),  c: 'var(--green)' },
+    { key: 'avgLoss',     v: fmtSigned(metrics.avgLoss, qc), c: 'var(--red)' },
     { key: 'avgHold',     v: metrics.avgHold,     c: 'var(--cyan)' },
   ];
 
@@ -192,6 +214,18 @@ export default function Backtester() {
           >
             ×
           </button>
+        </div>
+      )}
+
+      {warning && (
+        <div style={{
+          marginBottom: 16, padding: '12px 16px', borderRadius: 10,
+          background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.25)',
+          color: 'var(--amber)', fontSize: 12, fontFamily: 'JetBrains Mono,monospace',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+        }}>
+          <span>{warning}</span>
+          <button onClick={() => setWarning(null)} style={{ background: 'transparent', border: 'none', color: 'var(--amber)', cursor: 'pointer', fontSize: 14, lineHeight: 1 }} aria-label="dismiss">×</button>
         </div>
       )}
 
@@ -263,10 +297,18 @@ export default function Backtester() {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 16 }}>
             <div>
               <div style={{ ...label10, marginBottom: 5 }}>{t('backtester.posSize')}</div>
-              <select style={{ ...inpStyle, color: 'var(--text-secondary)' }}>
-                <option>Fixed 10%</option>
-                <option>Kelly Criterion</option>
-                <option>Fixed $</option>
+              <select
+                style={{ ...inpStyle, color: 'var(--text-secondary)' }}
+                value={form.posSizeMode}
+                onChange={e => setForm(f => ({
+                  ...f,
+                  posSizeMode: e.target.value,
+                  posSizeValue: e.target.value === 'fixed_dollar' ? '1000' : '10',
+                }))}
+              >
+                <option value="fixed_pct">Fixed %</option>
+                <option value="kelly">Kelly Criterion</option>
+                <option value="fixed_dollar">Fixed $</option>
               </select>
             </div>
             <div>
@@ -274,6 +316,19 @@ export default function Backtester() {
               <input style={inpStyle} value={form.maxPos} onChange={set('maxPos')} />
             </div>
           </div>
+
+          {form.posSizeMode !== 'kelly' ? (
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ ...label10, marginBottom: 5 }}>
+                {form.posSizeMode === 'fixed_dollar' ? '$ par trade' : '% du capital par trade'}
+              </div>
+              <input style={inpStyle} value={form.posSizeValue} onChange={set('posSizeValue')} />
+            </div>
+          ) : (
+            <div style={{ marginBottom: 16, fontSize: 10.5, color: 'var(--text-muted)', fontFamily: 'JetBrains Mono,monospace' }}>
+              Half-Kelly, auto-calculé après 5 trades clôturés (cap 25%)
+            </div>
+          )}
 
           {running && (
             <div style={{ height: 3, background: 'var(--border)', borderRadius: 2, overflow: 'hidden', marginBottom: 12 }}>
@@ -291,7 +346,23 @@ export default function Backtester() {
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-
+          {skipped && skipped.length > 0 && (
+            <div
+              style={{
+                fontSize: 10,
+                color: 'var(--text-muted)',
+                marginBottom: 8,
+                padding: '10px 12px',
+                border: '1px solid var(--border)',
+                borderRadius: 8,
+                background: 'rgba(255,255,255,0.02)',
+                fontFamily: 'JetBrains Mono, monospace',
+              }}
+            >
+              {skipped.length} symbole(s) ignoré(s):{' '}
+              {skipped.map(s => s.symbol).join(', ')}
+            </div>
+          )}
           <div style={panel}>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 18, display: 'flex', alignItems: 'center', gap: 8 }}>
               <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--green)' }} />
@@ -325,7 +396,7 @@ export default function Backtester() {
               </div>
             </div>
             <div style={{ position: 'relative', height: 190 }}>
-              <Line data={eqChartData} options={{ ...baseOpts, animation: { duration: 1000 }, scales: { x: { display: false }, y: { grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { maxTicksLimit: 4, font: { size: 10 }, callback: v => '$' + Math.round(v).toLocaleString() } } } }} />
+              <Line data={eqChartData} options={{ ...baseOpts, animation: { duration: 1000 }, scales: { x: { display: false }, y: { grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { maxTicksLimit: 4, font: { size: 10 }, callback: v => fmtAmount(v, metrics.quoteCurrency) } } } }} />
             </div>
           </div>
 
@@ -392,9 +463,23 @@ export default function Backtester() {
                             {tr.type || 'LONG'}
                           </span>
                         </td>
-                        <td style={{ padding: '9px 12px', ...monoSm }}>${parseFloat(tr.entry).toLocaleString()}</td>
-                        <td style={{ padding: '9px 12px', ...monoSm }}>${parseFloat(tr.exit).toLocaleString()}</td>
-                        <td style={{ padding: '9px 12px', ...monoSm, color: tr.isW ? 'var(--green)' : 'var(--red)' }}>{tr.pnl}</td>
+                        <td style={{ padding: '9px 12px', ...monoSm }}>
+                          {fmtAmount(tr.entry, tr.qc)}
+                        </td>
+
+                        <td style={{ padding: '9px 12px', ...monoSm }}>
+                          {fmtAmount(tr.exit, tr.qc)}
+                        </td>
+
+                        <td
+                          style={{
+                            padding: '9px 12px',
+                            ...monoSm,
+                            color: tr.isW ? 'var(--green)' : 'var(--red)',
+                          }}
+                        >
+                          {fmtSigned(tr.pnl, tr.qc)}
+                        </td>
                         <td style={{ padding: '9px 12px', ...monoSm, color: tr.isW ? 'var(--amber)' : 'var(--red)' }}>{tr.rr}</td>
                         <td style={{ padding: '9px 12px', ...monoSm, color: 'var(--text-secondary)' }}>{tr.dur}</td>
                       </tr>

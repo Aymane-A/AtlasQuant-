@@ -1,23 +1,21 @@
 /**
  * src/controllers/backtest.controller.js
  *
- * Remplace l'ancienne version mock. Le flux réel est :
- *   1. Valider les paramètres reçus du frontend
- *   2. Récupérer l'historique OHLCV via backtestMarketRouter (Binance ou Yahoo)
- *   3. Lancer la simulation via backtestEngine.service
- *   4. Sauvegarder le résultat en base
- *   5. Renvoyer { success, backtestId, metrics, charts, trades }
+ * Flux réel multi-symbole :
+ *   1. Parser l'univers (1 à 8 symboles, crypto/forex/commodity/equity mixés)
+ *   2. Fetch parallèle des candles par symbole (backtestMarketRouter)
+ *   3. Simulation par symbole, capital équipondéré (backtestEngine)
+ *   4. Agrégation portefeuille (backtestEngine.aggregatePortfolio)
+ *   5. Sauvegarde + réponse { success, metrics, charts, trades, warning, skipped }
  */
 
 const db = require('../config/db');
 const logger = require('../utils/logger');
 const { fetchCandlesForBacktest } = require('../services/backtestMarketRouter.service');
-const { runSimulation } = require('../services/backtestEngine.service');
+const { runSimulation, aggregatePortfolio } = require('../services/backtestEngine.service');
 
-/**
- * Parse la valeur capital envoyée par le frontend.
- * Le formulaire envoie une string formatée ("100,000") → on la nettoie.
- */
+const MAX_SYMBOLS = 8;
+
 function parseCapital(raw) {
   if (typeof raw === 'number') return raw;
   const cleaned = String(raw || '100000').replace(/[^0-9.]/g, '');
@@ -25,37 +23,40 @@ function parseCapital(raw) {
   return Number.isFinite(value) && value > 0 ? value : 100000;
 }
 
+function parseUniverse(universe) {
+  if (!universe) return [];
+  const symbols = [...new Set(
+    String(universe).split(',').map(s => s.trim()).filter(Boolean)
+  )];
+  return symbols.slice(0, MAX_SYMBOLS);
+}
+
 /**
- * Le frontend envoie un univers de symboles séparés par virgule
- * (ex: "SPY, QQQ, AAPL"). Pour l'instant le moteur backtest
- * un seul symbole à la fois : on prend le premier de la liste.
- * (Le multi-symbole pourra être ajouté plus tard en bouclant ici.)
+ * Traduit la config "Position Size" du formulaire vers les params du moteur.
  */
-function extractPrimarySymbol(universe) {
-  if (!universe) return null;
-  const first = String(universe).split(',')[0].trim();
-  return first || null;
+function resolvePositionSizing(body) {
+  const mode = body.positionSizeMode;
+  if (mode === 'fixed_dollar') {
+    return { positionSizeMode: 'fixed_dollar', positionSizeDollar: parseCapital(body.positionSizeValue) };
+  }
+  if (mode === 'kelly') {
+    return { positionSizeMode: 'kelly' };
+  }
+  const pct = parseFloat(body.positionSizeValue);
+  return { positionSizeMode: 'fixed_pct', positionSizePct: Number.isFinite(pct) && pct > 0 ? pct : 10 };
 }
 
 async function runBacktest(req, res) {
   try {
     const userId = req.user.id;
-    const {
-      name,
-      universe,
-      from,
-      to,
-      tf,
-      capital,
-      maxPos,
-    } = req.body;
+    const { name, universe, from, to, tf, capital, maxPos } = req.body;
 
-    const symbol = extractPrimarySymbol(universe);
+    const symbols = parseUniverse(universe);
 
-    if (!symbol || !from || !to) {
+    if (symbols.length === 0 || !from || !to) {
       return res.status(400).json({
         success: false,
-        error: 'Paramètres manquants : universe (symbole), from et to sont requis',
+        error: 'Paramètres manquants : universe (au moins un symbole), from et to sont requis',
       });
     }
 
@@ -66,50 +67,69 @@ async function runBacktest(req, res) {
       });
     }
 
-    logger.info(`[Backtest] Démarrage pour user ${userId} — ${symbol} (${tf || 'Daily'}) du ${from} au ${to}`);
+    const initialCapitalTotal = parseCapital(capital);
+    const capitalPerSymbol = initialCapitalTotal / symbols.length;
+    const positionSizing = resolvePositionSizing(req.body);
 
-    // ── 1. Récupération des données historiques (crypto → Binance, stock → Yahoo) ──
-    const { candles, warning, effectiveTimeframe } = await fetchCandlesForBacktest(
-      symbol, tf || 'Daily', from, to
-    );
+    logger.info(`[Backtest] Démarrage pour user ${userId} — [${symbols.join(', ')}] (${tf || 'Daily'}) du ${from} au ${to}`);
 
-    if (!candles || candles.length < 50) {
+    // ── 1 & 2. Fetch + simulation en parallèle, par symbole ──
+    const settled = await Promise.allSettled(symbols.map(async symbol => {
+      const { candles, warning, effectiveTimeframe, assetClass, quoteCurrency } =
+        await fetchCandlesForBacktest(symbol, tf || 'Daily', from, to);
+
+      if (!candles || candles.length < 50) {
+        throw new Error(`Données insuffisantes pour ${symbol} (${candles?.length || 0} bougies récupérées, 50 minimum).`);
+      }
+
+      const result = runSimulation(candles, capitalPerSymbol, {
+        maxPositions: parseInt(maxPos) || 5,
+        ...positionSizing,
+        quoteCurrency,
+      }, symbol);
+
+      return { symbol, assetClass, warning, effectiveTimeframe, ...result };
+    }));
+
+    const succeeded = settled.filter(s => s.status === 'fulfilled').map(s => s.value);
+    const skipped = settled
+      .map((s, idx) => (s.status === 'rejected' ? { symbol: symbols[idx], reason: s.reason.message } : null))
+      .filter(Boolean);
+
+    if (succeeded.length === 0) {
       return res.status(422).json({
         success: false,
-        error: `Données insuffisantes pour ${symbol} sur cette période (${candles?.length || 0} bougies récupérées, 50 minimum).`,
+        error: `Aucun symbole n'a pu être backtesté. ${skipped.map(s => `${s.symbol}: ${s.reason}`).join(' | ')}`,
       });
     }
 
-    // ── 2. Simulation ──
-    const initialCapital = parseCapital(capital);
-    const result = runSimulation(candles, initialCapital, {
-      maxPositions: parseInt(maxPos) || 5,
-    }, symbol);
+    // ── 3. Agrégation portefeuille ──
+    const { metrics, charts, trades } = aggregatePortfolio(succeeded, initialCapitalTotal);
 
-    // ── 3. Sauvegarde en base ──
-    const query = `
-      INSERT INTO backtest_history (user_id, symbol, strategy, result, created_at)
-      VALUES ($1, $2, $3, $4, NOW())
-      RETURNING id
-    `;
+    const warnings = succeeded.filter(r => r.warning).map(r => r.warning);
+    if (skipped.length > 0) {
+      warnings.push(`Symboles ignorés (données insuffisantes) : ${skipped.map(s => s.symbol).join(', ')}.`);
+    }
+
+    // ── 4. Sauvegarde en base ──
     const strategyName = name || 'RSI Momentum Reversion';
-    const { rows } = await db.query(query, [
-      userId,
-      symbol,
-      strategyName,
-      JSON.stringify(result),
-    ]);
+    const { rows } = await db.query(
+      `INSERT INTO backtest_history (user_id, symbol, strategy, result, created_at)
+       VALUES ($1, $2, $3, $4, NOW()) RETURNING id`,
+      [userId, symbols.join(','), strategyName, JSON.stringify({ metrics, charts, trades })]
+    );
 
-    logger.info(`[Backtest] Terminé — ${result.trades.length} trades, return ${result.metrics.totalReturn}`);
+    logger.info(`[Backtest] Terminé — ${trades.length} trades (last 10), return ${metrics.totalReturn}, ${skipped.length} symbole(s) skippé(s)`);
 
     return res.status(200).json({
       success: true,
       backtestId: rows[0].id,
-      metrics: result.metrics,
-      charts: result.charts,
-      trades: result.trades,
-      warning: warning || undefined,
-      effectiveTimeframe,
+      symbols,
+      metrics,
+      charts,
+      trades,
+      warning: warnings.length > 0 ? warnings.join(' ') : undefined,
+      skipped: skipped.length > 0 ? skipped : undefined,
     });
 
   } catch (err) {
@@ -121,10 +141,6 @@ async function runBacktest(req, res) {
   }
 }
 
-/**
- * Récupère un backtest précédemment sauvegardé par son ID.
- * Utile si le frontend veut recharger/partager un résultat.
- */
 async function getBacktestById(req, res) {
   try {
     const userId = req.user.id;
@@ -132,8 +148,7 @@ async function getBacktestById(req, res) {
 
     const { rows } = await db.query(
       `SELECT id, symbol, strategy, result, created_at
-       FROM backtest_history
-       WHERE id = $1 AND user_id = $2`,
+       FROM backtest_history WHERE id = $1 AND user_id = $2`,
       [id, userId]
     );
 

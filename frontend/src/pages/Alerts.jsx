@@ -870,7 +870,7 @@ export default function Alerts() {
             <div style={{ fontSize:10, letterSpacing:'.12em', color:'var(--text-secondary)', textTransform:'uppercase', fontFamily:'JetBrains Mono,monospace', marginBottom:10 }}>
               {a(k.labelKey)}
             </div>
-            <div style={{ fontSize:28, fontWeight:700, color:k.color }}>{k.v}</div>
+            <div style={{ fontSize:28, fontWeight:700, color:k.color, fontFamily:'JetBrains Mono,monospace', fontVariantNumeric:'tabular-nums' }}>{k.v}</div>
           </div>
         ))}
       </div>
