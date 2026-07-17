@@ -13,8 +13,10 @@
  *
  * Il normalise la sortie vers un format unique :
  *   [{ date, open, high, low, close, volume }, ...]
- * et renvoie en plus l'asset class détectée + la devise de cotation,
- * utilisées en aval par le moteur pour l'affichage (formatage $/€/¥...).
+ * et renvoie en plus l'asset class détectée + la devise de cotation +
+ * fallbackApplied (true si le timeframe demandé a été rétrogradé vers
+ * Daily faute de couverture intraday Yahoo). Le controller agrège ces
+ * flags en UN SEUL message de warning au lieu d'un message par symbole.
  */
 
 const logger = require('../utils/logger');
@@ -148,7 +150,7 @@ function estimateCandleCount(timeframe, startDate, endDate) {
  * Point d'entrée unique utilisé par le Backtester (appelé une fois par
  * symbole — le contrôleur boucle sur l'univers demandé).
  *
- * @returns {Promise<{ candles, warning, effectiveTimeframe, assetClass, quoteCurrency }>}
+ * @returns {Promise<{ candles, effectiveTimeframe, fallbackApplied, assetClass, quoteCurrency }>}
  */
 async function fetchCandlesForBacktest(symbol, timeframe, startDate, endDate) {
   const assetClass = detectAssetClass(symbol);
@@ -174,8 +176,8 @@ async function fetchCandlesForBacktest(symbol, timeframe, startDate, endDate) {
 
     return {
       candles: (filtered.length > 0 ? filtered : candles).map(normalizeCryptoCandle),
-      warning: null,
       effectiveTimeframe: timeframe,
+      fallbackApplied: false,
       assetClass,
       quoteCurrency,
     };
@@ -183,14 +185,14 @@ async function fetchCandlesForBacktest(symbol, timeframe, startDate, endDate) {
 
   // Forex / commodity / equity → toutes via Yahoo Finance
   let effectiveTimeframe = timeframe;
-  let warning = null;
+  let fallbackApplied = false;
 
   if (needsDailyFallback(timeframe, startDate)) {
     logger.info(
       `[backtestMarketRouter] ${symbol} — période trop ancienne pour ${timeframe} (limite Yahoo: ${YAHOO_INTRADAY_LOOKBACK_DAYS}j), fallback vers Daily`
     );
     effectiveTimeframe = 'Daily';
-    warning = `Le timeframe ${timeframe} n'est disponible que sur les ${YAHOO_INTRADAY_LOOKBACK_DAYS} derniers jours pour ${symbol}. Le backtest a été exécuté en Daily à la place.`;
+    fallbackApplied = true;
   }
 
   const yahooTicker = toYahooTicker(symbol);
@@ -201,7 +203,7 @@ async function fetchCandlesForBacktest(symbol, timeframe, startDate, endDate) {
     throw new Error(`Aucune donnée Yahoo Finance pour ${symbol} (ticker: ${yahooTicker})`);
   }
 
-  return { candles, warning, effectiveTimeframe, assetClass, quoteCurrency };
+  return { candles, effectiveTimeframe, fallbackApplied, assetClass, quoteCurrency };
 }
 
 module.exports = {

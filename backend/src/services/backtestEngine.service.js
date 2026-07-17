@@ -1,67 +1,48 @@
 /**
  * src/services/backtestEngine.service.js
  *
- * Le vrai moteur de backtest. Prend des bougies OHLCV et simule
- * l'exécution d'une stratégie candle par candle.
- *
- * STRATÉGIE PAR DÉFAUT (RSI Momentum Reversion) :
- *   Entrée (LONG) si TOUTES les conditions sont vraies :
- *     - RSI(14) vient de croiser AU-DESSUS de 30 (sortie de survente)
- *     - Prix > EMA(200) avec tolérance (emaTolerancePct)
- *     - Volume > 1.5× moyenne des 20 derniers volumes (optionnel, voir
- *       requireVolumeConfirmation)
- *
- *   Sortie :
- *     - RSI(14) croise AU-DESSUS de 70 (zone de surachat) → take profit
- *     - OU prix tombe à -5% du prix d'entrée            → stop loss
- *
- * NOUVEAU :
- *  - Position sizing paramétrable : Fixed % / Fixed $ / Kelly Criterion (half-Kelly)
- *  - Formatage currency-agnostic (params.quoteCurrency), affiché côté frontend
- *  - aggregatePortfolio() : combine plusieurs runSimulation() (multi-symbole)
- *    en un seul résultat de portefeuille équipondéré
+ * Moteur de backtest générique — la logique d'entrée/sortie vient
+ * maintenant de backtestStrategies.service.js (registry). Ce fichier
+ * gère uniquement ce qui est commun à TOUTES les stratégies :
+ * bookkeeping des trades, equity curve, position sizing, métriques,
+ * et agrégation multi-symbole (portefeuille équipondéré).
  */
 
-const { calculateRSI } = require('../utils/calculateRSI');
-const { calculateEMA } = require('../utils/movingAverage');
+const { STRATEGIES } = require('./backtestStrategies.service');
 const logger = require('../utils/logger');
 
 const DEFAULT_PARAMS = {
+  // ── Stratégie ──
+  strategyId: 'rsi_momentum',
+
+  // Params RSI Momentum Reversion
   rsiPeriod: 14,
   rsiOversold: 30,
   rsiOverbought: 70,
   emaPeriod: 200,
   volumeMultiplier: 1.5,
   volumeLookback: 20,
+  requireVolumeConfirmation: false,
+  emaTolerancePct: 12,
+
+  // Params MACD Crossover
+  macdFast: 12,
+  macdSlow: 26,
+  macdSignal: 9,
+
+  // Risque partagé entre toutes les stratégies
   stopLossPct: 5,
   maxPositions: 5,
 
   // ── Position sizing ──
   positionSizeMode: 'fixed_pct',   // 'fixed_pct' | 'fixed_dollar' | 'kelly'
-  positionSizePct: 10,             // % du cash dispo, mode fixed_pct
-  positionSizeDollar: 1000,        // montant fixe par trade, mode fixed_dollar
-  kellyMinTrades: 5,               // trades minimum avant d'activer Kelly (sinon fallback fixed_pct)
-  kellyMaxFraction: 25,            // cap de sécurité (% du cash), half-Kelly déjà appliqué en amont
+  positionSizePct: 10,
+  positionSizeDollar: 1000,
+  kellyMinTrades: 5,
+  kellyMaxFraction: 25,
 
-  // Exiger un pic de volume EXACTEMENT sur la bougie de croisement RSI
-  // est très restrictif (3 événements indépendants doivent coïncider) —
-  // désactivé par défaut, sinon backtests à 0 trade sur Daily/4H.
-  requireVolumeConfirmation: false,
-
-  // Tolérance autour de l'EMA200 (voir raisonnement dans le code d'origine :
-  // testé empiriquement, un vrai pullback creuse typiquement -2% à -16%
-  // sous l'EMA200 avant rebond).
-  emaTolerancePct: 12,
-
-  quoteCurrency: 'USD',            // devise de cotation du symbole (pour affichage frontend)
+  quoteCurrency: 'USD',
 };
-
-function avgVolume(candles, endIndex, lookback) {
-  const start = Math.max(0, endIndex - lookback);
-  const slice = candles.slice(start, endIndex);
-  if (slice.length === 0) return 0;
-  return slice.reduce((sum, c) => sum + (c.volume || 0), 0) / slice.length;
-}
 
 function calculateSharpe(returns, periodsPerYear = 252) {
   if (returns.length < 2) return 0;
@@ -109,14 +90,7 @@ function calculateMaxDrawdown(equityCurve) {
 }
 
 /**
- * Détermine combien allouer au prochain trade selon le mode choisi.
- *  - fixed_pct    : % fixe du cash disponible
- *  - fixed_dollar : montant fixe, plafonné au cash disponible
- *  - kelly        : half-Kelly calculé sur les trades déjà clôturés dans
- *                    CE backtest (walk-forward). Tant qu'il n'y a pas
- *                    assez d'historique (kellyMinTrades) ou pas encore de
- *                    perte pour calculer un ratio R/R, on retombe sur
- *                    fixed_pct par prudence.
+ * Position sizing — indépendant de la stratégie de trading.
  */
 function computePositionAllocation(cash, params, closedTrades) {
   if (params.positionSizeMode === 'fixed_dollar') {
@@ -133,30 +107,35 @@ function computePositionAllocation(cash, params, closedTrades) {
 
       if (avgLoss > 0) {
         const rr = avgWin / avgLoss;
-        // f* = W - (1-W)/R — puis half-Kelly (moitié de la fraction pleine)
-        // car le Kelly plein est notoirement trop volatil en pratique.
-        let fraction = Math.max(0, (winRate - (1 - winRate) / rr) * 0.5);
+        let fraction = Math.max(0, (winRate - (1 - winRate) / rr) * 0.5); // half-Kelly
         fraction = Math.min(fraction, params.kellyMaxFraction / 100);
         return cash * fraction;
       }
     }
-    return cash * (params.positionSizePct / 100); // fallback prudent
+    return cash * (params.positionSizePct / 100);
   }
 
-  return cash * (params.positionSizePct / 100); // fixed_pct par défaut
+  return cash * (params.positionSizePct / 100);
 }
 
+/**
+ * Lance la simulation. Générique : la logique d'entrée/sortie est
+ * déléguée à la stratégie sélectionnée via params.strategyId.
+ */
 function runSimulation(candles, initialCapital = 100000, userParams = {}, symbol = 'N/A') {
   const params = { ...DEFAULT_PARAMS, ...userParams };
-  const minCandles = Math.max(params.emaPeriod, params.rsiPeriod) + 1;
+  const strategy = STRATEGIES[params.strategyId] || STRATEGIES.rsi_momentum;
 
+  const minCandles = strategy.minCandles(params);
   if (candles.length < minCandles) {
     throw new Error(
-      `Pas assez de données : ${candles.length} bougies reçues, ${minCandles} minimum requis pour cette stratégie.`
+      `Pas assez de données : ${candles.length} bougies reçues, ${minCandles} minimum requis pour la stratégie "${strategy.label}".`
     );
   }
 
   const closes = candles.map(c => c.close);
+  const precomputed = strategy.prepare ? strategy.prepare(candles, params) : null;
+  const state = strategy.initState ? strategy.initState() : {};
 
   let cash = initialCapital;
   let position = null;
@@ -171,24 +150,18 @@ function runSimulation(candles, initialCapital = 100000, userParams = {}, symbol
   const bhUnits = initialCapital / closes[minCandles - 1];
   let prevEquity = initialCapital;
   let peakEquity = initialCapital;
-  let prevRsi = null;
 
   for (let i = minCandles; i < candles.length; i++) {
-    const closesSoFar = closes.slice(0, i + 1);
-    const rsi = calculateRSI(closesSoFar, params.rsiPeriod);
-    const ema = calculateEMA(closesSoFar, params.emaPeriod);
+    const ctx = { i, candles, closes, precomputed, params, state };
+    if (strategy.onCandle) strategy.onCandle(ctx);
+
     const price = candles[i].close;
-    const vol = candles[i].volume || 0;
-    const volAvg = avgVolume(candles, i, params.volumeLookback);
 
-    // ── Gestion de la position ouverte (vérifier sortie) ──────
+    // ── Sortie ──
     if (position) {
-      const stopPrice = position.entryPrice * (1 - params.stopLossPct / 100);
-      const rsiCrossUp70 = prevRsi !== null && prevRsi <= params.rsiOverbought && rsi > params.rsiOverbought;
-      const hitStop = price <= stopPrice;
-
-      if (rsiCrossUp70 || hitStop) {
-        const exitPrice = hitStop ? stopPrice : price;
+      const exitDecision = strategy.shouldExit(ctx, position);
+      if (exitDecision.exit) {
+        const exitPrice = exitDecision.exitPrice;
         const pnl = (exitPrice - position.entryPrice) * position.quantity;
         const pnlPct = ((exitPrice - position.entryPrice) / position.entryPrice) * 100;
 
@@ -214,23 +187,16 @@ function runSimulation(candles, initialCapital = 100000, userParams = {}, symbol
       }
     }
 
-    // ── Recherche d'un signal d'entrée (si pas déjà en position) ──
-    if (!position && rsi !== null && ema !== null) {
-      const rsiCrossUp30 = prevRsi !== null && prevRsi <= params.rsiOversold && rsi > params.rsiOversold;
-      const aboveEma = price > ema * (1 - params.emaTolerancePct / 100);
-      const volSpike = volAvg > 0 && vol > volAvg * params.volumeMultiplier;
-      const volumeConditionMet = params.requireVolumeConfirmation ? volSpike : true;
+    // ── Entrée ──
+    if (!position && strategy.shouldEnter(ctx)) {
+      const allocation = Math.min(computePositionAllocation(cash, params, trades), cash);
+      const quantity = allocation / price;
 
-      if (rsiCrossUp30 && aboveEma && volumeConditionMet) {
-        const allocation = Math.min(computePositionAllocation(cash, params, trades), cash);
-        const quantity = allocation / price;
-
-        cash -= quantity * price;
-        position = { symbol, entryPrice: price, entryIndex: i, quantity, entryDate: candles[i].date };
-      }
+      cash -= quantity * price;
+      position = { symbol, entryPrice: price, entryIndex: i, quantity, entryDate: candles[i].date };
     }
 
-    // ── Mise à jour des courbes ──
+    // ── Courbes ──
     const positionValue = position ? position.quantity * price : 0;
     const equity = cash + positionValue;
 
@@ -244,7 +210,6 @@ function runSimulation(candles, initialCapital = 100000, userParams = {}, symbol
 
     if (prevEquity > 0) periodReturns.push((equity - prevEquity) / prevEquity);
     prevEquity = equity;
-    prevRsi = rsi;
   }
 
   // Clôture forcée d'une position encore ouverte à la fin de la période
@@ -271,7 +236,6 @@ function runSimulation(candles, initialCapital = 100000, userParams = {}, symbol
     });
   }
 
-  // ── Calcul des métriques agrégées ──
   const finalEquity = equityCurve[equityCurve.length - 1] || initialCapital;
   const totalReturnPct = ((finalEquity - initialCapital) / initialCapital) * 100;
 
@@ -295,6 +259,8 @@ function runSimulation(candles, initialCapital = 100000, userParams = {}, symbol
     avgLoss: `-${Math.abs(avgLoss).toFixed(0)}`,
     avgHold: `${avgHoldCandles.toFixed(0)}c`,
     quoteCurrency: params.quoteCurrency,
+    strategyId: strategy.id,
+    strategyLabel: strategy.label,
   };
 
   const annualReturns = calculateAnnualReturns(equityCurve, equityDates, initialCapital);
@@ -303,19 +269,13 @@ function runSimulation(candles, initialCapital = 100000, userParams = {}, symbol
     metrics,
     charts: { stratData: equityCurve, bhData: buyHoldCurve, ddData: drawdownCurve, annualReturns },
     equityDates,
-    trades, // liste complète — le slice(-10) se fait en amont (controller/aggregator)
+    trades,
   };
 }
 
 /**
- * Combine les résultats de plusieurs runSimulation() (un par symbole,
- * capital équipondéré) en un seul résultat "portefeuille".
- *
- * LIMITE CONNUE : les equity curves sont sommées index-par-index (pas par
- * date calendaire exacte). Pour des symboles avec un nombre de bougies
- * différent (ex: crypto 24/7 vs actions fermées le week-end), c'est une
- * approximation raisonnable mais pas un vrai resampling calendaire.
- * À améliorer si besoin d'une précision institutionnelle.
+ * Combine plusieurs runSimulation() (multi-symbole) en un résultat
+ * "portefeuille" — INCHANGÉ par rapport à la version précédente.
  */
 function aggregatePortfolio(perSymbolResults, initialCapitalTotal) {
   if (perSymbolResults.length === 1) {
@@ -389,10 +349,9 @@ function aggregatePortfolio(perSymbolResults, initialCapitalTotal) {
       avgWin: `+${avgWin.toFixed(0)}`,
       avgLoss: `-${Math.abs(avgLoss).toFixed(0)}`,
       avgHold: `${avgHoldCandles.toFixed(0)}c`,
-      // Plusieurs devises mélangées (ex: SPY en USD + EUR/GBP) → on ne peut
-      // pas sommer des devises différentes correctement, le frontend
-      // affiche alors les montants bruts sans symbole devise unique.
       quoteCurrency: currencies.size === 1 ? [...currencies][0] : 'MIXED',
+      strategyId: perSymbolResults[0].metrics.strategyId,
+      strategyLabel: perSymbolResults[0].metrics.strategyLabel,
     },
     charts: { stratData, bhData, ddData, annualReturns },
     trades: allTrades.slice(-10),

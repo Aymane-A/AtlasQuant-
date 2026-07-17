@@ -1,25 +1,15 @@
 /**
  * src/controllers/backtest.controller.js
- *
- * Flux réel multi-symbole :
- *   1. Parser l'univers (1 à 8 symboles, crypto/forex/commodity/equity mixés)
- *   2. Fetch parallèle des candles par symbole (backtestMarketRouter)
- *   3. Simulation par symbole, capital équipondéré (backtestEngine)
- *   4. Agrégation portefeuille (backtestEngine.aggregatePortfolio)
- *   5. Sauvegarde + réponse { success, metrics, charts, trades, warning, skipped }
  */
 
 const db = require('../config/db');
 const logger = require('../utils/logger');
 const { fetchCandlesForBacktest } = require('../services/backtestMarketRouter.service');
 const { runSimulation, aggregatePortfolio } = require('../services/backtestEngine.service');
+const { listStrategies } = require('../services/backtestStrategies.service');
 
 const MAX_SYMBOLS = 8;
 
-/**
- * Parse la valeur capital envoyée par le frontend.
- * Le formulaire envoie une string formatée ("100,000") → on la nettoie.
- */
 function parseCapital(raw) {
   if (typeof raw === 'number') return raw;
   const cleaned = String(raw || '100000').replace(/[^0-9.]/g, '');
@@ -27,11 +17,6 @@ function parseCapital(raw) {
   return Number.isFinite(value) && value > 0 ? value : 100000;
 }
 
-/**
- * Le frontend envoie un univers de symboles séparés par virgule
- * (ex: "SPY, QQQ, AAPL"). On garde jusqu'à MAX_SYMBOLS symboles uniques,
- * dans l'ordre saisi par l'utilisateur.
- */
 function parseUniverse(universe) {
   if (!universe) return [];
   const symbols = [...new Set(
@@ -40,9 +25,6 @@ function parseUniverse(universe) {
   return symbols.slice(0, MAX_SYMBOLS);
 }
 
-/**
- * Traduit la config "Position Size" du formulaire vers les params du moteur.
- */
 function resolvePositionSizing(body) {
   const mode = body.positionSizeMode;
   if (mode === 'fixed_dollar') {
@@ -55,12 +37,31 @@ function resolvePositionSizing(body) {
   return { positionSizeMode: 'fixed_pct', positionSizePct: Number.isFinite(pct) && pct > 0 ? pct : 10 };
 }
 
+function buildWarningMessage(requestedTimeframe, succeeded, skipped) {
+  const messages = [];
+
+  const fallbackSymbols = succeeded.filter(r => r.fallbackApplied).map(r => r.symbol);
+  if (fallbackSymbols.length > 0) {
+    messages.push(
+      `Timeframe ${requestedTimeframe} disponible sur 60 jours max pour les actions/forex/commodities. ` +
+      `Backtest exécuté en Daily pour : ${fallbackSymbols.join(', ')}.`
+    );
+  }
+
+  if (skipped.length > 0) {
+    messages.push(`Symboles ignorés (données insuffisantes) : ${skipped.map(s => s.symbol).join(', ')}.`);
+  }
+
+  return messages.length > 0 ? messages.join(' ') : undefined;
+}
+
 async function runBacktest(req, res) {
   try {
     const userId = req.user.id;
     const { name, universe, from, to, tf, capital, maxPos } = req.body;
 
     const symbols = parseUniverse(universe);
+    const requestedTimeframe = tf || 'Daily';
 
     if (symbols.length === 0 || !from || !to) {
       return res.status(400).json({
@@ -76,16 +77,27 @@ async function runBacktest(req, res) {
       });
     }
 
+    // ── Validation de la stratégie ──
+    const availableStrategies = listStrategies();
+    const requestedStrategyId = req.body.strategyId || 'rsi_momentum';
+    const strategyMeta = availableStrategies.find(s => s.id === requestedStrategyId);
+
+    if (!strategyMeta) {
+      return res.status(400).json({
+        success: false,
+        error: `Stratégie inconnue : "${requestedStrategyId}". Disponibles : ${availableStrategies.map(s => s.id).join(', ')}`,
+      });
+    }
+
     const initialCapitalTotal = parseCapital(capital);
     const capitalPerSymbol = initialCapitalTotal / symbols.length;
     const positionSizing = resolvePositionSizing(req.body);
 
-    logger.info(`[Backtest] Démarrage pour user ${userId} — [${symbols.join(', ')}] (${tf || 'Daily'}) du ${from} au ${to}`);
+    logger.info(`[Backtest] Démarrage pour user ${userId} — [${symbols.join(', ')}] (${requestedTimeframe}) stratégie="${strategyMeta.label}" du ${from} au ${to}`);
 
-    // ── 1 & 2. Fetch + simulation en parallèle, par symbole ──
     const settled = await Promise.allSettled(symbols.map(async symbol => {
-      const { candles, warning, effectiveTimeframe, assetClass, quoteCurrency } =
-        await fetchCandlesForBacktest(symbol, tf || 'Daily', from, to);
+      const { candles, effectiveTimeframe, fallbackApplied, assetClass, quoteCurrency } =
+        await fetchCandlesForBacktest(symbol, requestedTimeframe, from, to);
 
       if (!candles || candles.length < 50) {
         throw new Error(`Données insuffisantes pour ${symbol} (${candles?.length || 0} bougies récupérées, 50 minimum).`);
@@ -95,9 +107,10 @@ async function runBacktest(req, res) {
         maxPositions: parseInt(maxPos) || 5,
         ...positionSizing,
         quoteCurrency,
+        strategyId: requestedStrategyId,
       }, symbol);
 
-      return { symbol, assetClass, warning, effectiveTimeframe, ...result };
+      return { symbol, assetClass, fallbackApplied, effectiveTimeframe, ...result };
     }));
 
     const succeeded = settled.filter(s => s.status === 'fulfilled').map(s => s.value);
@@ -112,16 +125,10 @@ async function runBacktest(req, res) {
       });
     }
 
-    // ── 3. Agrégation portefeuille ──
     const { metrics, charts, trades } = aggregatePortfolio(succeeded, initialCapitalTotal);
+    const warning = buildWarningMessage(requestedTimeframe, succeeded, skipped);
 
-    const warnings = succeeded.filter(r => r.warning).map(r => r.warning);
-    if (skipped.length > 0) {
-      warnings.push(`Symboles ignorés (données insuffisantes) : ${skipped.map(s => s.symbol).join(', ')}.`);
-    }
-
-    // ── 4. Sauvegarde en base ──
-    const strategyName = name || 'RSI Momentum Reversion';
+    const strategyName = name || strategyMeta.label;
     const { rows } = await db.query(
       `INSERT INTO backtest_history (user_id, symbol, strategy, result, created_at)
        VALUES ($1, $2, $3, $4, NOW()) RETURNING id`,
@@ -137,7 +144,7 @@ async function runBacktest(req, res) {
       metrics,
       charts,
       trades,
-      warning: warnings.length > 0 ? warnings.join(' ') : undefined,
+      warning,
       skipped: skipped.length > 0 ? skipped : undefined,
     });
 
@@ -150,10 +157,6 @@ async function runBacktest(req, res) {
   }
 }
 
-/**
- * Récupère un backtest précédemment sauvegardé par son ID.
- * Utile si le frontend veut recharger/partager un résultat.
- */
 async function getBacktestById(req, res) {
   try {
     const userId = req.user.id;
@@ -161,8 +164,7 @@ async function getBacktestById(req, res) {
 
     const { rows } = await db.query(
       `SELECT id, symbol, strategy, result, created_at
-       FROM backtest_history
-       WHERE id = $1 AND user_id = $2`,
+       FROM backtest_history WHERE id = $1 AND user_id = $2`,
       [id, userId]
     );
 
