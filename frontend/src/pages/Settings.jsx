@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import api from '../services/api';
 
 const monoSm  = { fontFamily:'JetBrains Mono,monospace', fontSize:11 };
@@ -8,6 +8,7 @@ const TABS = [
   { id:'profile',       icon:'◉', label:'Profile'       },
   { id:'notifications', icon:'◈', label:'Notifications'  },
   { id:'trading',       icon:'◫', label:'Trading'        },
+  { id:'signalAlerts',  icon:'⚡', label:'Signal Alerts'  },
   { id:'appearance',    icon:'⬡', label:'Appearance'     },
   { id:'security',      icon:'⬙', label:'Security'       },
 ];
@@ -21,10 +22,11 @@ function Field({ label, children }) {
   );
 }
 
-function Input({ value, onChange, type='text', placeholder='', disabled=false }) {
+function Input({ value, onChange, type='text', placeholder='', disabled=false, min, max, step }) {
   return (
     <input
       type={type} value={value} onChange={onChange} placeholder={placeholder} disabled={disabled}
+      min={min} max={max} step={step}
       style={{
         width:'100%', background: disabled ? 'rgba(255,255,255,0.02)' : 'rgba(255,255,255,0.04)',
         border:'1px solid var(--border)', borderRadius:8,
@@ -75,9 +77,10 @@ function ProfileSection({ data, onToast }) {
   const [saving, setSaving] = useState(false);
 
   const save = async () => {
+    if (!name.trim()) return onToast('Display name cannot be empty', false);
     setSaving(true);
     try {
-      await api.post('/settings/update', { section:'profile', payload:{ name } });
+      await api.post('/settings/update', { section:'profile', payload:{ name: name.trim() } });
       onToast('Profile updated successfully', true);
     } catch { onToast('Error updating profile', false); }
     finally { setSaving(false); }
@@ -97,8 +100,15 @@ function ProfileSection({ data, onToast }) {
         </Field>
       </div>
       <Field label="Current Plan">
-        <div style={{ display:'inline-flex', alignItems:'center', gap:8, padding:'8px 16px', borderRadius:8, background:'rgba(167,139,250,0.08)', border:'1px solid rgba(167,139,250,0.2)', color:'var(--purple-bright)', fontFamily:'JetBrains Mono,monospace', fontSize:12, fontWeight:700 }}>
-          ◈ {(data?.profile?.plan || 'free').toUpperCase()}
+        <div style={{ display:'flex', alignItems:'center', gap:12 }}>
+          <div style={{ display:'inline-flex', alignItems:'center', gap:8, padding:'8px 16px', borderRadius:8, background:'rgba(167,139,250,0.08)', border:'1px solid rgba(167,139,250,0.2)', color:'var(--purple-bright)', fontFamily:'JetBrains Mono,monospace', fontSize:12, fontWeight:700 }}>
+            ◈ {(data?.profile?.plan || 'free').toUpperCase()}
+          </div>
+          {(!data?.profile?.plan || data.profile.plan === 'free') && (
+            <a href="/pricing" style={{ ...monoSm, color:'var(--cyan)', textDecoration:'none' }}>
+              Upgrade plan →
+            </a>
+          )}
         </div>
       </Field>
       <SaveBtn onClick={save} saving={saving} />
@@ -119,7 +129,7 @@ function NotificationsSection({ data, onToast }) {
     try {
       await api.post('/settings/update', { section:'notifications', payload: notifs });
       onToast('Notifications updated', true);
-    } catch { onToast('Error', false); }
+    } catch { onToast('Error updating notifications', false); }
     finally { setSaving(false); }
   };
 
@@ -165,11 +175,15 @@ function TradingSection({ data, onToast }) {
   const [saving,    setSaving]    = useState(false);
 
   const save = async () => {
+    // ✅ Fix: bloquer capital/risk invalides avant l'appel API
+    if (!capital || capital <= 0) return onToast('Capital must be greater than 0', false);
+    if (riskPct <= 0 || riskPct > 100) return onToast('Risk % must be between 0 and 100', false);
+
     setSaving(true);
     try {
       await api.post('/settings/update', { section:'trading', payload:{ default_capital: capital, default_risk_pct: riskPct, default_timeframe: timeframe } });
       onToast('Trading preferences updated', true);
-    } catch { onToast('Error', false); }
+    } catch { onToast('Error updating trading settings', false); }
     finally { setSaving(false); }
   };
 
@@ -177,10 +191,10 @@ function TradingSection({ data, onToast }) {
     <div>
       <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 }}>
         <Field label="Default Capital ($)">
-          <Input value={capital} onChange={e => setCapital(Number(e.target.value))} type="number" />
+          <Input value={capital} onChange={e => setCapital(Number(e.target.value))} type="number" min="1" step="100" />
         </Field>
         <Field label="Risk per Trade (%)">
-          <Input value={riskPct} onChange={e => setRiskPct(Number(e.target.value))} type="number" />
+          <Input value={riskPct} onChange={e => setRiskPct(Number(e.target.value))} type="number" min="0.1" max="100" step="0.1" />
         </Field>
       </div>
       <Field label="Default Timeframe">
@@ -194,9 +208,115 @@ function TradingSection({ data, onToast }) {
       </Field>
       <div style={{ background:'rgba(251,191,36,0.06)', border:'1px solid rgba(251,191,36,0.15)', borderRadius:10, padding:'12px 16px', marginBottom:20 }}>
         <div style={{ ...monoSm, color:'var(--amber)' }}>
-          ⚠ Risk: ${(capital * riskPct / 100).toLocaleString()} per trade ({riskPct}% of ${Number(capital).toLocaleString()})
+          ⚠ Risk: ${((capital || 0) * (riskPct || 0) / 100).toLocaleString()} per trade ({riskPct || 0}% of ${Number(capital || 0).toLocaleString()})
         </div>
       </div>
+      <SaveBtn onClick={save} saving={saving} />
+    </div>
+  );
+}
+
+// ── Signal Alerts (nouveau — était backend-only) ───────────
+function SignalAlertsSection({ data, onToast }) {
+  const s = data?.settings || {};
+  const [mode,       setMode]       = useState(s.signal_alert_mode || 'all');
+  const [symbols,    setSymbols]    = useState(s.signal_alert_symbols || []);
+  const [symbolInput, setSymbolInput] = useState('');
+  const [minConfidence, setMinConfidence] = useState(s.signal_alert_min_confidence ?? 75);
+  const [saving,     setSaving]     = useState(false);
+
+  const addSymbol = () => {
+    const clean = symbolInput.trim().toUpperCase();
+    if (!clean) return;
+    if (!symbols.includes(clean)) setSymbols(prev => [...prev, clean]);
+    setSymbolInput('');
+  };
+
+  const removeSymbol = sym => setSymbols(prev => prev.filter(s => s !== sym));
+
+  const save = async () => {
+    if (mode === 'custom' && symbols.length === 0) {
+      return onToast('Add at least one symbol to follow', false);
+    }
+    setSaving(true);
+    try {
+      await api.post('/settings/update', {
+        section: 'signalAlerts',
+        payload: { mode, symbols, minConfidence },
+      });
+      onToast('Signal alert preferences updated', true);
+    } catch { onToast('Error updating signal alerts', false); }
+    finally { setSaving(false); }
+  };
+
+  return (
+    <div>
+      <Field label="Which signals should trigger alerts?">
+        <div style={{ display:'flex', gap:12 }}>
+          {[
+            { val:'all',    label:'All Signals',    desc:'Get alerted on every high-confidence AI signal' },
+            { val:'custom', label:'Custom Symbols',  desc:'Only alert me on symbols I choose below' },
+          ].map(m => (
+            <button key={m.val} onClick={() => setMode(m.val)} style={{
+              flex:1, padding:'16px', borderRadius:12, cursor:'pointer', textAlign:'left',
+              border: mode===m.val ? '1px solid var(--cyan)' : '1px solid var(--border)',
+              background: mode===m.val ? 'var(--cyan-glow)' : 'rgba(255,255,255,0.02)',
+              transition:'all .2s',
+            }}>
+              <div style={{ fontSize:13, fontWeight:700, color: mode===m.val ? 'var(--cyan)' : 'var(--text-primary)', marginBottom:4 }}>{m.label}</div>
+              <div style={{ ...monoSm, color:'var(--text-secondary)' }}>{m.desc}</div>
+            </button>
+          ))}
+        </div>
+      </Field>
+
+      {mode === 'custom' && (
+        <Field label="Followed Symbols">
+          <div style={{ display:'flex', gap:8, marginBottom:10 }}>
+            <div style={{ flex:1 }}>
+              <Input
+                value={symbolInput}
+                onChange={e => setSymbolInput(e.target.value)}
+                placeholder="e.g. BTCUSDT, AAPL, EURUSD"
+              />
+            </div>
+            <button onClick={addSymbol} style={{
+              padding:'0 18px', borderRadius:8, border:'1px solid var(--cyan-dim)',
+              background:'var(--cyan-glow)', color:'var(--cyan)', fontSize:12, fontWeight:700,
+              fontFamily:'Syne,sans-serif', cursor:'pointer',
+            }}>
+              Add
+            </button>
+          </div>
+          <div style={{ display:'flex', flexWrap:'wrap', gap:8 }}>
+            {symbols.length === 0 && (
+              <div style={{ ...monoSm, color:'var(--text-muted)' }}>No symbols added yet</div>
+            )}
+            {symbols.map(sym => (
+              <div key={sym} style={{
+                display:'flex', alignItems:'center', gap:6, padding:'6px 10px', borderRadius:6,
+                background:'rgba(0,245,212,0.06)', border:'1px solid rgba(0,245,212,0.15)',
+                fontFamily:'JetBrains Mono,monospace', fontSize:12, color:'var(--cyan)',
+              }}>
+                {sym}
+                <span onClick={() => removeSymbol(sym)} style={{ cursor:'pointer', opacity:0.7 }}>✕</span>
+              </div>
+            ))}
+          </div>
+        </Field>
+      )}
+
+      <Field label={`Minimum Confidence (${minConfidence}%)`}>
+        <input
+          type="range" min="50" max="95" step="5" value={minConfidence}
+          onChange={e => setMinConfidence(Number(e.target.value))}
+          style={{ width:'100%', accentColor:'var(--cyan)' }}
+        />
+        <div style={{ ...monoSm, color:'var(--text-muted)', marginTop:6 }}>
+          Only AI signals at or above this confidence will trigger an alert
+        </div>
+      </Field>
+
       <SaveBtn onClick={save} saving={saving} />
     </div>
   );
@@ -211,10 +331,9 @@ function AppearanceSection({ data, onToast }) {
     setSaving(true);
     try {
       await api.post('/settings/update', { section:'appearance', payload:{ theme } });
-      // Apply immediately
       document.body.classList.toggle('light', theme === 'light');
       onToast('Theme updated', true);
-    } catch { onToast('Error', false); }
+    } catch { onToast('Error updating theme', false); }
     finally { setSaving(false); }
   };
 
@@ -256,6 +375,7 @@ function SecuritySection({ onToast }) {
   const strengthLabel = strength === 100 ? 'Strong' : strength === 60 ? 'Medium' : strength > 0 ? 'Weak' : '';
 
   const save = async () => {
+    if (!current) return onToast('Enter your current password', false);
     if (next !== confirm) return onToast('Passwords do not match', false);
     if (next.length < 8)  return onToast('Minimum 8 characters required', false);
     setSaving(true);
@@ -307,16 +427,24 @@ export default function Settings() {
   const [loading, setLoading] = useState(true);
   const [data,    setData]    = useState(null);
   const [toast,   setToast]   = useState({ msg:'', ok:true });
+  const toastTimer = useRef(null);
 
   useEffect(() => {
     api.get('/settings')
       .then(res => { setData(res.data); setLoading(false); })
-      .catch(() => setLoading(false));
+      .catch(() => {
+        setLoading(false);
+        showToast('Failed to load settings. Please refresh.', false);
+      });
+    // ✅ Fix: cleanup du timer au unmount pour éviter le warning React
+    return () => { if (toastTimer.current) clearTimeout(toastTimer.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const showToast = (msg, ok) => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
     setToast({ msg, ok });
-    setTimeout(() => setToast({ msg:'', ok:true }), 3000);
+    toastTimer.current = setTimeout(() => setToast({ msg:'', ok:true }), 3000);
   };
 
   if (loading) return (
@@ -329,6 +457,7 @@ export default function Settings() {
     profile:       <ProfileSection       data={data} onToast={showToast} />,
     notifications: <NotificationsSection data={data} onToast={showToast} />,
     trading:       <TradingSection       data={data} onToast={showToast} />,
+    signalAlerts:  <SignalAlertsSection  data={data} onToast={showToast} />,
     appearance:    <AppearanceSection    data={data} onToast={showToast} />,
     security:      <SecuritySection               onToast={showToast} />,
   };
@@ -340,7 +469,7 @@ export default function Settings() {
           // Settings
         </div>
         <div style={{ fontSize:11, color:'var(--text-secondary)', fontFamily:'JetBrains Mono,monospace' }}>
-          Profile · Notifications · Trading · Appearance · Security
+          {TABS.map(t => t.label).join(' · ')}
         </div>
       </div>
 

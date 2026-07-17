@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Bar, Doughnut } from 'react-chartjs-2';
 import { Chart as ChartJS, CategoryScale, LinearScale, BarElement, ArcElement, Tooltip, Legend } from 'chart.js';
@@ -40,13 +40,6 @@ function corrColor(v) {
 export default function RiskMatrix() {
   const { t } = useTranslation();
 
-  // ✅ Fix loading flash: `loading` ne sert plus que pour le tout premier
-  // chargement (aucune data encore présente). `refreshing` sert pour les
-  // rechargements ultérieurs (changement d'horizon) — la data précédente
-  // reste affichée pendant le fetch, remplacée seulement une fois la
-  // nouvelle data arrivée. Avant ce fix, chaque switch d'horizon effaçait
-  // toute la page (KPIs, matrice, stress tests, charts) pour un plein écran
-  // "Loading..." — flash visible à chaque clic 1D/1W/1M.
   const [loading, setLoading]     = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError]     = useState(null);
@@ -54,7 +47,6 @@ export default function RiskMatrix() {
   const [bars, setBars]       = useState([]);
   const [horizon, setHorizon] = useState('1D');
 
-  // ── Custom stress test builder ──
   const [customShock, setCustomShock]   = useState('-15');
   const [customSector, setCustomSector] = useState('all');
   const [customResult, setCustomResult] = useState(null);
@@ -65,9 +57,6 @@ export default function RiskMatrix() {
     let cancelled = false;
 
     async function loadRisk() {
-      // ✅ Fix: premier chargement → plein écran "Loading". Rechargements
-      // suivants (data déjà présente) → badge discret "Updating", contenu
-      // précédent conservé à l'écran.
       if (data) setRefreshing(true); else setLoading(true);
       setError(null);
       try {
@@ -75,7 +64,7 @@ export default function RiskMatrix() {
         if (cancelled) return;
 
         if (res.data.success) {
-          setData(res.data.data); // null si pas de positions ouvertes
+          setData(res.data.data);
         } else {
           setError(res.data.error || t('riskMatrix.genericError'));
         }
@@ -124,10 +113,40 @@ export default function RiskMatrix() {
     }
   };
 
-  // ── États de chargement / vide / erreur ──────────────────────────
-  // ✅ Fix: le plein écran "Loading" ne s'affiche que si on n'a encore
-  // AUCUNE data (premier chargement). Un refresh d'horizon avec data déjà
-  // présente n'entre plus dans cette branche.
+  // ✅ Feature: Correlation Insights — dérive avg/max/min pairwise correlation
+  // directement de correlationMatrix.matrix (déjà en mémoire, aucun appel
+  // réseau supplémentaire). Remplit l'espace vide qui restait dans le panel
+  // Correlation Matrix quand il n'y a que 2-3 positions (grille 3x3 minuscule
+  // dans un panel large) et donne une lecture immédiate — pas besoin de
+  // scruter chaque cellule pour repérer la paire la plus corrélée.
+  const correlationInsights = useMemo(() => {
+    const cm = data?.correlationMatrix;
+    if (!cm || cm.symbols.length < 2) return null;
+
+    const pairs = [];
+    for (let i = 0; i < cm.symbols.length; i++) {
+      for (let j = i + 1; j < cm.symbols.length; j++) {
+        pairs.push({
+          a: cm.symbols[i],
+          b: cm.symbols[j],
+          v: cm.matrix[i][j],
+        });
+      }
+    }
+    if (pairs.length === 0) return null;
+
+    const avg = pairs.reduce((sum, p) => sum + p.v, 0) / pairs.length;
+    const highest = pairs.reduce((max, p) => (p.v > max.v ? p : max), pairs[0]);
+    const lowest  = pairs.reduce((min, p) => (p.v < min.v ? p : min), pairs[0]);
+
+    return {
+      avg: parseFloat(avg.toFixed(2)),
+      highest,
+      lowest,
+      pairCount: pairs.length,
+    };
+  }, [data]);
+
   if (loading && !data) {
     return (
       <div style={{ ...panel, textAlign: 'center', padding: 60 }}>
@@ -168,9 +187,6 @@ export default function RiskMatrix() {
     { lbl: t('riskMatrix.diversification'), val: `${kpis.diversificationScore}/100`,           sub: t('riskMatrix.diversificationSub'),border:'rgba(0,245,212,0.15)',   vc:'var(--cyan)'  },
   ];
 
-  // ✅ Feature: colonne Value ($) ajoutée entre Symbol et Weight — avant, la
-  // table affichait uniquement le poids (%) de chaque position, jamais le
-  // montant réel investi.
   const TABLE_HEADERS = [
     t('riskMatrix.symbol'),   t('riskMatrix.value'),
     t('riskMatrix.weight'),
@@ -182,7 +198,12 @@ export default function RiskMatrix() {
     labels: returnDistribution.labels,
     datasets: [{
       data: returnDistribution.counts,
-      backgroundColor: returnDistribution.labels.map(b => +b < -5 ? 'rgba(248,113,113,0.5)' : +b > 5 ? 'rgba(52,211,153,0.5)' : 'rgba(100,116,139,0.3)'),
+      backgroundColor: returnDistribution.labels.map(b => {
+        const v = parseFloat(b);
+        if (v < -0.001) return 'rgba(248,113,113,0.5)';
+        if (v > 0.001)  return 'rgba(52,211,153,0.5)';
+        return 'rgba(100,116,139,0.3)';
+      }),
       borderRadius: 3,
     }],
   };
@@ -196,6 +217,27 @@ export default function RiskMatrix() {
     }],
   };
 
+  const sectorCenterTextPlugin = {
+    id: 'sectorCenterText',
+    afterDraw(chart) {
+      if (!sectorConcentration) return;
+      const { ctx, chartArea } = chart;
+      if (!chartArea) return;
+      const centerX = (chartArea.left + chartArea.right) / 2;
+      const centerY = (chartArea.top + chartArea.bottom) / 2;
+      ctx.save();
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = "700 18px 'JetBrains Mono', monospace";
+      ctx.fillStyle = '#e2e8f0';
+      ctx.fillText(`${sectorConcentration.pct}%`, centerX, centerY - 9);
+      ctx.font = "600 9px 'JetBrains Mono', monospace";
+      ctx.fillStyle = '#64748b';
+      ctx.fillText(sectorConcentration.sector, centerX, centerY + 10);
+      ctx.restore();
+    },
+  };
+
   const corrSymbols = correlationMatrix.symbols;
 
   return (
@@ -205,8 +247,6 @@ export default function RiskMatrix() {
       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
         <div style={{ display:'flex', alignItems:'center', gap:10 }}>
           <div style={label10}>{t('riskMatrix.engine')}</div>
-          {/* ✅ Fix loading flash: badge discret pendant un refresh d'horizon,
-              plutôt que d'effacer toute la page. */}
           {refreshing && (
             <div style={{ ...label10, color:'var(--cyan)', display:'flex', alignItems:'center', gap:5 }}>
               <span style={{ width:5, height:5, borderRadius:'50%', background:'var(--cyan)', animation:'riskPulse 1s infinite' }} />
@@ -238,10 +278,6 @@ export default function RiskMatrix() {
         </div>
       </div>
 
-      {/* ✅ Feature: warning banner si un secteur dépasse 60% du portefeuille.
-          Absent des autres pages (Portfolio a un donut d'allocation mais pas
-          d'alerte de concentration). Répond directement au décalage visuel
-          repéré entre Diversification Score et le donut Sector Risk. */}
       {sectorConcentration?.isHighConcentration && (
         <div style={{
           ...panel, padding:'14px 18px', display:'flex', alignItems:'center', gap:12,
@@ -273,7 +309,7 @@ export default function RiskMatrix() {
       {/* ── Correlation + Risk by Position ─────────────────────────────────── */}
       <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 }}>
 
-        <div style={panel}>
+        <div style={{ ...panel, display:'flex', flexDirection:'column' }}>
           <div style={{ fontSize:13, fontWeight:600, marginBottom:18, display:'flex', alignItems:'center', gap:8 }}>
             <div style={{ width:6, height:6, borderRadius:'50%', background:'var(--cyan)' }} />
             {t('riskMatrix.corrMatrix')}
@@ -286,37 +322,76 @@ export default function RiskMatrix() {
               {t('riskMatrix.notEnoughData')}
             </div>
           ) : (
-            <div style={{ display:'flex', flexDirection:'column', gap:3, overflowX: 'auto' }}>
-              <div style={{ display:'flex', alignItems:'center', gap:3 }}>
-                <div style={{ width:60, flexShrink: 0 }} />
-                {corrSymbols.map(s => (
-                  <div key={s} style={{ width:42, flexShrink: 0, textAlign:'center', fontSize:8, fontFamily:'JetBrains Mono,monospace', color:'var(--text-muted)' }}>{s}</div>
-                ))}
-              </div>
-              {correlationMatrix.matrix.map((row, ri) => (
-                <div key={ri} style={{ display:'flex', alignItems:'center', gap:3 }}>
-                  <div style={{ width:60, flexShrink: 0, fontSize:9, fontFamily:'JetBrains Mono,monospace', color:'var(--text-muted)', textAlign:'right', paddingRight:6 }}>{corrSymbols[ri]}</div>
-                  {row.map((v, ci) => (
-                    <div key={ci}
-                      title={`${corrSymbols[ri]}×${corrSymbols[ci]}: ${v.toFixed(2)}`}
-                      style={{ width:42, height:28, flexShrink: 0, borderRadius:3, background:corrColor(v), display:'flex', alignItems:'center', justifyContent:'center', fontSize:9, fontFamily:'JetBrains Mono,monospace', color:'rgba(255,255,255,0.8)', transition:'transform .15s', cursor:'default' }}
-                      onMouseOver={e => e.currentTarget.style.transform='scale(1.2)'}
-                      onMouseOut={e  => e.currentTarget.style.transform='scale(1)'}
-                    >
-                      {v.toFixed(2)}
-                    </div>
+            // ✅ Fix layout: la grille est maintenant centrée horizontalement
+            // et ses cellules agrandies (52px au lieu de 42px) — avant, avec
+            // seulement 2-3 positions, la petite grille flottait à gauche
+            // d'un panel large, laissant beaucoup d'espace vide à droite.
+            <div style={{ flex:1, display:'flex', alignItems:'center', justifyContent:'center' }}>
+              <div style={{ display:'flex', flexDirection:'column', gap:4, overflowX: 'auto' }}>
+                <div style={{ display:'flex', alignItems:'center', gap:4 }}>
+                  <div style={{ width:64, flexShrink: 0 }} />
+                  {corrSymbols.map(s => (
+                    <div key={s} style={{ width:52, flexShrink: 0, textAlign:'center', fontSize:9, fontFamily:'JetBrains Mono,monospace', color:'var(--text-muted)' }}>{s}</div>
                   ))}
                 </div>
-              ))}
+                {correlationMatrix.matrix.map((row, ri) => (
+                  <div key={ri} style={{ display:'flex', alignItems:'center', gap:4 }}>
+                    <div style={{ width:64, flexShrink: 0, fontSize:10, fontFamily:'JetBrains Mono,monospace', color:'var(--text-muted)', textAlign:'right', paddingRight:8 }}>{corrSymbols[ri]}</div>
+                    {row.map((v, ci) => (
+                      <div key={ci}
+                        title={`${corrSymbols[ri]}×${corrSymbols[ci]}: ${v.toFixed(2)}`}
+                        style={{ width:52, height:36, flexShrink: 0, borderRadius:4, background:corrColor(v), display:'flex', alignItems:'center', justifyContent:'center', fontSize:10, fontFamily:'JetBrains Mono,monospace', color:'rgba(255,255,255,0.85)', transition:'transform .15s', cursor:'default' }}
+                        onMouseOver={e => e.currentTarget.style.transform='scale(1.12)'}
+                        onMouseOut={e  => e.currentTarget.style.transform='scale(1)'}
+                      >
+                        {v.toFixed(2)}
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
             </div>
           )}
-          <div style={{ display:'flex', gap:12, marginTop:12, fontSize:10, fontFamily:'JetBrains Mono,monospace', color:'var(--text-muted)' }}>
+
+          <div style={{ display:'flex', gap:12, marginTop:12, fontSize:10, fontFamily:'JetBrains Mono,monospace', color:'var(--text-muted)', justifyContent:'center' }}>
             <span style={{ color:'var(--red)' }}>▮ +1.0</span>
             <span>▮ 0.5</span>
             <span style={{ color:'var(--cyan)' }}>▮ 0.0</span>
             <span>▮ −0.5</span>
             <span style={{ color:'var(--green)' }}>▮ −1.0</span>
           </div>
+
+          {/* ✅ Feature: Correlation Insights — dérivé de correlationMatrix,
+              remplit l'espace restant sous la grille et donne une lecture
+              directe sans devoir comparer les cellules à l'œil. */}
+          {correlationInsights && (
+            <div style={{ marginTop:16, paddingTop:16, borderTop:'1px solid var(--border)', display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:10 }}>
+              <div style={{ textAlign:'center' }}>
+                <div style={{ ...label10, fontSize:9, marginBottom:6 }}>Avg Pairwise</div>
+                <div style={{ fontSize:16, fontWeight:700, fontFamily:'JetBrains Mono,monospace', color:'var(--cyan)' }}>
+                  {correlationInsights.avg.toFixed(2)}
+                </div>
+              </div>
+              <div style={{ textAlign:'center' }}>
+                <div style={{ ...label10, fontSize:9, marginBottom:6 }}>Most Correlated</div>
+                <div style={{ fontSize:13, fontWeight:700, fontFamily:'JetBrains Mono,monospace', color:'var(--red)' }}>
+                  {correlationInsights.highest.a}·{correlationInsights.highest.b}
+                </div>
+                <div style={{ fontSize:10, color:'var(--text-muted)', fontFamily:'JetBrains Mono,monospace', marginTop:2 }}>
+                  {correlationInsights.highest.v.toFixed(2)}
+                </div>
+              </div>
+              <div style={{ textAlign:'center' }}>
+                <div style={{ ...label10, fontSize:9, marginBottom:6 }}>Least Correlated</div>
+                <div style={{ fontSize:13, fontWeight:700, fontFamily:'JetBrains Mono,monospace', color:'var(--green)' }}>
+                  {correlationInsights.lowest.a}·{correlationInsights.lowest.b}
+                </div>
+                <div style={{ fontSize:10, color:'var(--text-muted)', fontFamily:'JetBrains Mono,monospace', marginTop:2 }}>
+                  {correlationInsights.lowest.v.toFixed(2)}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         <div style={panel}>
@@ -338,7 +413,6 @@ export default function RiskMatrix() {
                   <td style={{ padding:'9px 12px', ...monoSm }}>
                     <span style={{ background:'rgba(0,245,212,0.08)', color:'var(--cyan)', border:'1px solid rgba(0,245,212,0.15)', padding:'2px 7px', borderRadius:4, fontSize:10, fontWeight:600 }}>{p.symbol}</span>
                   </td>
-                  {/* ✅ Feature: montant réel investi, pas seulement le % */}
                   <td style={{ padding:'9px 12px', ...monoSm, color:'var(--text-secondary)' }}>
                     ${p.marketValue.toLocaleString(undefined, { maximumFractionDigits: 0 })}
                   </td>
@@ -357,7 +431,6 @@ export default function RiskMatrix() {
                     {p.sizing?.action !== 'HOLD' && (
                       <span style={{ color: 'var(--text-muted)', marginLeft: 6 }}>
                         → {p.sizing?.suggestedWeightPct}%
-                        {/* ✅ Feature: delta en $ à côté du %, ex. "(-$34)" */}
                         {typeof p.sizing?.deltaDollar === 'number' && (
                           <span style={{ marginLeft: 4 }}>
                             ({p.sizing.deltaDollar >= 0 ? '+' : '−'}${Math.abs(p.sizing.deltaDollar).toLocaleString(undefined, { maximumFractionDigits: 0 })})
@@ -475,7 +548,11 @@ export default function RiskMatrix() {
             {t('riskMatrix.sectorRisk')}
           </div>
           <div style={{ position:'relative', height:160 }}>
-            <Doughnut data={sectorRiskChart} options={{ ...chartBase, animation:{duration:900,delay:400}, plugins:{ legend:{ display:true, position:'right', labels:{ boxWidth:8, font:{size:10}, padding:8 } } }, cutout:'60%' }} />
+            <Doughnut
+              data={sectorRiskChart}
+              options={{ ...chartBase, animation:{duration:900,delay:400}, plugins:{ legend:{ display:true, position:'right', labels:{ boxWidth:8, font:{size:10}, padding:8 } } }, cutout:'60%' }}
+              plugins={[sectorCenterTextPlugin]}
+            />
           </div>
         </div>
       </div>

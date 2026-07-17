@@ -17,9 +17,6 @@ const panel    = { background: 'var(--surface)', border: '1px solid var(--border
 const baseOpts = { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } };
 
 // ── Formatage currency-aware ──────────────────────────────────────────
-// Le backend renvoie metrics.quoteCurrency (USD/EUR/GBP/...) et chaque
-// trade porte son propre tr.qc. Pour un portefeuille multi-devises,
-// le backend renvoie 'MIXED' (pas de symbole unique possible).
 const CURRENCY_SYMBOLS = { USD: '$', EUR: '€', GBP: '£', JPY: '¥', CHF: 'CHF ', AUD: 'A$', CAD: 'C$', MIXED: '' };
 
 function fmtAmount(value, currency = 'USD') {
@@ -36,6 +33,37 @@ function fmtSigned(str, currency = 'USD') {
   return `${sign}${sym}${rest}`;
 }
 
+// ── Registry de stratégies (frontend) ─────────────────────────────────
+// Duplique intentionnellement backtestStrategies.service.js côté backend.
+// Si une nouvelle stratégie est ajoutée côté backend, l'ajouter ICI aussi (même id).
+const STRATEGY_OPTIONS = [
+  {
+    id: 'rsi_momentum',
+    label: 'RSI Momentum Reversion',
+    entryRules: [
+      { dot: 'var(--green)', text: 'RSI(14) crosses above 30' },
+      { dot: 'var(--green)', text: 'Price above EMA(200)' },
+      { dot: 'var(--green)', text: 'Volume > 1.5× 20-day avg' },
+    ],
+    exitRules: [
+      { dot: 'var(--red)', text: 'RSI(14) crosses above 70' },
+      { dot: 'var(--red)', text: 'Stop loss: −5% from entry' },
+    ],
+  },
+  {
+    id: 'macd_crossover',
+    label: 'MACD Crossover',
+    entryRules: [
+      { dot: 'var(--green)', text: 'MACD(12,26) crosses above Signal(9)' },
+      { dot: 'var(--green)', text: 'Price above EMA(200)' },
+    ],
+    exitRules: [
+      { dot: 'var(--red)', text: 'MACD(12,26) crosses below Signal(9)' },
+      { dot: 'var(--red)', text: 'Stop loss: −5% from entry' },
+    ],
+  },
+];
+
 export default function Backtester() {
   const { t } = useTranslation();
   const location = useLocation();
@@ -46,19 +74,18 @@ export default function Backtester() {
   const [warning, setWarning]   = useState(null);
   const [skipped, setSkipped]   = useState(null);
 
-  // Si on arrive depuis Markets.jsx (clic sur un symbole), on pré-remplit
-  // l'univers avec ce symbole plutôt que la liste par défaut.
   const prefillSymbol = location.state?.prefillSymbol;
 
   const [form, setForm] = useState({
     name: 'RSI Momentum Reversion v2',
+    strategyId: 'rsi_momentum',
     universe: prefillSymbol || 'SPY, QQQ, AAPL, MSFT, NVDA',
     from: '2020-01-01',
     to: '2024-12-31',
     tf: '4H',
     capital: '100,000',
     maxPos: '5',
-    posSizeMode: 'fixed_pct',   // 'fixed_pct' | 'fixed_dollar' | 'kelly'
+    posSizeMode: 'fixed_pct',
     posSizeValue: '10',
   });
 
@@ -69,11 +96,7 @@ export default function Backtester() {
   });
 
   const [backtestData, setBacktestData] = useState({
-    stratData: [],
-    bhData: [],
-    ddData: [],
-    annualReturns: [],
-    trades: []
+    stratData: [], bhData: [], ddData: [], annualReturns: [], trades: []
   });
 
   const set = k => e => setForm(f => ({ ...f, [k]: e.target.value }));
@@ -90,10 +113,9 @@ export default function Backtester() {
         setProgress(p => (p >= 85 ? 85 : p + 12));
       }, 100);
 
-      // Le backend attend symbol/strategy/timeframe/startDate/endDate —
-      // on mappe les champs du formulaire (universe/tf/from/to) vers ce format.
       const payload = {
         name: form.name,
+        strategyId: form.strategyId,
         universe: form.universe,
         strategy: form.name,
         timeframe: form.tf,
@@ -144,6 +166,9 @@ export default function Backtester() {
   }, []);
 
   const qc = metrics.quoteCurrency || 'USD';
+  const selectedStrategy = STRATEGY_OPTIONS.find(s => s.id === form.strategyId) || STRATEGY_OPTIONS[0];
+  const ENTRY_RULES = selectedStrategy.entryRules;
+  const EXIT_RULES = selectedStrategy.exitRules;
 
   const eqChartData = {
     labels: backtestData.stratData.map((_, i) => i),
@@ -158,8 +183,6 @@ export default function Backtester() {
     datasets: [{ data: backtestData.ddData, borderColor: '#f87171', backgroundColor: 'rgba(248,113,113,0.18)', borderWidth: 1.5, pointRadius: 0, tension: .2, fill: true }],
   };
 
-  // Rendements annuels réels, calculés par le backend à partir de
-  // l'equity curve groupée par année calendaire.
   const annualReturnsData = backtestData.annualReturns || [];
   const annualData = {
     labels: annualReturnsData.map(r => r.year),
@@ -188,19 +211,8 @@ export default function Backtester() {
     t('backtester.rr'),       t('backtester.duration'),
   ];
 
-  const ENTRY_RULES = [
-    { dot: 'var(--green)', text: 'RSI(14) crosses above 30' },
-    { dot: 'var(--green)', text: 'Price above EMA(200)' },
-    { dot: 'var(--green)', text: 'Volume > 1.5× 20-day avg' },
-  ];
-  const EXIT_RULES = [
-    { dot: 'var(--red)', text: 'RSI(14) crosses above 70' },
-    { dot: 'var(--red)', text: 'Stop loss: −5% from entry' },
-  ];
-
   return (
     <>
-      {/* ── Header ─────────────────────────────────────────────────────────── */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
         <div style={label10}>{t('backtester.engine')}</div>
         <div style={{ fontSize: 12, color: 'var(--text-secondary)', fontFamily: 'JetBrains Mono,monospace' }}>
@@ -208,7 +220,6 @@ export default function Backtester() {
         </div>
       </div>
 
-      {/* ── Bandeau d'erreur ──────────────────────────────────────────────── */}
       {error && (
         <div style={{
           marginBottom: 16, padding: '12px 16px', borderRadius: 10,
@@ -217,17 +228,10 @@ export default function Backtester() {
           display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
         }}>
           <span>{error}</span>
-          <button
-            onClick={() => setError(null)}
-            style={{ background: 'transparent', border: 'none', color: 'var(--red)', cursor: 'pointer', fontSize: 14, lineHeight: 1 }}
-            aria-label="dismiss"
-          >
-            ×
-          </button>
+          <button onClick={() => setError(null)} style={{ background: 'transparent', border: 'none', color: 'var(--red)', cursor: 'pointer', fontSize: 14, lineHeight: 1 }} aria-label="dismiss">×</button>
         </div>
       )}
 
-      {/* ── Bandeau d'avertissement (fallback timeframe, symboles skippés) ── */}
       {warning && (
         <div style={{
           marginBottom: 16, padding: '12px 16px', borderRadius: 10,
@@ -236,17 +240,10 @@ export default function Backtester() {
           display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
         }}>
           <span>{warning}</span>
-          <button
-            onClick={() => setWarning(null)}
-            style={{ background: 'transparent', border: 'none', color: 'var(--amber)', cursor: 'pointer', fontSize: 14, lineHeight: 1 }}
-            aria-label="dismiss"
-          >
-            ×
-          </button>
+          <button onClick={() => setWarning(null)} style={{ background: 'transparent', border: 'none', color: 'var(--amber)', cursor: 'pointer', fontSize: 14, lineHeight: 1 }} aria-label="dismiss">×</button>
         </div>
       )}
 
-      {/* ── Core Layout ────────────────────────────────────────────────────── */}
       <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: 20, alignItems: 'start' }}>
 
         <div style={panel}>
@@ -255,15 +252,26 @@ export default function Backtester() {
             {t('backtester.stratConfig')}
           </div>
 
-          {[
-            { lbl: t('backtester.stratName'), key: 'name' },
-            { lbl: t('backtester.universe'),  key: 'universe' },
-          ].map(f => (
-            <div key={f.key} style={{ marginBottom: 14 }}>
-              <div style={{ ...label10, marginBottom: 5 }}>{f.lbl}</div>
-              <input style={inpStyle} value={form[f.key]} onChange={set(f.key)} />
-            </div>
-          ))}
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ ...label10, marginBottom: 5 }}>Strategy Type</div>
+            <select
+              style={{ ...inpStyle, color: 'var(--text-secondary)' }}
+              value={form.strategyId}
+              onChange={e => setForm(f => ({ ...f, strategyId: e.target.value }))}
+            >
+              {STRATEGY_OPTIONS.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+            </select>
+          </div>
+
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ ...label10, marginBottom: 5 }}>{t('backtester.stratName')}</div>
+            <input style={inpStyle} value={form.name} onChange={set('name')} />
+          </div>
+
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ ...label10, marginBottom: 5 }}>{t('backtester.universe')}</div>
+            <input style={inpStyle} value={form.universe} onChange={set('universe')} />
+          </div>
           <div style={{ marginTop: -8, marginBottom: 14, fontSize: 10, color: 'var(--text-muted)', fontFamily: 'JetBrains Mono,monospace' }}>
             Crypto, forex (EUR/USD) et commodities (GOLD, WTI...) supportés — max 8 symboles, capital équipondéré.
           </div>
@@ -314,7 +322,6 @@ export default function Backtester() {
 
           <div style={{ height: 1, background: 'var(--border)', margin: '18px 0' }} />
 
-          {/* ── Position Size — connecté au backend (Fixed % / Fixed $ / Kelly) ── */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: form.posSizeMode !== 'kelly' ? 10 : 16 }}>
             <div>
               <div style={{ ...label10, marginBottom: 5 }}>{t('backtester.posSize')}</div>
@@ -328,7 +335,7 @@ export default function Backtester() {
                 }))}
               >
                 <option value="fixed_pct">Fixed %</option>
-                <option value="kelly">Kelly Criterion</option>
+                <option value="kelly">Kelly</option>
                 <option value="fixed_dollar">Fixed $</option>
               </select>
             </div>

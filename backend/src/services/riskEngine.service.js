@@ -24,13 +24,9 @@ const BENCHMARK_SYMBOL = 'SPY';
 const TRADING_DAYS_PER_YEAR = 252;
 const VAR_CONFIDENCE = 0.95; // VaR à 95% — standard dans l'industrie
 
-// ✅ Feature: seuil au-delà duquel on considère le portefeuille "concentré"
-// sur un secteur — utilisé pour le warning banner côté frontend.
 const HIGH_SECTOR_CONCENTRATION_THRESHOLD = 0.60;
 
 // ── Classification sectorielle (mapping manuel) ─────────────────
-// Couvre les symboles les plus courants. Tout symbole absent
-// tombe dans "Other" plutôt que de faire planter le calcul.
 const SECTOR_MAP = {
   // Technology
   AAPL: 'Technology', MSFT: 'Technology', NVDA: 'Technology', GOOGL: 'Technology',
@@ -71,21 +67,10 @@ function getSector(symbol) {
   return SECTOR_MAP[clean] || 'Other';
 }
 
-// ✅ Perf fix: cache en mémoire des closes journaliers par symbole, TTL 5min.
-// Avant ce fix, chaque switch d'horizon (1D/1W/1M) déclenchait un refetch
-// complet de tous les symboles + benchmark chez Yahoo Finance/Binance, alors
-// que lookbackDays est fixe (252j) et ne dépend PAS de l'horizon demandé —
-// seul le scaling de VaR/CVaR en aval change avec l'horizon. Le cache élimine
-// donc ~100% des refetchs redondants lors des changements d'horizon, et la
-// plupart des refetchs lors des re-renders rapprochés (custom stress test
-// juste après un chargement de matrice, par ex.).
+// ✅ Perf: cache en mémoire des closes journaliers par symbole, TTL 5min.
 const CLOSES_CACHE_TTL_MS = 5 * 60 * 1000;
-const closesCache = new Map(); // symbol (uppercase) -> { closes, fetchedAt }
+const closesCache = new Map();
 
-/**
- * Calcule les rendements journaliers à partir d'une série de prix de clôture.
- * return[i] = (close[i] - close[i-1]) / close[i-1]
- */
 function calculateDailyReturns(closes) {
   const returns = [];
   for (let i = 1; i < closes.length; i++) {
@@ -106,23 +91,13 @@ function stdDev(arr) {
   return Math.sqrt(variance);
 }
 
-/**
- * Volatilité annualisée à partir de rendements journaliers.
- * On annualise en multipliant l'écart-type journalier par √252
- * (252 jours de bourse par an — convention standard).
- */
 function annualizedVolatility(dailyReturns) {
   return stdDev(dailyReturns) * Math.sqrt(TRADING_DAYS_PER_YEAR);
 }
 
-/**
- * Beta = Cov(actif, benchmark) / Var(benchmark)
- * Mesure la sensibilité d'un actif aux mouvements du marché.
- * Beta > 1 : plus volatil que le marché. Beta < 1 : moins volatil.
- */
 function calculateBeta(assetReturns, benchmarkReturns) {
   const n = Math.min(assetReturns.length, benchmarkReturns.length);
-  if (n < 2) return 1; // pas assez de données → on suppose neutre (beta marché)
+  if (n < 2) return 1;
 
   const a = assetReturns.slice(-n);
   const b = benchmarkReturns.slice(-n);
@@ -142,10 +117,6 @@ function calculateBeta(assetReturns, benchmarkReturns) {
   return covariance / varianceB;
 }
 
-/**
- * Coefficient de corrélation de Pearson entre deux séries de rendements.
- * Renvoie une valeur entre -1 (anti-corrélé) et +1 (parfaitement corrélé).
- */
 function pearsonCorrelation(returnsA, returnsB) {
   const n = Math.min(returnsA.length, returnsB.length);
   if (n < 2) return 0;
@@ -167,11 +138,6 @@ function pearsonCorrelation(returnsA, returnsB) {
   return cov / denom;
 }
 
-/**
- * VaR historique : on trie les rendements du portefeuille du pire au
- * meilleur, et on prend le rendement au percentile (1 - confidence).
- * Ex: VaR 95% = le rendement tel que 5% des jours sont pires que ça.
- */
 function calculateHistoricalVaR(portfolioReturns, confidence = VAR_CONFIDENCE) {
   if (portfolioReturns.length === 0) return 0;
   const sorted = [...portfolioReturns].sort((a, b) => a - b);
@@ -179,10 +145,6 @@ function calculateHistoricalVaR(portfolioReturns, confidence = VAR_CONFIDENCE) {
   return sorted[Math.max(0, index)];
 }
 
-/**
- * CVaR (Expected Shortfall) : moyenne des pertes au-delà du seuil VaR.
- * Répond à "si on est dans les pires 5% des cas, combien perd-on en moyenne ?"
- */
 function calculateCVaR(portfolioReturns, confidence = VAR_CONFIDENCE) {
   if (portfolioReturns.length === 0) return 0;
   const sorted = [...portfolioReturns].sort((a, b) => a - b);
@@ -191,48 +153,21 @@ function calculateCVaR(portfolioReturns, confidence = VAR_CONFIDENCE) {
   return mean(tail);
 }
 
-/**
- * Score de risque composite 0-100, dérivé du beta, de la volatilité
- * et de la concentration du portefeuille (poids max d'une position).
- * Formule heuristique simple, pas un standard académique — sert de
- * jauge visuelle synthétique pour l'utilisateur.
- */
 function calculateRiskScore({ beta, volatility, maxWeight }) {
-  const betaScore = Math.min(Math.abs(beta) / 2, 1) * 35;       // 0-35 pts
-  const volScore = Math.min(volatility / 0.5, 1) * 35;           // 0-35 pts
-  const concentrationScore = Math.min(maxWeight / 0.5, 1) * 30;  // 0-30 pts
+  const betaScore = Math.min(Math.abs(beta) / 2, 1) * 35;
+  const volScore = Math.min(volatility / 0.5, 1) * 35;
+  const concentrationScore = Math.min(maxWeight / 0.5, 1) * 30;
   return Math.round(betaScore + volScore + concentrationScore);
 }
 
-/**
- * Indice de Herfindahl-Hirschman (HHI) appliqué aux poids du portefeuille.
- * Somme des poids au carré. Plus c'est élevé, plus le portefeuille est
- * concentré sur peu de positions.
- *
- * ✅ Fix diversification score: l'ancienne version calculait UNIQUEMENT le
- * HHI sur les poids (weightHHI) — un portefeuille de 3 positions équilibrées
- * (45%/14%/41%) mais TOUTES dans le même secteur (ex: Technology) obtenait un
- * score élevé (~91/100), alors que le portefeuille n'est absolument pas
- * diversifié sectoriellement. Le score contredisait visuellement le donut
- * "Sector Risk Concentration" qui affichait 100% Technology.
- *
- * Le score combine désormais deux composantes :
- *   - weightScore (40%) : équilibre des poids entre positions (ancien calcul)
- *   - sectorScore (60%) : dispersion sectorielle, pondérée plus fort car
- *     c'est le facteur le plus visible/impactant pour l'utilisateur — un
- *     portefeuille mono-secteur ne devrait jamais scorer "bien diversifié"
- *     même si les poids individuels sont équilibrés.
- */
 function calculateDiversificationScore(weights, sectors = []) {
   const n = weights.length;
-  if (n <= 1) return 0; // une seule position = aucune diversification possible
+  if (n <= 1) return 0;
 
   const weightHHI = weights.reduce((sum, w) => sum + w * w, 0);
-  const minHHI = 1 / n; // HHI si toutes les positions étaient égales
+  const minHHI = 1 / n;
   const weightScore = ((1 - weightHHI) / (1 - minHHI)) * 100;
 
-  // Si les secteurs ne sont pas fournis (compat ascendante / tests), on
-  // retombe sur l'ancien comportement plutôt que de planter.
   if (!sectors || sectors.length !== weights.length) {
     return Math.round(Math.max(0, Math.min(100, weightScore)));
   }
@@ -243,40 +178,22 @@ function calculateDiversificationScore(weights, sectors = []) {
     sectorWeights[s] = (sectorWeights[s] || 0) + w;
   });
   const sectorHHI = Object.values(sectorWeights).reduce((sum, w) => sum + w * w, 0);
-  const sectorScore = (1 - sectorHHI) * 100; // 100 = chaque position son propre secteur, 0 = tout dans un secteur
+  const sectorScore = (1 - sectorHHI) * 100;
 
   const finalScore = weightScore * 0.4 + sectorScore * 0.6;
   return Math.round(Math.max(0, Math.min(100, finalScore)));
 }
 
-/**
- * Met à l'échelle une VaR/CVaR journalière vers un autre horizon temporel.
- * Hypothèse standard (racine du temps) : pour des rendements i.i.d.,
- * l'écart-type sur N jours = écart-type journalier × √N.
- * C'est une approximation — elle suppose l'absence d'autocorrélation
- * des rendements, ce qui est raisonnable à court terme (1 jour à 1 mois).
- */
-const HORIZON_DAYS = { '1D': 1, '1W': 5, '1M': 21 }; // 5 et 21 = jours de bourse
+const HORIZON_DAYS = { '1D': 1, '1W': 5, '1M': 21 };
 
 function scaleToHorizon(dailyValue, horizon) {
   const days = HORIZON_DAYS[horizon] || 1;
   return dailyValue * Math.sqrt(days);
 }
 
-/**
- * Recommandation de taille de position, basée sur le risque marginal.
- * Logique : une position avec un beta nettement supérieur au beta du
- * portefeuille contribue plus que sa part au risque total — on suggère
- * de la réduire. À l'inverse, une position à faible beta peut être
- * renforcée sans trop augmenter le risque global.
- *
- * Ce n'est PAS un conseil financier individualisé — c'est une heuristique
- * de rééquilibrage basée sur la contribution au risque, affichée comme
- * point de départ de réflexion pour l'utilisateur.
- */
 function getPositionSizingSuggestion(positionWeight, positionBeta, portfolioBeta, marginalRisk) {
   if (marginalRisk === 'high') {
-    const suggestedWeight = positionWeight * 0.75; // suggestion : -25%
+    const suggestedWeight = positionWeight * 0.75;
     return {
       action: 'REDUCE',
       suggestedWeightPct: parseFloat((suggestedWeight * 100).toFixed(1)),
@@ -285,7 +202,7 @@ function getPositionSizingSuggestion(positionWeight, positionBeta, portfolioBeta
   }
 
   if (marginalRisk === 'low') {
-    const suggestedWeight = Math.min(positionWeight * 1.15, 0.35); // +15%, plafonné à 35%
+    const suggestedWeight = Math.min(positionWeight * 1.15, 0.35);
     return {
       action: 'INCREASE',
       suggestedWeightPct: parseFloat((suggestedWeight * 100).toFixed(1)),
@@ -300,11 +217,6 @@ function getPositionSizingSuggestion(positionWeight, positionBeta, portfolioBeta
   };
 }
 
-/**
- * Récupère les closes journaliers des N derniers jours pour un symbole,
- * via le router existant (crypto → Binance, stock → Yahoo).
- * ✅ Perf fix: passe par closesCache (TTL 5min) avant tout appel réseau.
- */
 async function fetchDailyCloses(symbol, lookbackDays = 252) {
   const cacheKey = symbol.trim().toUpperCase();
   const cached = closesCache.get(cacheKey);
@@ -328,20 +240,11 @@ async function fetchDailyCloses(symbol, lookbackDays = 252) {
   return closes;
 }
 
-/**
- * Point d'entrée principal : calcule la matrice de risque complète
- * pour un ensemble de positions de portefeuille.
- *
- * @param {Array} positions - [{ symbol, quantity, entryPrice }, ...]
- * @param {string} horizon  - '1D' | '1W' | '1M' — horizon temporel pour VaR/CVaR
- * @returns {Object} toutes les métriques pour le frontend RiskMatrix
- */
 async function computeRiskMatrix(positions, horizon = '1D') {
   if (!positions || positions.length === 0) {
-    return null; // le controller décide comment représenter "pas de positions"
+    return null;
   }
 
-  // Agréger les positions par symbole (un symbole peut avoir plusieurs trades ouverts)
   const aggregated = {};
   for (const p of positions) {
     if (!aggregated[p.symbol]) {
@@ -352,7 +255,6 @@ async function computeRiskMatrix(positions, horizon = '1D') {
   }
   const symbols = Object.keys(aggregated);
 
-  // ── 1. Récupérer les prix historiques (positions + benchmark) ──
   const allSymbols = [...new Set([...symbols, BENCHMARK_SYMBOL])];
   const closesBySymbol = {};
 
@@ -368,7 +270,6 @@ async function computeRiskMatrix(positions, horizon = '1D') {
   const benchmarkCloses = closesBySymbol[BENCHMARK_SYMBOL] || [];
   const benchmarkReturns = calculateDailyReturns(benchmarkCloses);
 
-  // ── 2. Valeur actuelle de chaque position (au dernier prix connu) ──
   const positionDetails = symbols.map(symbol => {
     const closes = closesBySymbol[symbol] || [];
     const currentPrice = closes.length > 0 ? closes[closes.length - 1] : aggregated[symbol].costBasis / aggregated[symbol].quantity;
@@ -391,12 +292,10 @@ async function computeRiskMatrix(positions, horizon = '1D') {
 
   const totalValue = positionDetails.reduce((sum, p) => sum + p.marketValue, 0);
 
-  // ── 3. Poids et contribution de chaque position ──
   for (const p of positionDetails) {
     p.weight = totalValue > 0 ? p.marketValue / totalValue : 0;
   }
 
-  // ── 4. Rendements journaliers du portefeuille (pondérés) ──
   const maxLen = Math.max(...positionDetails.map(p => p.returns.length), 0);
   const portfolioReturns = [];
   for (let i = 0; i < maxLen; i++) {
@@ -408,14 +307,11 @@ async function computeRiskMatrix(positions, horizon = '1D') {
     portfolioReturns.push(dayReturn);
   }
 
-  // ── 5. Métriques agrégées du portefeuille ──
   const portfolioBeta = positionDetails.reduce((sum, p) => sum + p.beta * p.weight, 0);
   const portfolioVolatility = annualizedVolatility(portfolioReturns);
   const dailyVaRPct = calculateHistoricalVaR(portfolioReturns);
   const cvarPct = calculateCVaR(portfolioReturns);
 
-  // VaR/CVaR mis à l'échelle de l'horizon demandé (1D par défaut).
-  // dailyVaRPct est déjà journalier — on l'étire en racine du temps.
   const scaledVaRPct = scaleToHorizon(dailyVaRPct, horizon);
   const scaledCVaRPct = scaleToHorizon(cvarPct, horizon);
   const dailyVaRDollar = scaledVaRPct * totalValue;
@@ -424,13 +320,11 @@ async function computeRiskMatrix(positions, horizon = '1D') {
   const maxWeight = Math.max(...positionDetails.map(p => p.weight), 0);
   const riskScore = calculateRiskScore({ beta: portfolioBeta, volatility: portfolioVolatility, maxWeight });
 
-  // ✅ Fix: sectors passés en 2e argument, voir doc-comment de la fonction.
   const diversificationScore = calculateDiversificationScore(
     positionDetails.map(p => p.weight),
     positionDetails.map(p => p.sector)
   );
 
-  // ── 6. VaR contribution par position + suggestion de sizing ──
   for (const p of positionDetails) {
     p.contribVarDollar = dailyVaRDollar * p.weight;
     p.marginalRisk = p.beta > portfolioBeta * 1.15 ? 'high'
@@ -438,23 +332,19 @@ async function computeRiskMatrix(positions, horizon = '1D') {
                     : 'med';
     p.sizingSuggestion = getPositionSizingSuggestion(p.weight, p.beta, portfolioBeta, p.marginalRisk);
 
-    // ✅ Feature: delta en $ de la suggestion de sizing, en plus du %.
-    // Un utilisateur comprend plus vite "vends ~$34" que "-25% de poids".
     const suggestedValueDollar = (p.sizingSuggestion.suggestedWeightPct / 100) * totalValue;
     p.sizingSuggestion.suggestedValueDollar = parseFloat(suggestedValueDollar.toFixed(2));
     p.sizingSuggestion.deltaDollar = parseFloat((suggestedValueDollar - p.marketValue).toFixed(2));
   }
 
-  // ── 7. Matrice de corrélation entre positions ──
   const correlationMatrix = positionDetails.map(rowP =>
     positionDetails.map(colP => parseFloat(pearsonCorrelation(rowP.returns, colP.returns).toFixed(2)))
   );
 
-  // ── 8. Stress tests : impact estimé = beta_portefeuille × choc_marché ──
   const STRESS_SCENARIOS = [
-    { name: 'COVID Crash 2020',        marketShock: -0.339 }, // S&P 500 réel : -33.9%
-    { name: '2022 Rate Hike Cycle',    marketShock: -0.182 }, // S&P 500 réel ~2022
-    { name: '2008 Financial Crisis',   marketShock: -0.483 }, // S&P 500 réel : -48.3%
+    { name: 'COVID Crash 2020',        marketShock: -0.339 },
+    { name: '2022 Rate Hike Cycle',    marketShock: -0.182 },
+    { name: '2008 Financial Crisis',   marketShock: -0.483 },
     { name: 'Tech Sector -30%',        marketShock: -0.30, sectorFocus: 'Technology' },
     { name: 'Flash Crash Scenario',    marketShock: -0.07 },
     { name: 'Bull Market +20%',        marketShock: 0.20 },
@@ -463,8 +353,6 @@ async function computeRiskMatrix(positions, horizon = '1D') {
   const stressTests = STRESS_SCENARIOS.map(scenario => {
     let impact;
     if (scenario.sectorFocus) {
-      // Impact concentré sur les positions du secteur visé, reste du
-      // portefeuille supposé stable pour isoler l'effet sectoriel.
       const sectorWeight = positionDetails
         .filter(p => p.sector === scenario.sectorFocus)
         .reduce((sum, p) => sum + p.weight, 0);
@@ -478,15 +366,11 @@ async function computeRiskMatrix(positions, horizon = '1D') {
     };
   });
 
-  // ── 9. Répartition sectorielle + concentration ──
   const sectorWeights = {};
   for (const p of positionDetails) {
     sectorWeights[p.sector] = (sectorWeights[p.sector] || 0) + p.weight;
   }
 
-  // ✅ Feature: secteur dominant + son poids, exposé séparément pour que le
-  // frontend puisse afficher un warning banner sans devoir re-dériver le max
-  // depuis sectorRisk lui-même.
   const sectorEntries = Object.entries(sectorWeights).sort((a, b) => b[1] - a[1]);
   const topSector = sectorEntries[0] || null;
   const sectorConcentration = topSector
@@ -497,8 +381,15 @@ async function computeRiskMatrix(positions, horizon = '1D') {
       }
     : null;
 
-  // ── 10. Distribution des rendements (histogramme pour le frontend) ──
-  const returnDistribution = buildReturnHistogram(portfolioReturns);
+  // ✅ Fix: le graphique de distribution utilisait toujours les rendements
+  // journaliers bruts, peu importe l'horizon sélectionné (1D/1W/1M) — il ne
+  // bougeait jamais quand l'utilisateur changeait d'horizon, contrairement à
+  // VaR/CVaR juste au-dessus qui eux se remettent à l'échelle. On applique la
+  // même mise à l'échelle racine-du-temps (scaleToHorizon) à chaque rendement
+  // individuel avant de construire l'histogramme, pour rester cohérent avec
+  // les KPIs affichés au-dessus.
+  const scaledReturnsForHistogram = portfolioReturns.map(r => scaleToHorizon(r, horizon));
+  const returnDistribution = buildReturnHistogram(scaledReturnsForHistogram);
 
   return {
     totalValue: parseFloat(totalValue.toFixed(2)),
@@ -537,12 +428,6 @@ async function computeRiskMatrix(positions, horizon = '1D') {
   };
 }
 
-/**
- * Calcule l'impact d'un scénario de stress personnalisé, défini par
- * l'utilisateur (% de choc de marché, optionnellement ciblé sur un secteur).
- * Réutilise positionDetails déjà calculés par computeRiskMatrix — voir
- * computeCustomStressTest() qui orchestre tout depuis les positions brutes.
- */
 function applyCustomStressScenario(positionDetails, portfolioBeta, shockPct, sectorFocus) {
   const marketShock = shockPct / 100;
 
@@ -559,16 +444,6 @@ function applyCustomStressScenario(positionDetails, portfolioBeta, shockPct, sec
   return parseFloat((impact * 100).toFixed(2));
 }
 
-/**
- * Point d'entrée pour le stress test personnalisé (endpoint dédié).
- * Recalcule rapidement les positions/beta/secteurs à partir des positions
- * brutes — plus léger que computeRiskMatrix car il ne recalcule pas
- * VaR/CVaR/corrélation/distribution, qui ne sont pas nécessaires ici.
- *
- * @param {Array} positions  - [{ symbol, quantity, entryPrice }, ...]
- * @param {number} shockPct  - ex: -25 pour un choc de marché de -25%
- * @param {string} sectorFocus - secteur ciblé, ou 'all' / undefined pour le marché entier
- */
 async function computeCustomStressTest(positions, shockPct, sectorFocus) {
   const aggregated = {};
   for (const p of positions) {
@@ -625,23 +500,50 @@ async function computeCustomStressTest(positions, shockPct, sectorFocus) {
 }
 
 /**
- * Construit un histogramme des rendements journaliers du portefeuille,
- * regroupés en buckets de 5% (-25% à +25%), pour le graphique de
- * distribution affiché côté frontend.
+ * Construit un histogramme des rendements du portefeuille pour le graphique
+ * de distribution.
+ *
+ * ✅ Fix: l'ancienne version utilisait des buckets FIXES de 5% de large
+ * (-25% à +25%). Les rendements journaliers d'un portefeuille tournent
+ * typiquement entre ±0.5% et ±2% — quasiment toutes les valeurs tombaient
+ * donc dans un seul bucket ("0" ou "-5"), tous les autres restant vides.
+ * Résultat visuel : une seule barre géante, le reste du graphique plat —
+ * ça ressemblait à un bug d'affichage plutôt qu'à une vraie distribution.
+ *
+ * Les buckets sont maintenant dynamiques : la largeur est dérivée de
+ * l'amplitude réelle des rendements observés (± la valeur absolue max,
+ * avec une marge de 15% pour ne pas coller les extrêmes au bord), répartie
+ * sur 11 buckets centrés sur 0. Les décimales des labels s'adaptent à
+ * l'échelle (2 décimales si amplitude < 2%, 1 décimale si < 10%, sinon 0).
  */
 function buildReturnHistogram(portfolioReturns) {
-  const buckets = ['-25', '-20', '-15', '-10', '-5', '0', '5', '10', '15', '20', '25'];
-  const counts = new Array(buckets.length).fill(0);
+  const NUM_BUCKETS = 11;
 
-  for (const r of portfolioReturns) {
-    const pct = r * 100;
-    // Trouver le bucket: chaque bucket représente [edge, edge+5)
-    let idx = Math.floor((pct + 25) / 5);
-    idx = Math.max(0, Math.min(buckets.length - 1, idx));
+  if (portfolioReturns.length === 0) {
+    const labels = Array.from({ length: NUM_BUCKETS }, (_, i) => (i - Math.floor(NUM_BUCKETS / 2)).toString());
+    return { labels, counts: new Array(NUM_BUCKETS).fill(0) };
+  }
+
+  const pctReturns = portfolioReturns.map(r => r * 100);
+  const maxAbs = Math.max(...pctReturns.map(Math.abs), 0.05); // évite une largeur de bucket nulle si tous les rendements sont ~0
+  const range = maxAbs * 1.15;
+  const bucketWidth = (2 * range) / NUM_BUCKETS;
+  const decimals = range < 2 ? 2 : range < 10 ? 1 : 0;
+
+  const labels = [];
+  for (let i = 0; i < NUM_BUCKETS; i++) {
+    const bucketCenter = -range + bucketWidth * i + bucketWidth / 2;
+    labels.push(bucketCenter.toFixed(decimals));
+  }
+
+  const counts = new Array(NUM_BUCKETS).fill(0);
+  for (const pct of pctReturns) {
+    let idx = Math.floor((pct + range) / bucketWidth);
+    idx = Math.max(0, Math.min(NUM_BUCKETS - 1, idx));
     counts[idx]++;
   }
 
-  return { labels: buckets, counts };
+  return { labels, counts };
 }
 
 module.exports = {
