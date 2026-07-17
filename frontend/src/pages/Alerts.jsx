@@ -62,10 +62,8 @@ function playAlertBeep() {
 // (dark/neon), remplace window.confirm() natif qui cassait le style SaaS
 // (barre de titre "Code", boutons OS par défaut). Réutilisable pour
 // n'importe quelle action destructive dans l'app.
-// ✅ Fix Escape key: la touche Échap fermait tout SAUF ce modal — un
-// window.addEventListener('keydown') attaché tant que `open` est true,
-// nettoyé au démontage/fermeture pour ne pas empiler les listeners entre
-// plusieurs ouvertures successives du modal.
+// ✅ Fix Escape key: listener actif tant que `open` est true, nettoyé au
+// démontage/fermeture pour ne pas empiler les listeners entre ouvertures.
 function ConfirmModal({ open, title, message, confirmLabel = 'Confirm', danger = true, onConfirm, onCancel }) {
   useEffect(() => {
     if (!open) return;
@@ -391,20 +389,37 @@ export default function Alerts() {
       await api.patch(`/alerts/${id}/snooze`, { hours });
       loadAlerts();
     } catch {
-      setError('Failed to snooze alert — backend endpoint may be missing');
+      setError('Failed to snooze alert');
     }
   };
 
   // ✅ Fix Escape key: le dropdown de snooze n'écoutait aucune touche —
-  // seul un click à l'extérieur (géré par les onMouseLeave/click ailleurs
-  // dans la page) le fermait. Même pattern que ConfirmModal: listener actif
-  // uniquement tant qu'un menu est ouvert (snoozeMenuId non-null), nettoyé
-  // à chaque changement pour éviter d'empiler les listeners entre les cards.
+  // seul un click à l'extérieur (voir ref ci-dessous) le fermait. Même
+  // pattern que ConfirmModal: listener actif uniquement tant qu'un menu
+  // est ouvert (snoozeMenuId non-null).
   useEffect(() => {
     if (snoozeMenuId === null) return;
     const handleKey = (e) => { if (e.key === 'Escape') setSnoozeMenuId(null); };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
+  }, [snoozeMenuId]);
+
+  // ✅ Fix click-outside: le dropdown de snooze n'avait pas d'overlay (contrairement
+  // au ConfirmModal), donc cliquer ailleurs sur la page — hors du bouton ⏸ et du
+  // menu lui-même — ne le fermait pas, il restait ouvert/flottant indéfiniment.
+  // snoozeMenuRef pointe vers le wrapper (bouton + dropdown) de la card active;
+  // un clic hors de ce wrapper ferme le menu. `mousedown` plutôt que `click` pour
+  // fermer avant que l'event ne se propage à l'élément cliqué juste en dessous.
+  const snoozeMenuRef = useRef(null);
+  useEffect(() => {
+    if (snoozeMenuId === null) return;
+    const handleClickOutside = (e) => {
+      if (snoozeMenuRef.current && !snoozeMenuRef.current.contains(e.target)) {
+        setSnoozeMenuId(null);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [snoozeMenuId]);
 
   const handleReset = async (id) => {
@@ -1143,7 +1158,10 @@ export default function Alerts() {
                 </div>
                 <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', fontSize:11, fontFamily:'JetBrains Mono,monospace' }}>
                   <span style={{ color:'var(--text-secondary)' }}>{t('alerts.threshold', { pct: card.pct })}</span>
-                  <div style={{ display:'flex', gap:2, position:'relative' }}>
+                  <div
+                    ref={snoozeMenuId === card.id ? snoozeMenuRef : null}
+                    style={{ display:'flex', gap:2, position:'relative' }}
+                  >
                     {/* ✅ Feature: Snooze dropdown au lieu d'un simple Pause */}
                     <button
                       {...iconBtn(() => setSnoozeMenuId(id => id === card.id ? null : card.id), 'Snooze / Pause', 'var(--amber)')}

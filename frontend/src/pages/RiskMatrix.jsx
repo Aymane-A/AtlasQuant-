@@ -40,7 +40,15 @@ function corrColor(v) {
 export default function RiskMatrix() {
   const { t } = useTranslation();
 
-  const [loading, setLoading] = useState(true);
+  // ✅ Fix loading flash: `loading` ne sert plus que pour le tout premier
+  // chargement (aucune data encore présente). `refreshing` sert pour les
+  // rechargements ultérieurs (changement d'horizon) — la data précédente
+  // reste affichée pendant le fetch, remplacée seulement une fois la
+  // nouvelle data arrivée. Avant ce fix, chaque switch d'horizon effaçait
+  // toute la page (KPIs, matrice, stress tests, charts) pour un plein écran
+  // "Loading..." — flash visible à chaque clic 1D/1W/1M.
+  const [loading, setLoading]     = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError]     = useState(null);
   const [data, setData]       = useState(null);
   const [bars, setBars]       = useState([]);
@@ -57,7 +65,10 @@ export default function RiskMatrix() {
     let cancelled = false;
 
     async function loadRisk() {
-      setLoading(true);
+      // ✅ Fix: premier chargement → plein écran "Loading". Rechargements
+      // suivants (data déjà présente) → badge discret "Updating", contenu
+      // précédent conservé à l'écran.
+      if (data) setRefreshing(true); else setLoading(true);
       setError(null);
       try {
         const res = await api.get('/risk/matrix', { params: { horizon } });
@@ -72,12 +83,16 @@ export default function RiskMatrix() {
         if (cancelled) return;
         setError(err.response?.data?.error || t('riskMatrix.connectionError'));
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+          setRefreshing(false);
+        }
       }
     }
 
     loadRisk();
     return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [t, horizon]);
 
   useEffect(() => {
@@ -110,7 +125,10 @@ export default function RiskMatrix() {
   };
 
   // ── États de chargement / vide / erreur ──────────────────────────
-  if (loading) {
+  // ✅ Fix: le plein écran "Loading" ne s'affiche que si on n'a encore
+  // AUCUNE data (premier chargement). Un refresh d'horizon avec data déjà
+  // présente n'entre plus dans cette branche.
+  if (loading && !data) {
     return (
       <div style={{ ...panel, textAlign: 'center', padding: 60 }}>
         <div style={{ ...monoSm, color: 'var(--text-muted)', textTransform: 'uppercase', fontSize: 11 }}>
@@ -120,7 +138,7 @@ export default function RiskMatrix() {
     );
   }
 
-  if (error) {
+  if (error && !data) {
     return (
       <div style={{ ...panel, textAlign: 'center', padding: 60, border: '1px solid rgba(248,113,113,0.25)' }}>
         <div style={{ ...monoSm, color: 'var(--red)', fontSize: 12 }}>{error}</div>
@@ -138,7 +156,7 @@ export default function RiskMatrix() {
     );
   }
 
-  const { kpis, positions, correlationMatrix, stressTests, sectorRisk, returnDistribution } = data;
+  const { kpis, positions, correlationMatrix, stressTests, sectorRisk, returnDistribution, sectorConcentration } = data;
   const availableSectors = [...new Set(positions.map(p => p.sector))];
 
   const KPIS = [
@@ -150,8 +168,12 @@ export default function RiskMatrix() {
     { lbl: t('riskMatrix.diversification'), val: `${kpis.diversificationScore}/100`,           sub: t('riskMatrix.diversificationSub'),border:'rgba(0,245,212,0.15)',   vc:'var(--cyan)'  },
   ];
 
+  // ✅ Feature: colonne Value ($) ajoutée entre Symbol et Weight — avant, la
+  // table affichait uniquement le poids (%) de chaque position, jamais le
+  // montant réel investi.
   const TABLE_HEADERS = [
-    t('riskMatrix.symbol'),   t('riskMatrix.weight'),
+    t('riskMatrix.symbol'),   t('riskMatrix.value'),
+    t('riskMatrix.weight'),
     t('riskMatrix.beta_col'), t('riskMatrix.contribVar'),
     t('riskMatrix.margRisk'), t('riskMatrix.suggestion'),
   ];
@@ -181,7 +203,17 @@ export default function RiskMatrix() {
 
       {/* ── Header + Horizon toggle ──────────────────────────────────────── */}
       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
-        <div style={label10}>{t('riskMatrix.engine')}</div>
+        <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+          <div style={label10}>{t('riskMatrix.engine')}</div>
+          {/* ✅ Fix loading flash: badge discret pendant un refresh d'horizon,
+              plutôt que d'effacer toute la page. */}
+          {refreshing && (
+            <div style={{ ...label10, color:'var(--cyan)', display:'flex', alignItems:'center', gap:5 }}>
+              <span style={{ width:5, height:5, borderRadius:'50%', background:'var(--cyan)', animation:'riskPulse 1s infinite' }} />
+              Updating
+            </div>
+          )}
+        </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
           <div style={{ display: 'flex', gap: 4, background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', borderRadius: 8, padding: 3 }}>
             {HORIZONS.map(h => (
@@ -205,6 +237,27 @@ export default function RiskMatrix() {
           </div>
         </div>
       </div>
+
+      {/* ✅ Feature: warning banner si un secteur dépasse 60% du portefeuille.
+          Absent des autres pages (Portfolio a un donut d'allocation mais pas
+          d'alerte de concentration). Répond directement au décalage visuel
+          repéré entre Diversification Score et le donut Sector Risk. */}
+      {sectorConcentration?.isHighConcentration && (
+        <div style={{
+          ...panel, padding:'14px 18px', display:'flex', alignItems:'center', gap:12,
+          border:'1px solid rgba(251,191,36,0.3)', background:'rgba(251,191,36,0.05)',
+        }}>
+          <div style={{ fontSize:18, flexShrink:0 }}>⚠️</div>
+          <div>
+            <div style={{ fontSize:12, fontWeight:700, color:'var(--amber)' }}>
+              High sector concentration
+            </div>
+            <div style={{ fontSize:11, color:'var(--text-secondary)', fontFamily:'JetBrains Mono,monospace', marginTop:2 }}>
+              {sectorConcentration.pct}% of your portfolio is in {sectorConcentration.sector}. Consider diversifying across other sectors to reduce correlated risk.
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── KPIs ───────────────────────────────────────────────────────────── */}
       <div style={{ display:'grid', gridTemplateColumns:'repeat(6,1fr)', gap:12 }}>
@@ -285,6 +338,10 @@ export default function RiskMatrix() {
                   <td style={{ padding:'9px 12px', ...monoSm }}>
                     <span style={{ background:'rgba(0,245,212,0.08)', color:'var(--cyan)', border:'1px solid rgba(0,245,212,0.15)', padding:'2px 7px', borderRadius:4, fontSize:10, fontWeight:600 }}>{p.symbol}</span>
                   </td>
+                  {/* ✅ Feature: montant réel investi, pas seulement le % */}
+                  <td style={{ padding:'9px 12px', ...monoSm, color:'var(--text-secondary)' }}>
+                    ${p.marketValue.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                  </td>
                   <td style={{ padding:'9px 12px', ...monoSm }}>{p.weight}%</td>
                   <td style={{ padding:'9px 12px', ...monoSm, color:p.beta>1?'var(--amber)':'var(--green)' }}>{p.beta.toFixed(2)}</td>
                   <td style={{ padding:'9px 12px', ...monoSm, color:'var(--red)' }}>${Math.abs(p.contribVar).toLocaleString()}</td>
@@ -298,7 +355,15 @@ export default function RiskMatrix() {
                       {t(`riskMatrix.action_${p.sizing?.action}`)}
                     </span>
                     {p.sizing?.action !== 'HOLD' && (
-                      <span style={{ color: 'var(--text-muted)', marginLeft: 6 }}>→ {p.sizing?.suggestedWeightPct}%</span>
+                      <span style={{ color: 'var(--text-muted)', marginLeft: 6 }}>
+                        → {p.sizing?.suggestedWeightPct}%
+                        {/* ✅ Feature: delta en $ à côté du %, ex. "(-$34)" */}
+                        {typeof p.sizing?.deltaDollar === 'number' && (
+                          <span style={{ marginLeft: 4 }}>
+                            ({p.sizing.deltaDollar >= 0 ? '+' : '−'}${Math.abs(p.sizing.deltaDollar).toLocaleString(undefined, { maximumFractionDigits: 0 })})
+                          </span>
+                        )}
+                      </span>
                     )}
                   </td>
                 </tr>
@@ -414,6 +479,10 @@ export default function RiskMatrix() {
           </div>
         </div>
       </div>
+
+      <style>{`
+        @keyframes riskPulse { 0%,100% { opacity:1 } 50% { opacity:.3 } }
+      `}</style>
 
     </>
   );

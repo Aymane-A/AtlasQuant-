@@ -14,7 +14,7 @@
  *   - CVaR / Expected Shortfall (perte moyenne au-delà du VaR)
  *   - Matrice de corrélation entre positions
  *   - Stress tests (impact estimé de scénarios historiques)
- *   - Répartition sectorielle
+ *   - Répartition sectorielle + concentration
  */
 
 const logger = require('../utils/logger');
@@ -23,6 +23,10 @@ const { fetchCandlesForBacktest } = require('./backtestMarketRouter.service');
 const BENCHMARK_SYMBOL = 'SPY';
 const TRADING_DAYS_PER_YEAR = 252;
 const VAR_CONFIDENCE = 0.95; // VaR à 95% — standard dans l'industrie
+
+// ✅ Feature: seuil au-delà duquel on considère le portefeuille "concentré"
+// sur un secteur — utilisé pour le warning banner côté frontend.
+const HIGH_SECTOR_CONCENTRATION_THRESHOLD = 0.60;
 
 // ── Classification sectorielle (mapping manuel) ─────────────────
 // Couvre les symboles les plus courants. Tout symbole absent
@@ -66,6 +70,17 @@ function getSector(symbol) {
   const clean = symbol.trim().toUpperCase();
   return SECTOR_MAP[clean] || 'Other';
 }
+
+// ✅ Perf fix: cache en mémoire des closes journaliers par symbole, TTL 5min.
+// Avant ce fix, chaque switch d'horizon (1D/1W/1M) déclenchait un refetch
+// complet de tous les symboles + benchmark chez Yahoo Finance/Binance, alors
+// que lookbackDays est fixe (252j) et ne dépend PAS de l'horizon demandé —
+// seul le scaling de VaR/CVaR en aval change avec l'horizon. Le cache élimine
+// donc ~100% des refetchs redondants lors des changements d'horizon, et la
+// plupart des refetchs lors des re-renders rapprochés (custom stress test
+// juste après un chargement de matrice, par ex.).
+const CLOSES_CACHE_TTL_MS = 5 * 60 * 1000;
+const closesCache = new Map(); // symbol (uppercase) -> { closes, fetchedAt }
 
 /**
  * Calcule les rendements journaliers à partir d'une série de prix de clôture.
@@ -193,22 +208,45 @@ function calculateRiskScore({ beta, volatility, maxWeight }) {
  * Indice de Herfindahl-Hirschman (HHI) appliqué aux poids du portefeuille.
  * Somme des poids au carré. Plus c'est élevé, plus le portefeuille est
  * concentré sur peu de positions.
- *   HHI = 1/N (équipondéré, N positions) → minimum, le plus diversifié
- *   HHI = 1   (tout sur une seule position) → maximum, aucune diversification
  *
- * On convertit en "Diversification Score" 0-100 (100 = parfaitement
- * diversifié) via : score = (1 - HHI) / (1 - 1/N) × 100, normalisé pour
- * que le score tienne compte du nombre de positions disponibles.
+ * ✅ Fix diversification score: l'ancienne version calculait UNIQUEMENT le
+ * HHI sur les poids (weightHHI) — un portefeuille de 3 positions équilibrées
+ * (45%/14%/41%) mais TOUTES dans le même secteur (ex: Technology) obtenait un
+ * score élevé (~91/100), alors que le portefeuille n'est absolument pas
+ * diversifié sectoriellement. Le score contredisait visuellement le donut
+ * "Sector Risk Concentration" qui affichait 100% Technology.
+ *
+ * Le score combine désormais deux composantes :
+ *   - weightScore (40%) : équilibre des poids entre positions (ancien calcul)
+ *   - sectorScore (60%) : dispersion sectorielle, pondérée plus fort car
+ *     c'est le facteur le plus visible/impactant pour l'utilisateur — un
+ *     portefeuille mono-secteur ne devrait jamais scorer "bien diversifié"
+ *     même si les poids individuels sont équilibrés.
  */
-function calculateDiversificationScore(weights) {
+function calculateDiversificationScore(weights, sectors = []) {
   const n = weights.length;
   if (n <= 1) return 0; // une seule position = aucune diversification possible
 
-  const hhi = weights.reduce((sum, w) => sum + w * w, 0);
+  const weightHHI = weights.reduce((sum, w) => sum + w * w, 0);
   const minHHI = 1 / n; // HHI si toutes les positions étaient égales
-  const score = ((1 - hhi) / (1 - minHHI)) * 100;
+  const weightScore = ((1 - weightHHI) / (1 - minHHI)) * 100;
 
-  return Math.round(Math.max(0, Math.min(100, score)));
+  // Si les secteurs ne sont pas fournis (compat ascendante / tests), on
+  // retombe sur l'ancien comportement plutôt que de planter.
+  if (!sectors || sectors.length !== weights.length) {
+    return Math.round(Math.max(0, Math.min(100, weightScore)));
+  }
+
+  const sectorWeights = {};
+  weights.forEach((w, i) => {
+    const s = sectors[i] || 'Other';
+    sectorWeights[s] = (sectorWeights[s] || 0) + w;
+  });
+  const sectorHHI = Object.values(sectorWeights).reduce((sum, w) => sum + w * w, 0);
+  const sectorScore = (1 - sectorHHI) * 100; // 100 = chaque position son propre secteur, 0 = tout dans un secteur
+
+  const finalScore = weightScore * 0.4 + sectorScore * 0.6;
+  return Math.round(Math.max(0, Math.min(100, finalScore)));
 }
 
 /**
@@ -265,8 +303,15 @@ function getPositionSizingSuggestion(positionWeight, positionBeta, portfolioBeta
 /**
  * Récupère les closes journaliers des N derniers jours pour un symbole,
  * via le router existant (crypto → Binance, stock → Yahoo).
+ * ✅ Perf fix: passe par closesCache (TTL 5min) avant tout appel réseau.
  */
 async function fetchDailyCloses(symbol, lookbackDays = 252) {
+  const cacheKey = symbol.trim().toUpperCase();
+  const cached = closesCache.get(cacheKey);
+  if (cached && (Date.now() - cached.fetchedAt) < CLOSES_CACHE_TTL_MS) {
+    return cached.closes;
+  }
+
   const end = new Date();
   const start = new Date();
   start.setDate(start.getDate() - lookbackDays);
@@ -278,7 +323,9 @@ async function fetchDailyCloses(symbol, lookbackDays = 252) {
     end.toISOString().slice(0, 10)
   );
 
-  return candles.map(c => c.close);
+  const closes = candles.map(c => c.close);
+  closesCache.set(cacheKey, { closes, fetchedAt: Date.now() });
+  return closes;
 }
 
 /**
@@ -376,7 +423,12 @@ async function computeRiskMatrix(positions, horizon = '1D') {
 
   const maxWeight = Math.max(...positionDetails.map(p => p.weight), 0);
   const riskScore = calculateRiskScore({ beta: portfolioBeta, volatility: portfolioVolatility, maxWeight });
-  const diversificationScore = calculateDiversificationScore(positionDetails.map(p => p.weight));
+
+  // ✅ Fix: sectors passés en 2e argument, voir doc-comment de la fonction.
+  const diversificationScore = calculateDiversificationScore(
+    positionDetails.map(p => p.weight),
+    positionDetails.map(p => p.sector)
+  );
 
   // ── 6. VaR contribution par position + suggestion de sizing ──
   for (const p of positionDetails) {
@@ -385,6 +437,12 @@ async function computeRiskMatrix(positions, horizon = '1D') {
                     : p.beta < portfolioBeta * 0.85 ? 'low'
                     : 'med';
     p.sizingSuggestion = getPositionSizingSuggestion(p.weight, p.beta, portfolioBeta, p.marginalRisk);
+
+    // ✅ Feature: delta en $ de la suggestion de sizing, en plus du %.
+    // Un utilisateur comprend plus vite "vends ~$34" que "-25% de poids".
+    const suggestedValueDollar = (p.sizingSuggestion.suggestedWeightPct / 100) * totalValue;
+    p.sizingSuggestion.suggestedValueDollar = parseFloat(suggestedValueDollar.toFixed(2));
+    p.sizingSuggestion.deltaDollar = parseFloat((suggestedValueDollar - p.marketValue).toFixed(2));
   }
 
   // ── 7. Matrice de corrélation entre positions ──
@@ -420,11 +478,24 @@ async function computeRiskMatrix(positions, horizon = '1D') {
     };
   });
 
-  // ── 9. Répartition sectorielle ──
+  // ── 9. Répartition sectorielle + concentration ──
   const sectorWeights = {};
   for (const p of positionDetails) {
     sectorWeights[p.sector] = (sectorWeights[p.sector] || 0) + p.weight;
   }
+
+  // ✅ Feature: secteur dominant + son poids, exposé séparément pour que le
+  // frontend puisse afficher un warning banner sans devoir re-dériver le max
+  // depuis sectorRisk lui-même.
+  const sectorEntries = Object.entries(sectorWeights).sort((a, b) => b[1] - a[1]);
+  const topSector = sectorEntries[0] || null;
+  const sectorConcentration = topSector
+    ? {
+        sector: topSector[0],
+        pct: parseFloat((topSector[1] * 100).toFixed(1)),
+        isHighConcentration: topSector[1] >= HIGH_SECTOR_CONCENTRATION_THRESHOLD,
+      }
+    : null;
 
   // ── 10. Distribution des rendements (histogramme pour le frontend) ──
   const returnDistribution = buildReturnHistogram(portfolioReturns);
@@ -442,8 +513,10 @@ async function computeRiskMatrix(positions, horizon = '1D') {
       riskScore,
       diversificationScore,
     },
+    sectorConcentration,
     positions: positionDetails.map(p => ({
       symbol: p.symbol,
+      marketValue: parseFloat(p.marketValue.toFixed(2)),
       weight: parseFloat((p.weight * 100).toFixed(1)),
       beta: parseFloat(p.beta.toFixed(2)),
       contribVar: parseFloat(p.contribVarDollar.toFixed(2)),
