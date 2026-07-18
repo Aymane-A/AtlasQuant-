@@ -28,7 +28,7 @@
     "qrcode": "^1.5.4",
     "react-i18next": "^17.0.8",
     "rss-parser": "^3.13.0",
-    "sequelize": "^3.30.0",
+    "sequelize": "^6.37.8",
     "speakeasy": "^2.0.0",
     "winston": "^3.11.0",
     "ws": "^8.21.0",
