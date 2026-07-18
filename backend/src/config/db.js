@@ -53,6 +53,11 @@ async function query(text, params) {
 async function getClient() { return pool.connect(); }
 
 async function migrate() {
+  // ✅ Fix: requis par gen_random_uuid() (user_sessions, api_keys) sur
+  // PostgreSQL < 13 où gen_random_uuid() n'est pas native. Sans risque sur
+  // les versions plus récentes — CREATE EXTENSION IF NOT EXISTS est idempotent.
+  await pool.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto;`);
+
   await pool.query(`
     -- ── Core tables ───────────────────────────────────────────────────────────
     CREATE TABLE IF NOT EXISTS users (
@@ -130,10 +135,15 @@ async function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_backtest_user ON backtest_history(user_id);
 
+    -- ✅ Fix: 'notifications' créée directement en JSONB (au lieu de BOOLEAN).
+    -- settings.controller.js y stocke un objet {email_alerts, push_alerts,
+    -- price_alerts} depuis le début — BOOLEAN cassait toute écriture/lecture
+    -- pour les installs neuves. Les installs existantes sont corrigées plus
+    -- bas par la migration incrémentale ALTER COLUMN ... TYPE JSONB USING.
     CREATE TABLE IF NOT EXISTS user_settings (
       user_id           INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
       theme             TEXT    DEFAULT 'dark',
-      notifications     BOOLEAN DEFAULT TRUE,
+      notifications     JSONB   DEFAULT '{"email_alerts":true,"push_alerts":true,"price_alerts":true}'::jsonb,
       api_keys_enabled  BOOLEAN DEFAULT FALSE,
       updated_at        TIMESTAMPTZ DEFAULT NOW()
     );
@@ -253,6 +263,38 @@ async function migrate() {
       sent          BOOLEAN     NOT NULL DEFAULT FALSE
     );
     CREATE INDEX IF NOT EXISTS idx_digest_queue_unsent ON alert_digest_queue(user_id) WHERE sent = false;
+
+    -- ── Sécurité: sessions & API keys ────────────────────────────────────────
+    -- ✅ Fix: les CREATE INDEX qui filtrent sur revoked_at (WHERE revoked_at
+    -- IS NULL) ont été retirés d'ici et déplacés tout en bas de migrate(),
+    -- APRÈS les ALTER TABLE ADD COLUMN IF NOT EXISTS. Raison: si ces tables
+    -- existaient déjà en base (run précédent avorté avant la fin du script),
+    -- CREATE TABLE IF NOT EXISTS est un no-op et ne recrée pas revoked_at —
+    -- créer l'index dans la même requête plantait alors avec "column
+    -- revoked_at does not exist". Les colonnes sont maintenant garanties
+    -- présentes par ALTER TABLE avant que l'index ne soit créé.
+    CREATE TABLE IF NOT EXISTS user_sessions (
+      id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      refresh_hash  TEXT NOT NULL,           -- hash du refresh token, jamais le token en clair
+      ip_address    TEXT,
+      user_agent    TEXT,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_active   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      revoked_at    TIMESTAMPTZ
+    );
+
+    CREATE TABLE IF NOT EXISTS api_keys (
+      id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name          TEXT NOT NULL,
+      key_prefix    TEXT NOT NULL,           -- ex: 'aq_live_8f2c' — affiché à l'user
+      key_hash      TEXT NOT NULL,           -- sha256 de la clé complète, jamais stockée en clair
+      scopes        JSONB NOT NULL DEFAULT '["read"]',  -- ['read','trade']
+      last_used_at  TIMESTAMPTZ,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      revoked_at    TIMESTAMPTZ
+    );
   `);
 
   // ── Triggers ──────────────────────────────────────────────
@@ -308,9 +350,74 @@ async function migrate() {
     ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS signal_alert_min_confidence INTEGER NOT NULL DEFAULT 75;
 
     ALTER TABLE signals ADD COLUMN IF NOT EXISTS asset_class TEXT NOT NULL DEFAULT 'Crypto';
+
+    -- migration: 2fa, sessions, api_keys
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS twofa_secret TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS twofa_enabled BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS twofa_backup_codes JSONB DEFAULT '[]';
+
+    -- ✅ Fix: user_sessions/api_keys existaient déjà en base (créées par un
+    -- run précédent qui avait crashé avant la fin du script), donc
+    -- CREATE TABLE IF NOT EXISTS ne les complétait pas. On force chaque
+    -- colonne attendue avec ADD COLUMN IF NOT EXISTS pour rendre la
+    -- migration réellement idempotente peu importe l'état de départ.
+    ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS user_id      INTEGER REFERENCES users(id) ON DELETE CASCADE;
+    ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS refresh_hash TEXT;
+    ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS ip_address   TEXT;
+    ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS user_agent   TEXT;
+    ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW();
+    ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS last_active  TIMESTAMPTZ NOT NULL DEFAULT NOW();
+    ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS revoked_at   TIMESTAMPTZ;
+
+    ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS user_id      INTEGER REFERENCES users(id) ON DELETE CASCADE;
+    ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS name         TEXT;
+    ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS key_prefix   TEXT;
+    ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS key_hash     TEXT;
+    ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS scopes       JSONB NOT NULL DEFAULT '["read"]';
+    ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ;
+    ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW();
+    ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS revoked_at   TIMESTAMPTZ;
+    ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS language TEXT NOT NULL DEFAULT 'en';
+    ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS timezone TEXT NOT NULL DEFAULT 'UTC';
   `);
+
+  // ✅ Fix critique: 'notifications' était créée en BOOLEAN dans les
+  // installations existantes, alors que settings.controller.js y écrit/lit
+  // un objet JSON ({email_alerts, push_alerts, price_alerts}). Toute
+  // installation antérieure à ce fix plante sur POST /settings/update
+  // (section 'notifications') avec "invalid input syntax for type boolean".
+  // On convertit la colonne en JSONB en préservant le sens de l'ancienne
+  // valeur boolean, sans y toucher si la table est déjà à jour (idempotent).
+  await pool.query(`
+    DO $$ BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'user_settings' AND column_name = 'notifications' AND data_type = 'boolean'
+      ) THEN
+        ALTER TABLE user_settings ALTER COLUMN notifications DROP DEFAULT;
+        ALTER TABLE user_settings ALTER COLUMN notifications TYPE JSONB USING
+          CASE
+            WHEN notifications IS TRUE  THEN '{"email_alerts":true,"push_alerts":true,"price_alerts":true}'::jsonb
+            WHEN notifications IS FALSE THEN '{"email_alerts":false,"push_alerts":false,"price_alerts":false}'::jsonb
+            ELSE '{"email_alerts":true,"push_alerts":true,"price_alerts":true}'::jsonb
+          END;
+        ALTER TABLE user_settings ALTER COLUMN notifications
+          SET DEFAULT '{"email_alerts":true,"push_alerts":true,"price_alerts":true}'::jsonb;
+      END IF;
+    END $$;
+  `);
+
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_signals_asset_class ON signals(asset_class);
+  `);
+
+  // ✅ Fix: ces deux index doivent être créés APRÈS les ALTER TABLE ADD
+  // COLUMN ci-dessus (voir commentaire sur user_sessions/api_keys plus
+  // haut) — sinon "column revoked_at does not exist" sur une base où ces
+  // tables existaient déjà sans cette colonne.
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_sessions_user ON user_sessions(user_id) WHERE revoked_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_apikeys_user   ON api_keys(user_id)     WHERE revoked_at IS NULL;
   `);
 
   logger.info('[db] ✅ Tables PostgreSQL prêtes');
