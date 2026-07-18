@@ -379,6 +379,43 @@ async function migrate() {
     ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS revoked_at   TIMESTAMPTZ;
     ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS language TEXT NOT NULL DEFAULT 'en';
     ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS timezone TEXT NOT NULL DEFAULT 'UTC';
+
+    -- ✅ Feature: devise d'affichage, webhook custom (Discord/Slack/générique),
+    -- et paramètres de gestion du risque avancés (max daily loss, max
+    -- position size, stop-loss par défaut). Voir settings.controller.js
+    -- (sections 'locale', 'webhook', 'trading') pour la validation associée.
+    ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS currency VARCHAR(3) NOT NULL DEFAULT 'USD';
+    ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS webhook_url TEXT;
+    ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS webhook_enabled BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS risk_max_daily_loss_pct NUMERIC NOT NULL DEFAULT 5;
+    ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS risk_max_position_pct NUMERIC NOT NULL DEFAULT 20;
+    ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS risk_default_stoploss_pct NUMERIC NOT NULL DEFAULT 2;
+
+    -- Email verification
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verification_token TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verification_sent_at TIMESTAMPTZ;
+
+    -- Quiet hours
+    ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS quiet_hours_enabled BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS quiet_hours_start VARCHAR(5) NOT NULL DEFAULT '23:00';
+    ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS quiet_hours_end VARCHAR(5) NOT NULL DEFAULT '07:00';
+
+    -- Telegram
+    ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS telegram_chat_id TEXT;
+    ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS telegram_enabled BOOLEAN NOT NULL DEFAULT false;
+
+    -- Audit log
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id          SERIAL PRIMARY KEY,
+      user_id     INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      event_type  TEXT NOT NULL,
+      ip_address  TEXT,
+      user_agent  TEXT,
+      metadata    JSONB,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_audit_log_user ON audit_log(user_id, created_at DESC);
   `);
 
   // ✅ Fix critique: 'notifications' était créée en BOOLEAN dans les

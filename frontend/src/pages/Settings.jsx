@@ -5,16 +5,18 @@ const monoSm  = { fontFamily:'JetBrains Mono,monospace', fontSize:11 };
 const label10 = { fontSize:10, letterSpacing:'.15em', textTransform:'uppercase', fontFamily:'JetBrains Mono,monospace', color:'var(--text-muted)', marginBottom:8, display:'block' };
 
 const TABS = [
-  { id:'profile',       icon:'◉', label:'Profile'       },
+  { id:'profile',       icon:'◉', label:'Profile'        },
   { id:'notifications', icon:'◈', label:'Notifications'  },
-  { id:'trading',       icon:'◫', label:'Trading'        },
-  { id:'signalAlerts',  icon:'⚡', label:'Signal Alerts'  },
-  { id:'appearance',    icon:'⬡', label:'Appearance'     },
-  { id:'security',      icon:'⬙', label:'Security'       },
-  { id:'sessions',      icon:'◐', label:'Sessions'       },
-  { id:'apiKeys',       icon:'⚿', label:'API Keys'       },
-  { id:'locale', icon:'🌐', label:'Language & Region' },
-  { id:'danger', icon:'⚠',  label:'Danger Zone'       },
+  { id:'trading',       icon:'◫', label:'Trading'         },
+  { id:'signalAlerts',  icon:'⚡', label:'Signal Alerts'   },
+  { id:'webhook',       icon:'🔗', label:'Webhook'         },
+  { id:'appearance',    icon:'⬡', label:'Appearance'      },
+  { id:'security',      icon:'⬙', label:'Security'        },
+  { id:'sessions',      icon:'◐', label:'Sessions'        },
+  { id:'apiKeys',       icon:'⚿', label:'API Keys'        },
+  { id:'locale',        icon:'🌐', label:'Language & Region' },
+  { id:'auditLog',      icon:'📜', label:'Activity Log'   },
+  { id:'danger',        icon:'⚠',  label:'Danger Zone'    },
 ];
 
 function Field({ label, children }) {
@@ -45,6 +47,21 @@ function Input({ value, onChange, type='text', placeholder='', disabled=false, m
   );
 }
 
+function Toggle({ checked, onChange }) {
+  return (
+    <button onClick={onChange} style={{
+      width:44, height:24, borderRadius:12, border:'none', cursor:'pointer', position:'relative', flexShrink:0,
+      background: checked ? 'var(--cyan)' : 'rgba(255,255,255,0.1)',
+      transition:'background .2s',
+    }}>
+      <div style={{
+        position:'absolute', top:3, width:18, height:18, borderRadius:'50%', background:'#fff',
+        transition:'left .2s', left: checked ? 23 : 3,
+      }} />
+    </button>
+  );
+}
+
 function SaveBtn({ onClick, saving, label='Save Changes' }) {
   return (
     <button onClick={onClick} disabled={saving} style={{
@@ -54,6 +71,18 @@ function SaveBtn({ onClick, saving, label='Save Changes' }) {
       opacity: saving ? 0.7 : 1, marginTop:8,
     }}>
       {saving ? 'Saving...' : label}
+    </button>
+  );
+}
+
+function GhostBtn({ onClick, disabled, children }) {
+  return (
+    <button onClick={onClick} disabled={disabled} style={{
+      padding:'10px 24px', borderRadius:9, border:'1px solid var(--border)',
+      background:'rgba(255,255,255,0.02)', color:'var(--text-primary)', fontSize:13, fontWeight:700,
+      fontFamily:'Syne,sans-serif', cursor: disabled ? 'not-allowed' : 'pointer', marginTop:8,
+    }}>
+      {children}
     </button>
   );
 }
@@ -79,6 +108,8 @@ function Toast({ msg, ok }) {
 function ProfileSection({ data, onToast }) {
   const [name,   setName]   = useState(data?.profile?.name  || '');
   const [saving, setSaving] = useState(false);
+  const [resending, setResending] = useState(false);
+  const emailVerified = !!data?.profile?.email_verified;
 
   const save = async () => {
     if (!name.trim()) return onToast('Display name cannot be empty', false);
@@ -90,6 +121,15 @@ function ProfileSection({ data, onToast }) {
     finally { setSaving(false); }
   };
 
+  const resendVerification = async () => {
+    setResending(true);
+    try {
+      await api.post('/settings/email/resend-verification');
+      onToast('Verification email sent', true);
+    } catch (err) { onToast(err?.error || 'Could not send verification email', false); }
+    finally { setResending(false); }
+  };
+
   return (
     <div>
       <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 }}>
@@ -98,8 +138,21 @@ function ProfileSection({ data, onToast }) {
         </Field>
         <Field label="Email Address">
           <Input value={data?.profile?.email || ''} onChange={() => {}} disabled />
-          <div style={{ ...monoSm, color:'var(--text-muted)', marginTop:6 }}>
-            ⓘ Contact support to change your email
+          <div style={{ display:'flex', alignItems:'center', gap:10, marginTop:6, flexWrap:'wrap' }}>
+            {emailVerified ? (
+              <span style={{ ...monoSm, color:'var(--green)' }}>✓ Verified</span>
+            ) : (
+              <>
+                <span style={{ ...monoSm, color:'var(--amber)' }}>⚠ Not verified</span>
+                <button onClick={resendVerification} disabled={resending} style={{
+                  padding:'4px 10px', borderRadius:6, border:'1px solid var(--border)',
+                  background:'transparent', color:'var(--cyan)', fontSize:11,
+                  cursor: resending ? 'not-allowed' : 'pointer', fontFamily:'JetBrains Mono,monospace',
+                }}>
+                  {resending ? 'Sending...' : 'Resend verification email'}
+                </button>
+              </>
+            )}
           </div>
         </Field>
       </div>
@@ -120,11 +173,22 @@ function ProfileSection({ data, onToast }) {
   );
 }
 
-// ── Notifications ─────────────────────────────────────────
+// ── Notifications (+ Telegram + Quiet Hours) ─────────────
 function NotificationsSection({ data, onToast }) {
-  const init = data?.settings?.notifications || { email_alerts:true, push_alerts:true, price_alerts:true };
+  const s = data?.settings || {};
+  const init = s.notifications || { email_alerts:true, push_alerts:true, price_alerts:true };
   const [notifs, setNotifs] = useState(init);
   const [saving, setSaving] = useState(false);
+
+  const [chatId, setChatId]     = useState(s.telegram_chat_id || '');
+  const [tgEnabled, setTgEnabled] = useState(!!s.telegram_enabled);
+  const [tgSaving, setTgSaving]   = useState(false);
+  const [tgTesting, setTgTesting] = useState(false);
+
+  const [qhEnabled, setQhEnabled] = useState(!!s.quiet_hours_enabled);
+  const [qhStart, setQhStart]     = useState(s.quiet_hours_start || '23:00');
+  const [qhEnd, setQhEnd]         = useState(s.quiet_hours_end || '07:00');
+  const [qhSaving, setQhSaving]   = useState(false);
 
   const toggle = key => setNotifs(prev => ({ ...prev, [key]: !prev[key] }));
 
@@ -135,6 +199,42 @@ function NotificationsSection({ data, onToast }) {
       onToast('Notifications updated', true);
     } catch { onToast('Error updating notifications', false); }
     finally { setSaving(false); }
+  };
+
+  const saveTelegram = async () => {
+    if (tgEnabled && !/^-?\d+$/.test(chatId.trim())) {
+      return onToast('Chat ID invalide (doit être numérique)', false);
+    }
+    setTgSaving(true);
+    try {
+      await api.post('/settings/update', { section:'telegram', payload:{ chatId: chatId.trim(), enabled: tgEnabled } });
+      onToast('Telegram settings updated', true);
+    } catch (err) { onToast(err?.error || 'Error updating Telegram', false); }
+    finally { setTgSaving(false); }
+  };
+
+  const testTelegram = async () => {
+    if (!chatId.trim()) return onToast('Enter your Chat ID first', false);
+    if (!/^-?\d+$/.test(chatId.trim())) return onToast('Chat ID invalide (doit être numérique)', false);
+    setTgTesting(true);
+    try {
+      await api.post('/settings/telegram/test', { chatId: chatId.trim() });
+      onToast('Test message sent — check Telegram', true);
+    } catch (err) { onToast(err?.error || 'Could not send test message', false); }
+    finally { setTgTesting(false); }
+  };
+
+  const saveQuietHours = async () => {
+    const timeRe = /^([01]\d|2[0-3]):([0-5]\d)$/;
+    if (!timeRe.test(qhStart) || !timeRe.test(qhEnd)) {
+      return onToast('Use HH:MM format (e.g. 23:00)', false);
+    }
+    setQhSaving(true);
+    try {
+      await api.post('/settings/update', { section:'quietHours', payload:{ enabled: qhEnabled, start: qhStart, end: qhEnd } });
+      onToast('Quiet hours updated', true);
+    } catch { onToast('Error updating quiet hours', false); }
+    finally { setQhSaving(false); }
   };
 
   const items = [
@@ -151,40 +251,100 @@ function NotificationsSection({ data, onToast }) {
             <div style={{ fontSize:13, fontWeight:600, color:'var(--text-primary)', marginBottom:4 }}>{item.label}</div>
             <div style={{ ...monoSm, color:'var(--text-secondary)' }}>{item.desc}</div>
           </div>
-          <button onClick={() => toggle(item.key)} style={{
-            width:44, height:24, borderRadius:12, border:'none', cursor:'pointer', position:'relative', flexShrink:0,
-            background: notifs[item.key] ? 'var(--cyan)' : 'rgba(255,255,255,0.1)',
-            transition:'background .2s',
-          }}>
-            <div style={{
-              position:'absolute', top:3, width:18, height:18, borderRadius:'50%', background:'#fff',
-              transition:'left .2s', left: notifs[item.key] ? 23 : 3,
-            }} />
-          </button>
+          <Toggle checked={notifs[item.key]} onChange={() => toggle(item.key)} />
         </div>
       ))}
       <div style={{ marginTop:20 }}>
         <SaveBtn onClick={save} saving={saving} />
       </div>
+
+      {/* ── Telegram ── */}
+      <div style={{ marginTop:32, paddingTop:24, borderTop:'1px solid rgba(255,255,255,0.06)' }}>
+        <label style={label10}>Telegram</label>
+        <div style={{ ...monoSm, color:'var(--text-secondary)', marginBottom:16 }}>
+          Reçois tes alertes et signaux directement sur Telegram. Trouve ton Chat ID en envoyant un message à{' '}
+          <span style={{ color:'var(--cyan)' }}>@userinfobot</span> sur Telegram.
+        </div>
+
+        <Field label="Telegram Chat ID">
+          <Input value={chatId} onChange={e => setChatId(e.target.value)} placeholder="e.g. 123456789" />
+        </Field>
+
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'14px 0', borderBottom:'1px solid rgba(255,255,255,0.04)', marginBottom:16 }}>
+          <div>
+            <div style={{ fontSize:13, fontWeight:600, color:'var(--text-primary)', marginBottom:4 }}>Enable Telegram Alerts</div>
+            <div style={{ ...monoSm, color:'var(--text-secondary)' }}>Reçois les alertes déclenchées sur ce chat</div>
+          </div>
+          <Toggle checked={tgEnabled} onChange={() => setTgEnabled(v => !v)} />
+        </div>
+
+        <div style={{ display:'flex', gap:10, flexWrap:'wrap' }}>
+          <SaveBtn onClick={saveTelegram} saving={tgSaving} />
+          <GhostBtn onClick={testTelegram} disabled={tgTesting}>
+            {tgTesting ? 'Sending...' : 'Send Test Message'}
+          </GhostBtn>
+        </div>
+      </div>
+
+      {/* ── Quiet Hours ── */}
+      <div style={{ marginTop:32, paddingTop:24, borderTop:'1px solid rgba(255,255,255,0.06)' }}>
+        <label style={label10}>Quiet Hours</label>
+        <div style={{ ...monoSm, color:'var(--text-secondary)', marginBottom:16 }}>
+          Mets tes notifications en pause pendant une plage horaire quotidienne (ex. la nuit).
+        </div>
+
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'14px 0', borderBottom:'1px solid rgba(255,255,255,0.04)', marginBottom:16 }}>
+          <div>
+            <div style={{ fontSize:13, fontWeight:600, color:'var(--text-primary)', marginBottom:4 }}>Enable Quiet Hours</div>
+            <div style={{ ...monoSm, color:'var(--text-secondary)' }}>Suspend les alertes durant la plage définie ci-dessous</div>
+          </div>
+          <Toggle checked={qhEnabled} onChange={() => setQhEnabled(v => !v)} />
+        </div>
+
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 }}>
+          <Field label="From">
+            <Input value={qhStart} onChange={e => setQhStart(e.target.value)} placeholder="23:00" />
+          </Field>
+          <Field label="To">
+            <Input value={qhEnd} onChange={e => setQhEnd(e.target.value)} placeholder="07:00" />
+          </Field>
+        </div>
+        <div style={{ ...monoSm, color:'var(--text-muted)', marginBottom:16 }}>
+          Format 24h (HH:MM), basé sur ton fuseau horaire (Language &amp; Region)
+        </div>
+
+        <SaveBtn onClick={saveQuietHours} saving={qhSaving} />
+      </div>
     </div>
   );
 }
 
-// ── Trading ───────────────────────────────────────────────
+// ── Trading (+ Risk Management) ──────────────────────────
 function TradingSection({ data, onToast }) {
   const s = data?.settings || {};
   const [capital,   setCapital]   = useState(s.default_capital   || 100000);
   const [riskPct,   setRiskPct]   = useState(s.default_risk_pct  || 1);
   const [timeframe, setTimeframe] = useState(s.default_timeframe || 'Daily');
+  const [maxDailyLoss, setMaxDailyLoss] = useState(s.risk_max_daily_loss_pct ?? 5);
+  const [maxPosition,  setMaxPosition]  = useState(s.risk_max_position_pct ?? 20);
+  const [defaultStoploss, setDefaultStoploss] = useState(s.risk_default_stoploss_pct ?? 2);
   const [saving,    setSaving]    = useState(false);
 
   const save = async () => {
     if (!capital || capital <= 0) return onToast('Capital must be greater than 0', false);
     if (riskPct <= 0 || riskPct > 100) return onToast('Risk % must be between 0 and 100', false);
+    if (maxDailyLoss <= 0 || maxDailyLoss > 100) return onToast('Max daily loss must be between 0 and 100', false);
+    if (maxPosition <= 0 || maxPosition > 100) return onToast('Max position size must be between 0 and 100', false);
 
     setSaving(true);
     try {
-      await api.post('/settings/update', { section:'trading', payload:{ default_capital: capital, default_risk_pct: riskPct, default_timeframe: timeframe } });
+      await api.post('/settings/update', {
+        section:'trading',
+        payload:{
+          default_capital: capital, default_risk_pct: riskPct, default_timeframe: timeframe,
+          max_daily_loss_pct: maxDailyLoss, max_position_pct: maxPosition, default_stoploss_pct: defaultStoploss,
+        },
+      });
       onToast('Trading preferences updated', true);
     } catch { onToast('Error updating trading settings', false); }
     finally { setSaving(false); }
@@ -209,11 +369,30 @@ function TradingSection({ data, onToast }) {
           {['1h','4h','Daily','Weekly'].map(tf => <option key={tf} value={tf}>{tf}</option>)}
         </select>
       </Field>
-      <div style={{ background:'rgba(251,191,36,0.06)', border:'1px solid rgba(251,191,36,0.15)', borderRadius:10, padding:'12px 16px', marginBottom:20 }}>
+      <div style={{ background:'rgba(251,191,36,0.06)', border:'1px solid rgba(251,191,36,0.15)', borderRadius:10, padding:'12px 16px', marginBottom:24 }}>
         <div style={{ ...monoSm, color:'var(--amber)' }}>
           ⚠ Risk: ${((capital || 0) * (riskPct || 0) / 100).toLocaleString()} per trade ({riskPct || 0}% of ${Number(capital || 0).toLocaleString()})
         </div>
       </div>
+
+      <div style={{ paddingTop:8, borderTop:'1px solid rgba(255,255,255,0.06)', marginBottom:20 }}>
+        <label style={{ ...label10, marginTop:20 }}>Risk Management</label>
+        <div style={{ ...monoSm, color:'var(--text-secondary)', marginBottom:16 }}>
+          Ces limites servent de garde-fous — utilisées par le dashboard et les futurs contrôles de trading automatique.
+        </div>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 }}>
+          <Field label="Max Daily Loss (%)">
+            <Input value={maxDailyLoss} onChange={e => setMaxDailyLoss(Number(e.target.value))} type="number" min="0.1" max="100" step="0.5" />
+          </Field>
+          <Field label="Max Position Size (% of capital)">
+            <Input value={maxPosition} onChange={e => setMaxPosition(Number(e.target.value))} type="number" min="0.1" max="100" step="1" />
+          </Field>
+        </div>
+        <Field label="Default Stop-Loss (%)">
+          <Input value={defaultStoploss} onChange={e => setDefaultStoploss(Number(e.target.value))} type="number" min="0.1" max="100" step="0.1" />
+        </Field>
+      </div>
+
       <SaveBtn onClick={save} saving={saving} />
     </div>
   );
@@ -321,6 +500,70 @@ function SignalAlertsSection({ data, onToast }) {
       </Field>
 
       <SaveBtn onClick={save} saving={saving} />
+    </div>
+  );
+}
+
+// ── Webhook (Discord / Slack / générique) ────────────────
+function WebhookSection({ data, onToast }) {
+  const s = data?.settings || {};
+  const [url,     setUrl]     = useState(s.webhook_url || '');
+  const [enabled, setEnabled] = useState(!!s.webhook_enabled);
+  const [saving,  setSaving]  = useState(false);
+  const [testing, setTesting] = useState(false);
+
+  const save = async () => {
+    if (enabled && !url.trim()) return onToast('Add a webhook URL to enable it', false);
+    if (enabled && !/^https:\/\//i.test(url.trim())) return onToast('Webhook URL must start with https://', false);
+
+    setSaving(true);
+    try {
+      await api.post('/settings/update', { section:'webhook', payload:{ url: url.trim(), enabled } });
+      onToast('Webhook settings updated', true);
+    } catch (err) { onToast(err?.error || 'Error updating webhook', false); }
+    finally { setSaving(false); }
+  };
+
+  const sendTest = async () => {
+    if (!url.trim()) return onToast('Enter a webhook URL first', false);
+    if (!/^https:\/\//i.test(url.trim())) return onToast('Webhook URL must start with https://', false);
+
+    setTesting(true);
+    try {
+      await api.post('/settings/webhook/test', { url: url.trim() });
+      onToast('Test message sent — check your channel', true);
+    } catch (err) { onToast(err?.error || 'Could not reach webhook', false); }
+    finally { setTesting(false); }
+  };
+
+  return (
+    <div>
+      <div style={{ ...monoSm, color:'var(--text-secondary)', marginBottom:20 }}>
+        Reçois tes signaux et alertes sur Discord, Slack, ou n'importe quel endpoint compatible webhook JSON.
+      </div>
+
+      <Field label="Webhook URL">
+        <Input
+          value={url}
+          onChange={e => setUrl(e.target.value)}
+          placeholder="https://discord.com/api/webhooks/..."
+        />
+      </Field>
+
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'14px 0', borderBottom:'1px solid rgba(255,255,255,0.04)', marginBottom:20 }}>
+        <div>
+          <div style={{ fontSize:13, fontWeight:600, color:'var(--text-primary)', marginBottom:4 }}>Enable Webhook</div>
+          <div style={{ ...monoSm, color:'var(--text-secondary)' }}>Envoie automatiquement les alertes déclenchées vers cette URL</div>
+        </div>
+        <Toggle checked={enabled} onChange={() => setEnabled(v => !v)} />
+      </div>
+
+      <div style={{ display:'flex', gap:10, flexWrap:'wrap' }}>
+        <SaveBtn onClick={save} saving={saving} />
+        <GhostBtn onClick={sendTest} disabled={testing}>
+          {testing ? 'Sending...' : 'Send Test Message'}
+        </GhostBtn>
+      </div>
     </div>
   );
 }
@@ -776,8 +1019,8 @@ function ApiKeysSection({ onToast }) {
     </div>
   );
 }
-// ── Language & Region ────────────────────────────────────
-// ✅ Nécessite react-i18next (déjà installé — utilisé sur Alerts/Markets/Portfolio/Overview)
+
+// ── Language, Region & Currency ──────────────────────────
 import { useTranslation } from 'react-i18next';
 
 const LANGUAGES = [
@@ -788,11 +1031,20 @@ const LANGUAGES = [
   { code:'hi', label:'हिन्दी'      }, { code:'ko', label:'한국어'      },
 ];
 
+const CURRENCIES = [
+  { code:'USD', label:'USD — US Dollar'     }, { code:'EUR', label:'EUR — Euro'          },
+  { code:'MAD', label:'MAD — Dirham marocain' }, { code:'GBP', label:'GBP — British Pound' },
+  { code:'JPY', label:'JPY — Japanese Yen'  }, { code:'CHF', label:'CHF — Swiss Franc'   },
+  { code:'CAD', label:'CAD — Canadian Dollar' }, { code:'AUD', label:'AUD — Australian Dollar' },
+  { code:'CNY', label:'CNY — Chinese Yuan'  }, { code:'AED', label:'AED — UAE Dirham'    },
+];
+
 function LocaleSection({ data, onToast }) {
   const { i18n } = useTranslation();
   const s = data?.settings || {};
   const [language, setLanguage] = useState(s.language || 'en');
   const [timezone, setTimezone] = useState(s.timezone || 'UTC');
+  const [currency, setCurrency] = useState(s.currency || 'USD');
   const [saving, setSaving] = useState(false);
 
   const timezones = typeof Intl.supportedValuesOf === 'function'
@@ -802,9 +1054,9 @@ function LocaleSection({ data, onToast }) {
   const save = async () => {
     setSaving(true);
     try {
-      await api.post('/settings/update', { section:'locale', payload:{ language, timezone } });
+      await api.post('/settings/update', { section:'locale', payload:{ language, timezone, currency } });
       i18n.changeLanguage(language);
-      onToast('Language and timezone updated', true);
+      onToast('Language, timezone and currency updated', true);
     } catch { onToast('Error updating locale', false); }
     finally { setSaving(false); }
   };
@@ -832,7 +1084,74 @@ function LocaleSection({ data, onToast }) {
           Toutes les dates (trades, alertes, signaux) s'afficheront dans ce fuseau
         </div>
       </Field>
+      <Field label="Currency">
+        <select value={currency} onChange={e => setCurrency(e.target.value)} style={{
+          width:'100%', background:'rgba(255,255,255,0.04)', border:'1px solid var(--border)',
+          borderRadius:8, padding:'10px 14px', color:'var(--text-primary)',
+          fontFamily:'JetBrains Mono,monospace', fontSize:13, outline:'none',
+        }}>
+          {CURRENCIES.map(c => <option key={c.code} value={c.code}>{c.label}</option>)}
+        </select>
+        <div style={{ ...monoSm, color:'var(--text-muted)', marginTop:6 }}>
+          Utilisée pour l'affichage du capital, du P&L, et des montants dans les emails d'alerte
+        </div>
+      </Field>
       <SaveBtn onClick={save} saving={saving} />
+    </div>
+  );
+}
+
+// ── Activity Log ─────────────────────────────────────────
+function AuditLogSection({ onToast }) {
+  const [events, setEvents]   = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    api.get('/settings/audit-log')
+      .then(res => setEvents(res.data.events))
+      .catch(() => onToast('Could not load activity log', false))
+      .finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const eventLabels = {
+    login_success:    '✓ Signed in',
+    login_failed:     '✕ Failed sign-in attempt',
+    password_changed: '🔑 Password changed',
+    '2fa_enabled':    '🔒 2FA enabled',
+    '2fa_disabled':   '🔓 2FA disabled',
+    api_key_created:  '⚿ API key created',
+    api_key_revoked:  '⚿ API key revoked',
+    email_changed:    '✉ Email changed',
+  };
+
+  const eventColor = type => {
+    if (type === 'login_failed') return 'var(--red)';
+    if (type.includes('disabled') || type === 'api_key_revoked') return 'var(--amber)';
+    return 'var(--text-primary)';
+  };
+
+  if (loading) return <div style={{ ...monoSm, color:'var(--text-muted)' }}>Loading activity log...</div>;
+
+  return (
+    <div>
+      <div style={{ ...monoSm, color:'var(--text-secondary)', marginBottom:20 }}>
+        Historique des 50 derniers événements liés à la sécurité de ton compte.
+      </div>
+      {events.length === 0 ? (
+        <div style={{ ...monoSm, color:'var(--text-muted)' }}>No activity recorded yet</div>
+      ) : events.map((e, i) => (
+        <div key={i} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'12px 0', borderBottom:'1px solid rgba(255,255,255,0.04)' }}>
+          <div>
+            <div style={{ fontSize:13, fontWeight:600, color: eventColor(e.event_type) }}>
+              {eventLabels[e.event_type] || e.event_type}
+            </div>
+            <div style={{ ...monoSm, color:'var(--text-secondary)', marginTop:2 }}>
+              {e.ip_address || 'Unknown IP'} · {new Date(e.created_at).toLocaleString()}
+            </div>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -845,14 +1164,16 @@ function DangerZoneSection({ onToast }) {
   const [deleting, setDeleting] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
 
-  const exportData = async () => {
+  const exportData = async (format) => {
     setExporting(true);
     try {
-      const res = await api.get('/settings/export', { responseType: 'blob' });
+      const res = await api.get(`/settings/export?format=${format}`, { responseType: 'blob' });
       const url = window.URL.createObjectURL(new Blob([res.data]));
       const a = document.createElement('a');
       a.href = url;
-      a.download = `atlasquant-export-${Date.now()}.json`;
+      a.download = format === 'csv'
+        ? `atlasquant-export-${Date.now()}.zip`
+        : `atlasquant-export-${Date.now()}.json`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -868,8 +1189,6 @@ function DangerZoneSection({ onToast }) {
     setDeleting(true);
     try {
       await api.delete('/settings/account', { data: { password } });
-      // ✅ Compte supprimé côté serveur — on nettoie la session locale et
-      // on redirige. Adapte la clé localStorage si api.js en utilise une autre.
       localStorage.clear();
       window.location.href = '/login';
     } catch (err) {
@@ -882,15 +1201,24 @@ function DangerZoneSection({ onToast }) {
     <div>
       <Field label="Export Your Data">
         <div style={{ ...monoSm, color:'var(--text-secondary)', marginBottom:12 }}>
-          Download a JSON file with your trades, portfolio, alerts, watchlist, and settings.
+          Download your trades, portfolio, alerts, watchlist, and settings.
         </div>
-        <button onClick={exportData} disabled={exporting} style={{
-          padding:'10px 24px', borderRadius:9, border:'1px solid var(--border)',
-          background:'rgba(255,255,255,0.02)', color:'var(--text-primary)', fontSize:13, fontWeight:700,
-          fontFamily:'Syne,sans-serif', cursor: exporting ? 'not-allowed' : 'pointer',
-        }}>
-          {exporting ? 'Preparing export...' : '⬇ Export My Data'}
-        </button>
+        <div style={{ display:'flex', gap:10, flexWrap:'wrap' }}>
+          <button onClick={() => exportData('json')} disabled={exporting} style={{
+            padding:'10px 24px', borderRadius:9, border:'1px solid var(--border)',
+            background:'rgba(255,255,255,0.02)', color:'var(--text-primary)', fontSize:13, fontWeight:700,
+            fontFamily:'Syne,sans-serif', cursor: exporting ? 'not-allowed' : 'pointer',
+          }}>
+            {exporting ? 'Preparing...' : '⬇ Export as JSON'}
+          </button>
+          <button onClick={() => exportData('csv')} disabled={exporting} style={{
+            padding:'10px 24px', borderRadius:9, border:'1px solid var(--border)',
+            background:'rgba(255,255,255,0.02)', color:'var(--text-primary)', fontSize:13, fontWeight:700,
+            fontFamily:'Syne,sans-serif', cursor: exporting ? 'not-allowed' : 'pointer',
+          }}>
+            {exporting ? 'Preparing...' : '⬇ Export as CSV (.zip)'}
+          </button>
+        </div>
       </Field>
 
       <div style={{ marginTop:32, paddingTop:24, borderTop:'1px solid rgba(248,113,113,0.15)' }}>
@@ -974,11 +1302,13 @@ export default function Settings() {
     notifications: <NotificationsSection data={data} onToast={showToast} />,
     trading:       <TradingSection       data={data} onToast={showToast} />,
     signalAlerts:  <SignalAlertsSection  data={data} onToast={showToast} />,
+    webhook:       <WebhookSection       data={data} onToast={showToast} />,
     appearance:    <AppearanceSection    data={data} onToast={showToast} />,
     security:      <SecuritySection               onToast={showToast} />,
     sessions:      <SessionsSection                onToast={showToast} />,
     apiKeys:       <ApiKeysSection                 onToast={showToast} />,
     locale:        <LocaleSection data={data} onToast={showToast} />,
+    auditLog:      <AuditLogSection onToast={showToast} />,
     danger:        <DangerZoneSection onToast={showToast} />,
   };
 
