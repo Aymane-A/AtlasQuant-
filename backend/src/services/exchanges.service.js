@@ -4,8 +4,29 @@ const ccxt    = require('ccxt');
 const pool    = require('../config/db').pool;
 
 // ── Encryption ────────────────────────────────────────────
+// ✅ Fix sécurité critique : l'ancien fallback `'0'.repeat(64)` faisait
+// tourner AES-256-GCM avec une clé connue de tout le monde si
+// EXCHANGE_ENCRYPTION_KEY était absente du .env (dev oublié, déploiement
+// mal configuré...). Tous les API keys/secrets d'exchanges déjà chiffrés
+// avec cette clé par défaut deviennent déchiffrables trivialement.
+// On refuse maintenant de démarrer plutôt que de chiffrer silencieusement
+// avec une clé publique — fail-fast vaut mieux qu'une fuite silencieuse.
 const ALGO = 'aes-256-gcm';
-const KEY  = Buffer.from(process.env.EXCHANGE_ENCRYPTION_KEY || '0'.repeat(64), 'hex');
+
+if (!process.env.EXCHANGE_ENCRYPTION_KEY) {
+  throw new Error(
+    'FATAL: EXCHANGE_ENCRYPTION_KEY manquante dans .env — refus de démarrer avec une clé de chiffrement par défaut (non sécurisé). ' +
+    'Générez-en une avec: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"'
+  );
+}
+
+const KEY = Buffer.from(process.env.EXCHANGE_ENCRYPTION_KEY, 'hex');
+
+if (KEY.length !== 32) {
+  throw new Error(
+    `FATAL: EXCHANGE_ENCRYPTION_KEY invalide — attendu 32 bytes (64 caractères hex), reçu ${KEY.length} bytes.`
+  );
+}
 
 function encrypt(plaintext) {
   const iv        = crypto.randomBytes(12);
@@ -17,17 +38,24 @@ function encrypt(plaintext) {
 
 function decrypt(stored) {
   const [ivHex, tagHex, dataHex] = stored.split(':');
-  const decipher = crypto.createDecipheriv(ALGO, KEY, Buffer.from(ivHex, 'hex'));
-  decipher.setAuthTag(Buffer.from(tagHex, 'hex'));
-  return Buffer.concat([decipher.update(Buffer.from(dataHex, 'hex')), decipher.final()]).toString('utf8');
+  try {
+    const decipher = crypto.createDecipheriv(ALGO, KEY, Buffer.from(ivHex, 'hex'));
+    decipher.setAuthTag(Buffer.from(tagHex, 'hex'));
+    return Buffer.concat([decipher.update(Buffer.from(dataHex, 'hex')), decipher.final()]).toString('utf8');
+  } catch (err) {
+    // Message explicite : la cause la plus fréquente d'un échec de
+    // déchiffrement ici est une rotation de EXCHANGE_ENCRYPTION_KEY après
+    // que des credentials aient déjà été chiffrés avec l'ancienne clé.
+    const e = new Error(
+      'Échec du déchiffrement des credentials — probablement causé par un changement de EXCHANGE_ENCRYPTION_KEY depuis que cette connexion a été enregistrée. ' +
+      'Solution : déconnectez puis reconnectez cet exchange depuis la page Exchanges.'
+    );
+    e.status = 401;
+    throw e;
+  }
 }
 
 // ── Supported exchanges ───────────────────────────────────
-// Every id below (except 'oanda') must match a ccxt exchange class name
-// exactly (ccxt.exchanges includes 100+; this is a curated subset of the
-// reliable, well-tested ones). To add another one: confirm the id exists
-// in `ccxt.exchanges`, add it here, and add a display entry + color on
-// the frontend EXCHANGES array. That's it — no new HMAC code needed.
 const PASSPHRASE_EXCHANGES = new Set(['okx', 'kucoin', 'bitget', 'coinbase']);
 
 const CCXT_IDS = [
@@ -44,11 +72,6 @@ const SUPPORTED = CCXT_IDS.reduce((acc, id) => {
     : ['apiKey', 'apiSecret'] };
   return acc;
 }, {
-  // 'oanda' reuses the generic apiKey/apiSecret credential slots:
-  //   apiKey    → OANDA Account ID   (e.g. "101-004-12345678-001")
-  //   apiSecret → OANDA Personal Access Token
-  // OANDA is a forex/CFD broker (majors + metals/commodities via CFD),
-  // free REST v20 API, not on ccxt — kept fully custom below.
   oanda: { requiredFields: ['apiKey', 'apiSecret'] },
 });
 
@@ -76,8 +99,6 @@ function getCcxtInstance(exchangeId, credentials) {
   return new ExchangeClass(config);
 }
 
-// "BTCUSDT" → "BTC/USDT"; "BTC/USDT" passes through unchanged.
-// ccxt's unified API always wants the slash form.
 function toCcxtSymbol(sym) {
   if (sym.includes('/')) return sym.toUpperCase();
   const s = sym.toUpperCase();
@@ -88,17 +109,13 @@ function toCcxtSymbol(sym) {
   return s;
 }
 
-// ── OANDA helpers (unchanged — not a ccxt exchange) ───────
-// mode 'paper' → OANDA practice (demo) environment — free, virtual funds.
-// mode 'live'  → OANDA live environment — requires a funded account.
+// ── OANDA helpers ──────────────────────────────────────────
 function getOandaBaseUrl(mode) {
   return mode === 'live'
     ? 'https://api-fxtrade.oanda.com'
     : 'https://api-fxpractice.oanda.com';
 }
 
-// Fetches bid/ask/mid for a single OANDA instrument (e.g. "EUR_USD").
-// Exported so trading.controller.js can reuse it for paper-fill pricing.
 async function getOandaPrice(accountId, token, mode, instrument) {
   const base = getOandaBaseUrl(mode);
   const res  = await axios.get(`${base}/v3/accounts/${accountId}/pricing`, {
@@ -114,6 +131,18 @@ async function getOandaPrice(accountId, token, mode, instrument) {
 }
 
 // ── Live key verification ─────────────────────────────────
+// ✅ Fix : liste blanche d'erreurs "non fatales" (réseau/indispo) au lieu
+// d'une liste noire d'erreurs "fatales". Avant, seules AuthenticationError
+// et PermissionDenied étaient rejetées — toute autre erreur ccxt
+// (InvalidNonce, BadRequest, ExchangeError générique...) tombait dans le
+// warn silencieux et la connexion était acceptée comme "vérifiée" alors
+// que les credentials étaient potentiellement invalides.
+const NON_FATAL_CCXT_ERRORS = err =>
+  err instanceof ccxt.NetworkError ||
+  err instanceof ccxt.ExchangeNotAvailable ||
+  err instanceof ccxt.RequestTimeout ||
+  err instanceof ccxt.DDoSProtection;
+
 async function verifyWithExchange(exchange, credentials, mode) {
   const effMode = credentials.mode || mode || 'live';
 
@@ -134,17 +163,21 @@ async function verifyWithExchange(exchange, credentials, mode) {
     return;
   }
 
-  // ccxt path — one call (fetchBalance) verifies the key for every exchange.
+  // ccxt path — fetchBalance vérifie la clé pour tous les exchanges.
   try {
     const ex = getCcxtInstance(exchange, credentials);
     await ex.fetchBalance();
     console.log(`[${exchange}] verify ok`);
   } catch (err) {
-    if (err instanceof ccxt.AuthenticationError || err instanceof ccxt.PermissionDenied) {
-      const e = new Error('Invalid API credentials — exchange rejected the key');
-      e.status = 401; throw e;
+    if (NON_FATAL_CCXT_ERRORS(err)) {
+      console.warn(`[exchanges] ${exchange} unreachable during verification (retry later):`, err.message);
+      return;
     }
-    console.warn(`[exchanges] Could not verify ${exchange}:`, err.message);
+    // Toute autre erreur (auth, permission, requête malformée, etc.) est
+    // traitée comme un rejet — mieux vaut un faux refus occasionnel
+    // qu'accepter des credentials potentiellement invalides.
+    const e = new Error('Invalid API credentials — exchange rejected the key');
+    e.status = 401; throw e;
   }
 }
 
@@ -153,9 +186,6 @@ async function fetchPortfolio(exchange, credentials) {
   console.log(`[fetchPortfolio] fetching ${exchange}...`);
 
   if (exchange === 'oanda') {
-    // OANDA is margin/CFD-based — there's no per-instrument "spot balance"
-    // like crypto exchanges. We surface the account's home currency
-    // balance instead, split into free (available) vs locked (margin used).
     const effMode = credentials.mode || 'practice';
     const base    = getOandaBaseUrl(effMode);
     const res     = await axios.get(`${base}/v3/accounts/${credentials.apiKey}/summary`, {
@@ -175,7 +205,6 @@ async function fetchPortfolio(exchange, credentials) {
     }];
   }
 
-  // ccxt path — unified balance shape for every supported exchange.
   const ex      = getCcxtInstance(exchange, credentials);
   const balance = await ex.fetchBalance();
   const totals  = balance.total || {};
@@ -194,17 +223,8 @@ async function fetchPortfolio(exchange, credentials) {
 }
 
 // ── Place live order ──────────────────────────────────────
-// stopLoss/takeProfit are optional trigger prices for a bracket order.
-// ccxt's unified `params.stopLoss` / `params.takeProfit` are honored by
-// the exchanges that support native attached SL/TP (Binance, Bybit, OKX,
-// Bitget, MEXC, Gate, HTX...); on exchanges without native support ccxt
-// will throw NotSupported — the order still needs to be placed without
-// the bracket in that case (see trading.controller.js fallback).
 async function placeLiveOrder(exchange, credentials, { symbol, side, type, quantity, price, stopLoss, takeProfit }) {
   if (exchange === 'oanda') {
-    // `symbol` here is the OANDA instrument, e.g. "EUR_USD" or "XAU_USD".
-    // `quantity` is treated as whole units (OANDA doesn't fraction units);
-    // negative units = sell, positive = buy.
     const effMode = credentials.mode || 'practice';
     const base    = getOandaBaseUrl(effMode);
     const units   = side === 'buy' ? Math.abs(Math.round(quantity)) : -Math.abs(Math.round(quantity));
@@ -217,7 +237,6 @@ async function placeLiveOrder(exchange, credentials, { symbol, side, type, quant
         timeInForce:  type === 'limit' ? 'GTC' : 'FOK',
         positionFill: 'DEFAULT',
         ...(type === 'limit' && { price: String(price) }),
-        // OANDA supports native SL/TP attached to the fill.
         ...(stopLoss   && { stopLossOnFill:   { price: String(stopLoss) } }),
         ...(takeProfit && { takeProfitOnFill: { price: String(takeProfit) } }),
       },
@@ -244,7 +263,6 @@ async function placeLiveOrder(exchange, credentials, { symbol, side, type, quant
     };
   }
 
-  // ccxt path
   const ex           = getCcxtInstance(exchange, credentials);
   const marketSymbol = toCcxtSymbol(symbol);
   const ccxtParams   = {};
@@ -259,9 +277,6 @@ async function placeLiveOrder(exchange, credentials, { symbol, side, type, quant
       ccxtParams
     );
   } catch (err) {
-    // Exchange doesn't support attached SL/TP params — retry as a plain
-    // order so the trade still goes through (caller decides how to warn
-    // the user that the bracket wasn't attached).
     if ((stopLoss || takeProfit) && err instanceof ccxt.NotSupported) {
       order = await ex.createOrder(marketSymbol, type, side, quantity, type === 'market' ? undefined : price);
       order._bracketUnsupported = true;
@@ -318,7 +333,18 @@ async function connectExchange(userId, exchange, credentials, mode = 'readonly')
     const e = new Error(`Invalid mode: ${mode}`); e.status = 400; throw e;
   }
   validateCredentials(exchange, credentials);
-  if (mode !== 'paper') await verifyWithExchange(exchange, credentials, mode);
+
+  // ✅ Fix : pour les exchanges crypto (ccxt), le mode 'paper' est une
+  // simulation 100% locale (aucun appel réseau réel) — sauter la
+  // vérification a du sens. Mais OANDA "paper" = compte demo RÉEL sur
+  // les serveurs OANDA (api-fxpractice.oanda.com), utilisé ensuite pour
+  // de vrais appels prix/portfolio. Avant ce fix, des credentials OANDA
+  // invalides en mode paper étaient acceptés silencieusement à la
+  // connexion, et échouaient seulement plus tard au premier appel prix —
+  // mauvaise UX (connexion "réussie" puis tout casse après coup).
+  const skipVerification = mode === 'paper' && exchange !== 'oanda';
+  if (!skipVerification) await verifyWithExchange(exchange, credentials, mode);
+
   const encKey    = encrypt(credentials.apiKey.trim());
   const encSecret = encrypt(credentials.apiSecret.trim());
   const encPass   = credentials.passphrase ? encrypt(credentials.passphrase.trim()) : null;
@@ -383,12 +409,22 @@ async function getDecryptedCredentials(userId, exchangeId) {
 
 // ── Paper trade helpers ───────────────────────────────────
 async function openPaperTrade(userId, exchangeId, { symbol, side, orderType, quantity, price, limitPrice, stopLoss, takeProfit }) {
+  // ✅ Fix : garde-fou au niveau service (en plus de la validation dans le
+  // controller) — un prix à 0/null créerait un trade non liquidable
+  // proprement (division par zéro dans closePaperTrade → pnl_pct = NaN/Infinity
+  // stocké en DB, cassant tout affichage Portfolio/Trade History en aval).
+  const numericPrice = parseFloat(price);
+  if (!Number.isFinite(numericPrice) || numericPrice <= 0) {
+    const e = new Error(`Prix invalide pour ouvrir un paper trade sur ${symbol}: ${price}`);
+    e.status = 400; throw e;
+  }
+
   const { rows } = await pool.query(
     `INSERT INTO paper_trades
        (user_id, exchange_id, symbol, side, order_type, quantity, price, limit_price, stop_loss, take_profit, status)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'open')
      RETURNING *`,
-    [userId, exchangeId, symbol, side, orderType, quantity, price, limitPrice || null, stopLoss || null, takeProfit || null]
+    [userId, exchangeId, symbol, side, orderType, quantity, numericPrice, limitPrice || null, stopLoss || null, takeProfit || null]
   );
   return rows[0];
 }
@@ -399,11 +435,22 @@ async function closePaperTrade(userId, tradeId, closePrice, reason = 'manual') {
     [tradeId, userId]
   );
   if (!rows.length) { const e = new Error('Trade not found'); e.status = 404; throw e; }
-  const trade  = rows[0];
+  const trade = rows[0];
+
+  const entryPrice = parseFloat(trade.price);
+  // Défense en profondeur : si un vieux trade avec price=0 traîne encore en
+  // DB (créé avant ce fix), on refuse la clôture plutôt que de produire un
+  // pnl_pct=Infinity/NaN silencieux.
+  if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+    const e = new Error(`Trade #${tradeId} a un prix d'entrée invalide (${trade.price}) — clôture impossible, correction manuelle requise.`);
+    e.status = 422; throw e;
+  }
+
   const pnl    = trade.side === 'buy'
-    ? (closePrice - parseFloat(trade.price)) * parseFloat(trade.quantity)
-    : (parseFloat(trade.price) - closePrice) * parseFloat(trade.quantity);
-  const pnlPct = (pnl / (parseFloat(trade.price) * parseFloat(trade.quantity))) * 100;
+    ? (closePrice - entryPrice) * parseFloat(trade.quantity)
+    : (entryPrice - closePrice) * parseFloat(trade.quantity);
+  const pnlPct = (pnl / (entryPrice * parseFloat(trade.quantity))) * 100;
+
   const { rows: updated } = await pool.query(
     `UPDATE paper_trades SET status='closed', pnl=$3, pnl_pct=$4, closed_at=NOW(), close_reason=$5
      WHERE id=$1 AND user_id=$2 RETURNING *`,
@@ -422,8 +469,6 @@ async function getPaperTrades(userId, exchangeId, status = 'open') {
   return rows;
 }
 
-// Used by paperTradeMonitor.service.js — every open trade across every
-// user/exchange that has a stop_loss or take_profit set.
 async function getOpenBracketTrades() {
   const { rows } = await pool.query(
     `SELECT * FROM paper_trades

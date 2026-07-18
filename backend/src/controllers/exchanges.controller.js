@@ -5,12 +5,12 @@ async function getConnections(req, res) {
   try {
     res.json(await svc.getUserConnections(req.user.id));
   } catch (err) {
+    console.error('[exchanges.controller] getConnections error:', err);
     res.status(500).json({ message: 'Failed to fetch connections' });
   }
 }
 
 // POST /api/exchanges/connect
-// body: { exchange, credentials: { apiKey, apiSecret, passphrase? }, mode }
 async function connect(req, res) {
   const { exchange, credentials, mode = 'readonly' } = req.body;
   if (!exchange || !credentials)
@@ -19,12 +19,12 @@ async function connect(req, res) {
     await svc.connectExchange(req.user.id, exchange, credentials, mode);
     res.json({ message: `${exchange} connected in ${mode} mode` });
   } catch (err) {
+    console.error(`[exchanges.controller] connect(${exchange}) error:`, err);
     res.status(err.status || 500).json({ message: err.message });
   }
 }
 
 // PATCH /api/exchanges/:exchangeId/mode
-// body: { mode }
 async function changeMode(req, res) {
   const { mode } = req.body;
   if (!mode) return res.status(400).json({ message: 'mode required' });
@@ -32,6 +32,7 @@ async function changeMode(req, res) {
     await svc.updateMode(req.user.id, req.params.exchangeId, mode);
     res.json({ message: `Mode updated to ${mode}` });
   } catch (err) {
+    console.error(`[exchanges.controller] changeMode(${req.params.exchangeId}) error:`, err);
     res.status(err.status || 500).json({ message: err.message });
   }
 }
@@ -42,6 +43,7 @@ async function disconnect(req, res) {
     await svc.disconnectExchange(req.user.id, req.params.exchangeId);
     res.json({ message: 'Disconnected' });
   } catch (err) {
+    console.error(`[exchanges.controller] disconnect(${req.params.exchangeId}) error:`, err);
     res.status(err.status || 500).json({ message: err.message });
   }
 }
@@ -51,6 +53,12 @@ async function testConnection(req, res) {
   try {
     res.json(await svc.testConnection(req.user.id, req.params.exchangeId));
   } catch (err) {
+    // ✅ Fix diagnostic : avant, un 500 ici n'affichait dans le terminal que
+    // la ligne d'accès morgan (method/status/ms), jamais le message ni le
+    // stack trace réel — impossible de distinguer une erreur de
+    // déchiffrement (rotation de clé), une erreur ccxt, un timeout réseau,
+    // etc. sans deviner à l'aveugle.
+    console.error(`[exchanges.controller] testConnection(${req.params.exchangeId}) error:`, err);
     res.status(err.status || 500).json({ message: err.message });
   }
 }
@@ -61,19 +69,18 @@ async function getPortfolio(req, res) {
     const creds = await svc.getDecryptedCredentials(req.user.id, req.params.exchangeId);
     if (!creds) return res.status(404).json({ message: 'Exchange not connected' });
     if (creds.mode === 'paper') {
-      // paper mode → return paper positions from DB
       const trades = await svc.getPaperTrades(req.user.id, req.params.exchangeId, 'open');
       return res.json({ mode: 'paper', positions: trades });
     }
     const positions = await svc.fetchPortfolio(req.params.exchangeId, creds);
     res.json({ mode: creds.mode, positions });
   } catch (err) {
+    console.error(`[exchanges.controller] getPortfolio(${req.params.exchangeId}) error:`, err);
     res.status(err.status || 500).json({ message: err.message });
   }
 }
 
 // POST /api/exchanges/:exchangeId/order
-// body: { symbol, side, type, quantity, price? }
 async function placeOrder(req, res) {
   const { exchangeId } = req.params;
   const { symbol, side, type = 'market', quantity, price } = req.body;
@@ -89,18 +96,23 @@ async function placeOrder(req, res) {
       return res.status(403).json({ message: 'Exchange is in read-only mode' });
 
     if (creds.mode === 'paper') {
+      const numericPrice = parseFloat(price);
+      if (!Number.isFinite(numericPrice) || numericPrice <= 0) {
+        return res.status(400).json({
+          message: 'Un prix de marché valide (price > 0) est requis pour ouvrir un paper trade — le prix courant doit être transmis par le client.',
+        });
+      }
+
       const trade = await svc.openPaperTrade(req.user.id, exchangeId, {
         symbol, side, orderType: type, quantity,
-        price: price || 0,   // caller should pass current market price for market orders
+        price: numericPrice,
         limitPrice: type === 'limit' ? price : null,
       });
       return res.json({ mode: 'paper', trade });
     }
 
-    // live
     const result = await svc.placeLiveOrder(exchangeId, creds, { symbol, side, type, quantity, price });
 
-    // audit log
     const { pool } = require('../config/db');
     await pool.query(
       `INSERT INTO live_orders
@@ -112,12 +124,12 @@ async function placeOrder(req, res) {
 
     res.json({ mode: 'live', ...result });
   } catch (err) {
+    console.error(`[exchanges.controller] placeOrder(${exchangeId}) error:`, err);
     res.status(err.status || 500).json({ message: err.message });
   }
 }
 
 // POST /api/exchanges/:exchangeId/paper-trades/:tradeId/close
-// body: { closePrice }
 async function closePaperTrade(req, res) {
   const { tradeId } = req.params;
   const { closePrice } = req.body;
@@ -126,6 +138,7 @@ async function closePaperTrade(req, res) {
     const trade = await svc.closePaperTrade(req.user.id, parseInt(tradeId), parseFloat(closePrice));
     res.json(trade);
   } catch (err) {
+    console.error(`[exchanges.controller] closePaperTrade(${tradeId}) error:`, err);
     res.status(err.status || 500).json({ message: err.message });
   }
 }
@@ -137,6 +150,7 @@ async function getPaperTrades(req, res) {
     const trades = await svc.getPaperTrades(req.user.id, req.params.exchangeId, status);
     res.json(trades);
   } catch (err) {
+    console.error(`[exchanges.controller] getPaperTrades(${req.params.exchangeId}) error:`, err);
     res.status(500).json({ message: err.message });
   }
 }

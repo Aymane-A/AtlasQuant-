@@ -16,33 +16,13 @@ const EXCHANGES = [
   { id:'htx',      name:'HTX (Huobi)',       type:'CEX', region:'Global', logo:'◎', color:'#2196F3', desc:'Legacy exchange, deep liquidity, 500+ pairs',      features:['Spot','Futures','Swap','Options'], fields:[{key:'apiKey',label:'Access Key',placeholder:'HTX access key...'},{key:'apiSecret',label:'Secret Key',placeholder:'HTX secret key...',secret:true}] },
   { id:'phemex',   name:'Phemex',            type:'CEX', region:'Global', logo:'⬢', color:'#9B59B6', desc:'Ultra-low latency, institutional-grade API',       features:['Spot','Perpetuals','Options','WebSocket'], fields:[{key:'apiKey',label:'API Key',placeholder:'Phemex API key...'},{key:'apiSecret',label:'API Secret',placeholder:'Phemex secret key...',secret:true}] },
   { id:'bitmex',   name:'BitMEX',            type:'CEX', region:'Global', logo:'⬣', color:'#FF4757', desc:'OG derivatives exchange, perpetual swaps',         features:['Perpetuals','Futures','Options','REST'], fields:[{key:'apiKey',label:'API Key',placeholder:'BitMEX API key...'},{key:'apiSecret',label:'API Secret',placeholder:'BitMEX secret key...',secret:true}] },
-  // ── OANDA — forex + metals/commodities broker (free REST v20 API,
-  // practice/demo accounts free, live requires a funded account) ──
   { id:'oanda',    name:'OANDA',             type:'Forex/CFD', region:'Global', logo:'⬢', color:'#0090D4', desc:'Forex majors, gold & silver — free demo + live API', features:['Forex','Metals','Indices','REST'], fields:[{key:'apiKey',label:'Account ID',placeholder:'e.g. 101-004-12345678-001'},{key:'apiSecret',label:'Personal Access Token',placeholder:'OANDA API token...',secret:true}] },
 ];
 
 const MODES = [
-  {
-    id: 'readonly',
-    label: 'Read Only',
-    icon: '◎',
-    color: '#64748b',
-    desc: 'View balances & positions. No trading.',
-  },
-  {
-    id: 'paper',
-    label: 'Paper Trading',
-    icon: '◈',
-    color: '#00f5d4',
-    desc: 'Simulate trades with real prices. Zero risk.',
-  },
-  {
-    id: 'live',
-    label: 'Live Trading',
-    icon: '⚡',
-    color: '#f87171',
-    desc: 'Real orders on the exchange. Real money.',
-  },
+  { id: 'readonly', label: 'Read Only',     icon: '◎', color: '#64748b', desc: 'View balances & positions. No trading.' },
+  { id: 'paper',    label: 'Paper Trading', icon: '◈', color: '#00f5d4', desc: 'Simulate trades with real prices. Zero risk.' },
+  { id: 'live',     label: 'Live Trading',  icon: '⚡', color: '#f87171', desc: 'Real orders on the exchange. Real money.' },
 ];
 
 function FeaturePill({ label }) {
@@ -110,7 +90,7 @@ function ConnectModal({ exchange, onClose, onConnected }) {
   const [values,   setValues]   = useState({});
   const [revealed, setRevealed] = useState({});
   const [mode,     setMode]     = useState('readonly');
-  const [step,     setStep]     = useState(1); // 1=credentials, 2=mode
+  const [step,     setStep]     = useState(1);
   const [loading,  setLoading]  = useState(false);
   const [error,    setError]    = useState('');
   const [success,  setSuccess]  = useState(false);
@@ -137,7 +117,6 @@ function ConnectModal({ exchange, onClose, onConnected }) {
     >
       <div style={{ background:'#080f1e', border:`1px solid ${exchange.color}30`, borderRadius:20, padding:32, width:500, boxShadow:`0 0 60px ${exchange.color}15, 0 32px 64px rgba(0,0,0,0.7)` }}>
 
-        {/* Header */}
         <div style={{ display:'flex', alignItems:'center', gap:14, marginBottom:24 }}>
           <div style={{ width:48, height:48, borderRadius:12, background:`${exchange.color}15`, border:`1px solid ${exchange.color}35`, display:'flex', alignItems:'center', justifyContent:'center', fontSize:22, color:exchange.color }}>
             {exchange.logo}
@@ -146,7 +125,6 @@ function ConnectModal({ exchange, onClose, onConnected }) {
             <div style={{ fontSize:16, fontWeight:700, color:'var(--text-primary)', marginBottom:3 }}>Connect {exchange.name}</div>
             <div style={{ ...mono, fontSize:10, color:'var(--text-muted)' }}>{exchange.desc}</div>
           </div>
-          {/* Step indicator */}
           <div style={{ marginLeft:'auto', display:'flex', gap:6 }}>
             {[1,2].map(s => (
               <div key={s} style={{ width:24, height:24, borderRadius:'50%', display:'flex', alignItems:'center', justifyContent:'center', ...mono, fontSize:10, fontWeight:700,
@@ -160,7 +138,6 @@ function ConnectModal({ exchange, onClose, onConnected }) {
 
         {step === 1 ? (
           <>
-            {/* Security notice */}
             <div style={{ display:'flex', gap:10, alignItems:'flex-start', background:'rgba(0,245,212,0.04)', border:'1px solid rgba(0,245,212,0.1)', borderRadius:10, padding:'10px 14px', marginBottom:20 }}>
               <span style={{ color:'var(--cyan)', fontSize:12, flexShrink:0 }}>⚡</span>
               <p style={{ ...mono, fontSize:10, color:'var(--text-muted)', margin:0, lineHeight:1.6 }}>
@@ -171,7 +148,6 @@ function ConnectModal({ exchange, onClose, onConnected }) {
               </p>
             </div>
 
-            {/* Fields */}
             <div style={{ display:'flex', flexDirection:'column', gap:13, marginBottom:22 }}>
               {exchange.fields.map(f => (
                 <div key={f.key}>
@@ -216,7 +192,6 @@ function ConnectModal({ exchange, onClose, onConnected }) {
           </>
         ) : (
           <>
-            {/* Mode selector */}
             <div style={{ ...mono, fontSize:9, letterSpacing:'.15em', textTransform:'uppercase', color:'var(--text-muted)', marginBottom:12 }}>Select Mode</div>
             <div style={{ marginBottom:22 }}>
               <ModeSelector selected={mode} onChange={setMode} isOanda={isOanda} />
@@ -321,9 +296,122 @@ function DisconnectModal({ exchange, onClose, onDisconnected }) {
   );
 }
 
-function ExchangeCard({ exchange, connected, onConnect, onDisconnect, onChangeMode }) {
+// ── NOUVEAU : Balance / Portfolio Modal ──────────────────────
+// Appelle GET /:exchangeId/portfolio (déjà géré backend, jamais exposé
+// côté UI avant). Gère les 2 formats de réponse possibles :
+//   - mode live/readonly (crypto) → { mode, positions: [{symbol,free,locked,total}] }
+//   - mode paper (crypto)          → { mode:'paper', positions: [paper_trades rows] }
+//   - OANDA (n'importe quel mode)  → { mode, positions:[{symbol:'USD',free,locked,total}] }
+function BalanceModal({ exchange, onClose }) {
+  const [loading, setLoading] = useState(true);
+  const [error,   setError]   = useState('');
+  const [data,    setData]    = useState(null);
+
+  useEffect(() => {
+    api.get(`/exchanges/${exchange.id}/portfolio`)
+      .then(res => setData(res.data))
+      .catch(err => setError(err?.response?.data?.message || 'Failed to load balance'))
+      .finally(() => setLoading(false));
+  }, [exchange.id]);
+
+  const isPaperTrades = data?.mode === 'paper' && Array.isArray(data.positions) && data.positions[0]?.symbol === undefined;
+
+  return (
+    <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.8)', backdropFilter:'blur(14px)', zIndex:500, display:'flex', alignItems:'center', justifyContent:'center', padding:20 }}
+      onClick={e => e.target === e.currentTarget && onClose()}
+    >
+      <div style={{ background:'#080f1e', border:`1px solid ${exchange.color}30`, borderRadius:20, padding:32, width:460, maxHeight:'75vh', display:'flex', flexDirection:'column' }}>
+        <div style={{ display:'flex', alignItems:'center', gap:14, marginBottom:20 }}>
+          <div style={{ width:40, height:40, borderRadius:10, background:`${exchange.color}15`, border:`1px solid ${exchange.color}35`, display:'flex', alignItems:'center', justifyContent:'center', fontSize:18, color:exchange.color }}>
+            {exchange.logo}
+          </div>
+          <div style={{ flex:1 }}>
+            <div style={{ fontSize:15, fontWeight:700, color:'var(--text-primary)' }}>{exchange.name} Balance</div>
+            {data?.mode && <div style={{ ...mono, fontSize:9, color:'var(--text-muted)', textTransform:'uppercase' }}>{data.mode} mode</div>}
+          </div>
+          <button onClick={onClose} style={{ background:'none', border:'none', color:'var(--text-muted)', cursor:'pointer', fontSize:16 }}>×</button>
+        </div>
+
+        <div style={{ overflowY:'auto', flex:1 }}>
+          {loading && (
+            <div style={{ ...mono, fontSize:11, color:'var(--text-muted)', textAlign:'center', padding:'32px 0' }}>Loading balance...</div>
+          )}
+
+          {!loading && error && (
+            <div style={{ ...mono, fontSize:10, color:'var(--red)', background:'rgba(248,113,113,0.06)', border:'1px solid rgba(248,113,113,0.2)', borderRadius:8, padding:'12px 14px' }}>
+              ✕ {error}
+            </div>
+          )}
+
+          {!loading && !error && data && (!data.positions || data.positions.length === 0) && (
+            <div style={{ ...mono, fontSize:11, color:'var(--text-muted)', textAlign:'center', padding:'32px 0' }}>
+              No balances or open positions found.
+            </div>
+          )}
+
+          {!loading && !error && data?.positions?.length > 0 && !isPaperTrades && (
+            <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+              {data.positions.map(p => (
+                <div key={p.symbol} style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'10px 14px', background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:9 }}>
+                  <span style={{ ...mono, fontSize:12, fontWeight:700, color:'var(--text-primary)' }}>{p.symbol}</span>
+                  <div style={{ textAlign:'right' }}>
+                    <div style={{ ...mono, fontSize:12, color:'var(--cyan)' }}>{parseFloat(p.total).toLocaleString(undefined, { maximumFractionDigits: 6 })}</div>
+                    {parseFloat(p.locked) > 0 && (
+                      <div style={{ ...mono, fontSize:9, color:'var(--text-muted)' }}>
+                        {parseFloat(p.free).toLocaleString(undefined, { maximumFractionDigits: 6 })} free · {parseFloat(p.locked).toLocaleString(undefined, { maximumFractionDigits: 6 })} locked
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {!loading && !error && isPaperTrades && (
+            <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+              {data.positions.map(t => (
+                <div key={t.id} style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'10px 14px', background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:9 }}>
+                  <div>
+                    <span style={{ ...mono, fontSize:12, fontWeight:700, color:'var(--text-primary)' }}>{t.symbol}</span>
+                    <span style={{ ...mono, fontSize:9, padding:'2px 6px', borderRadius:4, marginLeft:8, background: t.side === 'buy' ? 'rgba(52,211,153,0.12)' : 'rgba(248,113,113,0.12)', color: t.side === 'buy' ? 'var(--green)' : 'var(--red)' }}>
+                      {t.side.toUpperCase()}
+                    </span>
+                  </div>
+                  <div style={{ ...mono, fontSize:11, color:'var(--text-secondary)' }}>
+                    {t.quantity} @ {parseFloat(t.price).toLocaleString(undefined, { maximumFractionDigits: 5 })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ExchangeCard({ exchange, connected, onConnect, onDisconnect, onChangeMode, onViewBalance }) {
   const isConnected = !!connected;
   const modeInfo = MODES.find(m => m.id === connected?.mode) || MODES[0];
+
+  // ── NOUVEAU : état local du bouton "Test Connection" ──
+  const [testState, setTestState] = useState('idle'); // idle | testing | ok | fail
+  const [testMsg,    setTestMsg]  = useState('');
+
+  const handleTest = async (e) => {
+    e.stopPropagation();
+    setTestState('testing'); setTestMsg('');
+    try {
+      const res = await api.post(`/exchanges/${exchange.id}/test`);
+      setTestState('ok');
+      setTestMsg(res.data?.message || 'Connection verified');
+    } catch (err) {
+      setTestState('fail');
+      setTestMsg(err?.response?.data?.message || 'Verification failed');
+    } finally {
+      setTimeout(() => setTestState('idle'), 4000);
+    }
+  };
 
   return (
     <div
@@ -331,7 +419,6 @@ function ExchangeCard({ exchange, connected, onConnect, onDisconnect, onChangeMo
       onMouseEnter={e => { if (!isConnected) e.currentTarget.style.borderColor = `${exchange.color}25`; }}
       onMouseLeave={e => { if (!isConnected) e.currentTarget.style.borderColor = 'var(--border)'; }}
     >
-      {/* Logo + name + badges */}
       <div style={{ display:'flex', alignItems:'center', gap:12 }}>
         <div style={{ width:40, height:40, borderRadius:10, flexShrink:0, background:`${exchange.color}12`, border:`1px solid ${exchange.color}25`, display:'flex', alignItems:'center', justifyContent:'center', fontSize:18, color:exchange.color }}>
           {exchange.logo}
@@ -355,9 +442,8 @@ function ExchangeCard({ exchange, connected, onConnect, onDisconnect, onChangeMo
         {exchange.features.map(f => <FeaturePill key={f} label={f} />)}
       </div>
 
-      {/* Connected meta */}
       {isConnected && (
-        <div style={{ ...mono, fontSize:10, color:'var(--text-muted)', display:'flex', gap:16 }}>
+        <div style={{ ...mono, fontSize:10, color:'var(--text-muted)', display:'flex', gap:16, flexWrap:'wrap' }}>
           <span>Since: <span style={{ color:'var(--text-secondary)' }}>{connected.connectedAt}</span></span>
           {connected.lastSync && connected.lastSync !== '—' && (
             <span>Synced: <span style={{ color:'var(--cyan)' }}>{connected.lastSync}</span></span>
@@ -365,21 +451,46 @@ function ExchangeCard({ exchange, connected, onConnect, onDisconnect, onChangeMo
         </div>
       )}
 
-      {/* Actions */}
+      {/* ── NOUVEAU : résultat du Test Connection ── */}
+      {testState !== 'idle' && (
+        <div style={{
+          ...mono, fontSize:10, padding:'7px 11px', borderRadius:7,
+          background: testState === 'testing' ? 'rgba(148,163,184,0.08)' : testState === 'ok' ? 'rgba(52,211,153,0.08)' : 'rgba(248,113,113,0.08)',
+          color: testState === 'testing' ? 'var(--text-muted)' : testState === 'ok' ? 'var(--green)' : 'var(--red)',
+          border: `1px solid ${testState === 'testing' ? 'var(--border)' : testState === 'ok' ? 'rgba(52,211,153,0.2)' : 'rgba(248,113,113,0.2)'}`,
+        }}>
+          {testState === 'testing' ? '⟳ Testing connection...' : testState === 'ok' ? `✓ ${testMsg}` : `✕ ${testMsg}`}
+        </div>
+      )}
+
       {isConnected ? (
-        <div style={{ display:'flex', gap:8 }}>
-          <button onClick={() => onChangeMode(exchange, connected.mode)}
-            style={{ flex:1, ...mono, padding:'8px 0', borderRadius:8, border:`1px solid ${modeInfo.color}35`, background:`${modeInfo.color}08`, color:modeInfo.color, fontSize:10, cursor:'pointer', transition:'all .15s' }}
-            onMouseEnter={e => { e.currentTarget.style.background = `${modeInfo.color}18`; }}
-            onMouseLeave={e => { e.currentTarget.style.background = `${modeInfo.color}08`; }}>
-            ◈ Change Mode
-          </button>
-          <button onClick={() => onDisconnect(exchange)}
-            style={{ flex:1, ...mono, padding:'8px 0', borderRadius:8, border:'1px solid rgba(248,113,113,0.2)', background:'rgba(248,113,113,0.05)', color:'var(--red)', fontSize:10, cursor:'pointer', transition:'all .15s' }}
-            onMouseEnter={e => { e.currentTarget.style.background = 'rgba(248,113,113,0.1)'; }}
-            onMouseLeave={e => { e.currentTarget.style.background = 'rgba(248,113,113,0.05)'; }}>
-            Disconnect
-          </button>
+        <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+          <div style={{ display:'flex', gap:8 }}>
+            <button onClick={() => onViewBalance(exchange)}
+              style={{ flex:1, ...mono, padding:'8px 0', borderRadius:8, border:'1px solid rgba(0,245,212,0.25)', background:'rgba(0,245,212,0.06)', color:'var(--cyan)', fontSize:10, cursor:'pointer', transition:'all .15s' }}
+              onMouseEnter={e => { e.currentTarget.style.background = 'rgba(0,245,212,0.14)'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'rgba(0,245,212,0.06)'; }}>
+              ◈ View Balance
+            </button>
+            <button onClick={handleTest} disabled={testState === 'testing'}
+              style={{ flex:1, ...mono, padding:'8px 0', borderRadius:8, border:'1px solid var(--border)', background:'rgba(255,255,255,0.02)', color:'var(--text-secondary)', fontSize:10, cursor: testState === 'testing' ? 'not-allowed' : 'pointer', opacity: testState === 'testing' ? 0.6 : 1, transition:'all .15s' }}>
+              {testState === 'testing' ? '⟳ Testing...' : '⚡ Test Connection'}
+            </button>
+          </div>
+          <div style={{ display:'flex', gap:8 }}>
+            <button onClick={() => onChangeMode(exchange, connected.mode)}
+              style={{ flex:1, ...mono, padding:'8px 0', borderRadius:8, border:`1px solid ${modeInfo.color}35`, background:`${modeInfo.color}08`, color:modeInfo.color, fontSize:10, cursor:'pointer', transition:'all .15s' }}
+              onMouseEnter={e => { e.currentTarget.style.background = `${modeInfo.color}18`; }}
+              onMouseLeave={e => { e.currentTarget.style.background = `${modeInfo.color}08`; }}>
+              ◈ Change Mode
+            </button>
+            <button onClick={() => onDisconnect(exchange)}
+              style={{ flex:1, ...mono, padding:'8px 0', borderRadius:8, border:'1px solid rgba(248,113,113,0.2)', background:'rgba(248,113,113,0.05)', color:'var(--red)', fontSize:10, cursor:'pointer', transition:'all .15s' }}
+              onMouseEnter={e => { e.currentTarget.style.background = 'rgba(248,113,113,0.1)'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'rgba(248,113,113,0.05)'; }}>
+              Disconnect
+            </button>
+          </div>
         </div>
       ) : (
         <button onClick={() => onConnect(exchange)}
@@ -393,13 +504,13 @@ function ExchangeCard({ exchange, connected, onConnect, onDisconnect, onChangeMo
   );
 }
 
-// ── Main ──────────────────────────────────────────────────
 export default function Exchanges() {
   const [connections,      setConnections]      = useState({});
   const [loading,          setLoading]          = useState(true);
   const [connectTarget,    setConnectTarget]    = useState(null);
   const [disconnectTarget, setDisconnectTarget] = useState(null);
-  const [changeModeTarget, setChangeModeTarget] = useState(null); // { exchange, mode }
+  const [changeModeTarget, setChangeModeTarget] = useState(null);
+  const [balanceTarget,    setBalanceTarget]    = useState(null); // NOUVEAU
   const [filter,           setFilter]           = useState('all');
   const [search,           setSearch]           = useState('');
 
@@ -443,8 +554,10 @@ export default function Exchanges() {
           onClose={() => setChangeModeTarget(null)}
           onChanged={(id, mode) => { handleModeChanged(id, mode); setChangeModeTarget(null); }} />
       )}
+      {balanceTarget && (
+        <BalanceModal exchange={balanceTarget} onClose={() => setBalanceTarget(null)} />
+      )}
 
-      {/* Header */}
       <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between' }}>
         <div>
           <div style={{ ...mono, fontSize:10, letterSpacing:'.2em', textTransform:'uppercase', color:'var(--text-muted)', marginBottom:6 }}>// Exchange Connections</div>
@@ -464,7 +577,6 @@ export default function Exchanges() {
         </div>
       </div>
 
-      {/* Search */}
       <div style={{ position:'relative' }}>
         <span style={{ position:'absolute', left:14, top:'50%', transform:'translateY(-50%)', ...mono, fontSize:12, color:'var(--text-muted)', pointerEvents:'none' }}>⌕</span>
         <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search exchanges..."
@@ -473,7 +585,6 @@ export default function Exchanges() {
           onBlur={e  => e.target.style.borderColor='var(--border)'} />
       </div>
 
-      {/* Stats */}
       <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:10 }}>
         {[
           { label:'Connected',    value:connectedCount,                    accent:'var(--cyan)'   },
@@ -488,7 +599,6 @@ export default function Exchanges() {
         ))}
       </div>
 
-      {/* Grid */}
       {visible.length === 0 ? (
         <div style={{ background:'var(--surface)', border:'1px solid var(--border)', borderRadius:16, padding:'48px 24px', textAlign:'center' }}>
           <div style={{ fontSize:32, opacity:.15, marginBottom:12 }}>◎</div>
@@ -502,12 +612,12 @@ export default function Exchanges() {
             <ExchangeCard key={ex.id} exchange={ex} connected={connections[ex.id] || null}
               onConnect={setConnectTarget}
               onDisconnect={setDisconnectTarget}
-              onChangeMode={(exchange, mode) => setChangeModeTarget({ exchange, mode })} />
+              onChangeMode={(exchange, mode) => setChangeModeTarget({ exchange, mode })}
+              onViewBalance={setBalanceTarget} />
           ))}
         </div>
       )}
 
-      {/* Security notice */}
       <div style={{ background:'rgba(0,245,212,0.03)', border:'1px solid rgba(0,245,212,0.1)', borderRadius:12, padding:'16px 20px', display:'flex', gap:14, alignItems:'flex-start' }}>
         <span style={{ color:'var(--cyan)', fontSize:16, flexShrink:0 }}>🔒</span>
         <div>
