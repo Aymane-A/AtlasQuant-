@@ -25,6 +25,14 @@ const MODES = [
   { id: 'live',     label: 'Live Trading',  icon: '⚡', color: '#f87171', desc: 'Real orders on the exchange. Real money.' },
 ];
 
+// ── Health status → couleur/label ─────────────────────────
+const HEALTH = {
+  ok:       { color: '#34d399', label: 'Healthy' },
+  degraded: { color: '#fbbf24', label: 'Degraded' },
+  failed:   { color: '#f87171', label: 'Connection Failed' },
+  unknown:  { color: '#64748b', label: 'Not checked yet' },
+};
+
 function FeaturePill({ label }) {
   return (
     <span style={{ ...mono, fontSize:9, padding:'2px 7px', borderRadius:4, background:'rgba(0,245,212,0.06)', color:'var(--text-muted)', border:'1px solid rgba(0,245,212,0.1)' }}>
@@ -296,12 +304,6 @@ function DisconnectModal({ exchange, onClose, onDisconnected }) {
   );
 }
 
-// ── NOUVEAU : Balance / Portfolio Modal ──────────────────────
-// Appelle GET /:exchangeId/portfolio (déjà géré backend, jamais exposé
-// côté UI avant). Gère les 2 formats de réponse possibles :
-//   - mode live/readonly (crypto) → { mode, positions: [{symbol,free,locked,total}] }
-//   - mode paper (crypto)          → { mode:'paper', positions: [paper_trades rows] }
-//   - OANDA (n'importe quel mode)  → { mode, positions:[{symbol:'USD',free,locked,total}] }
 function BalanceModal({ exchange, onClose }) {
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState('');
@@ -390,12 +392,112 @@ function BalanceModal({ exchange, onClose }) {
   );
 }
 
+// ── NOUVEAU : Combined Portfolio Modal (toutes exchanges) ────────────
+function AllPortfolioModal({ onClose }) {
+  const [loading, setLoading] = useState(true);
+  const [error,   setError]   = useState('');
+  const [data,    setData]    = useState(null);
+
+  useEffect(() => {
+    api.get('/exchanges/portfolio/all')
+      .then(res => setData(res.data))
+      .catch(err => setError(err?.response?.data?.message || 'Failed to load combined portfolio'))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const totalsEntries = data ? Object.entries(data.totalsBySymbol || {}).sort((a, b) => b[1] - a[1]) : [];
+
+  return (
+    <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.8)', backdropFilter:'blur(14px)', zIndex:500, display:'flex', alignItems:'center', justifyContent:'center', padding:20 }}
+      onClick={e => e.target === e.currentTarget && onClose()}
+    >
+      <div style={{ background:'#080f1e', border:'1px solid rgba(0,245,212,0.2)', borderRadius:20, padding:32, width:560, maxHeight:'80vh', display:'flex', flexDirection:'column' }}>
+        <div style={{ display:'flex', alignItems:'center', gap:14, marginBottom:6 }}>
+          <div style={{ fontSize:15, fontWeight:700, color:'var(--text-primary)', flex:1 }}>Combined Portfolio</div>
+          <button onClick={onClose} style={{ background:'none', border:'none', color:'var(--text-muted)', cursor:'pointer', fontSize:16 }}>×</button>
+        </div>
+        <div style={{ ...mono, fontSize:9, color:'var(--text-muted)', marginBottom:20, lineHeight:1.6 }}>
+          Totaux agrégés par symbole entre exchanges connectées (mode live/readonly). Pas de conversion de devise —
+          les montants du même symbole sont additionnés, les autres restent séparés.
+        </div>
+
+        <div style={{ overflowY:'auto', flex:1 }}>
+          {loading && (
+            <div style={{ ...mono, fontSize:11, color:'var(--text-muted)', textAlign:'center', padding:'32px 0' }}>Loading combined portfolio...</div>
+          )}
+
+          {!loading && error && (
+            <div style={{ ...mono, fontSize:10, color:'var(--red)', background:'rgba(248,113,113,0.06)', border:'1px solid rgba(248,113,113,0.2)', borderRadius:8, padding:'12px 14px' }}>
+              ✕ {error}
+            </div>
+          )}
+
+          {!loading && !error && data && (
+            <>
+              {totalsEntries.length > 0 && (
+                <>
+                  <div style={{ ...mono, fontSize:9, letterSpacing:'.15em', textTransform:'uppercase', color:'var(--text-muted)', marginBottom:10 }}>
+                    Totaux par actif
+                  </div>
+                  <div style={{ display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:8, marginBottom:24 }}>
+                    {totalsEntries.map(([symbol, total]) => (
+                      <div key={symbol} style={{ padding:'10px 14px', background:'rgba(0,245,212,0.04)', border:'1px solid rgba(0,245,212,0.1)', borderRadius:9 }}>
+                        <div style={{ ...mono, fontSize:11, fontWeight:700, color:'var(--cyan)' }}>{symbol}</div>
+                        <div style={{ ...mono, fontSize:13, color:'var(--text-primary)', marginTop:2 }}>{total.toLocaleString(undefined, { maximumFractionDigits: 6 })}</div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+
+              <div style={{ ...mono, fontSize:9, letterSpacing:'.15em', textTransform:'uppercase', color:'var(--text-muted)', marginBottom:10 }}>
+                Par exchange
+              </div>
+              <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
+                {(data.exchanges || []).map(ex => {
+                  const meta = EXCHANGES.find(e => e.id === ex.exchangeId);
+                  return (
+                    <div key={ex.exchangeId} style={{ border:'1px solid var(--border)', borderRadius:10, padding:'12px 14px' }}>
+                      <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:8 }}>
+                        <span style={{ color: meta?.color || 'var(--text-primary)', fontSize:14 }}>{meta?.logo || '◎'}</span>
+                        <span style={{ fontSize:12, fontWeight:700, color:'var(--text-primary)' }}>{meta?.name || ex.exchangeId}</span>
+                        <span style={{ ...mono, fontSize:9, color:'var(--text-muted)', marginLeft:'auto', textTransform:'uppercase' }}>{ex.mode}</span>
+                      </div>
+                      {(!ex.positions || ex.positions.length === 0) ? (
+                        <div style={{ ...mono, fontSize:10, color:'var(--text-muted)' }}>No balance / open positions</div>
+                      ) : (
+                        <div style={{ display:'flex', flexWrap:'wrap', gap:6 }}>
+                          {ex.positions.slice(0, 8).map((p, i) => (
+                            <span key={i} style={{ ...mono, fontSize:10, padding:'3px 8px', borderRadius:5, background:'rgba(255,255,255,0.03)', border:'1px solid var(--border)', color:'var(--text-secondary)' }}>
+                              {p.symbol} · {parseFloat(p.total ?? p.quantity ?? 0).toLocaleString(undefined, { maximumFractionDigits: 4 })}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {data.skipped?.length > 0 && (
+                <div style={{ marginTop:16, ...mono, fontSize:9, color:'var(--text-muted)' }}>
+                  Ignorés : {data.skipped.map(s => `${s.exchangeId} (${s.reason})`).join(', ')}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ExchangeCard({ exchange, connected, onConnect, onDisconnect, onChangeMode, onViewBalance }) {
   const isConnected = !!connected;
   const modeInfo = MODES.find(m => m.id === connected?.mode) || MODES[0];
+  const health = HEALTH[connected?.healthStatus] || HEALTH.unknown;
 
-  // ── NOUVEAU : état local du bouton "Test Connection" ──
-  const [testState, setTestState] = useState('idle'); // idle | testing | ok | fail
+  const [testState, setTestState] = useState('idle');
   const [testMsg,    setTestMsg]  = useState('');
 
   const handleTest = async (e) => {
@@ -425,12 +527,21 @@ function ExchangeCard({ exchange, connected, onConnect, onDisconnect, onChangeMo
         </div>
         <div style={{ flex:1, minWidth:0 }}>
           <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:3 }}>
-            <div style={{ width:7, height:7, borderRadius:'50%', flexShrink:0, background: isConnected ? 'var(--green)' : 'rgba(100,116,139,0.4)', boxShadow: isConnected ? '0 0 6px var(--green)' : 'none' }} />
+            {/* ── NOUVEAU : le point reflète health_status, pas juste "connecté" ── */}
+            <div
+              title={isConnected ? health.label : 'Not connected'}
+              style={{ width:7, height:7, borderRadius:'50%', flexShrink:0, background: isConnected ? health.color : 'rgba(100,116,139,0.4)', boxShadow: isConnected ? `0 0 6px ${health.color}` : 'none' }}
+            />
             <span style={{ fontSize:14, fontWeight:700, color:'var(--text-primary)', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{exchange.name}</span>
           </div>
           <div style={{ display:'flex', gap:5, flexWrap:'wrap' }}>
             <span style={{ ...mono, fontSize:9, padding:'1px 6px', borderRadius:3, background:'rgba(100,116,139,0.1)', color:'var(--text-muted)', border:'1px solid rgba(100,116,139,0.15)' }}>{exchange.type}</span>
             <span style={{ ...mono, fontSize:9, padding:'1px 6px', borderRadius:3, background:'rgba(100,116,139,0.1)', color:'var(--text-muted)', border:'1px solid rgba(100,116,139,0.15)' }}>{exchange.region}</span>
+            {isConnected && connected.healthStatus === 'failed' && (
+              <span style={{ ...mono, fontSize:9, padding:'1px 6px', borderRadius:3, background:'rgba(248,113,113,0.12)', color:'var(--red)', border:'1px solid rgba(248,113,113,0.25)' }}>
+                ⚠ connection failed
+              </span>
+            )}
           </div>
         </div>
         {isConnected && <ModeBadge mode={connected.mode} />}
@@ -451,7 +562,6 @@ function ExchangeCard({ exchange, connected, onConnect, onDisconnect, onChangeMo
         </div>
       )}
 
-      {/* ── NOUVEAU : résultat du Test Connection ── */}
       {testState !== 'idle' && (
         <div style={{
           ...mono, fontSize:10, padding:'7px 11px', borderRadius:7,
@@ -510,7 +620,8 @@ export default function Exchanges() {
   const [connectTarget,    setConnectTarget]    = useState(null);
   const [disconnectTarget, setDisconnectTarget] = useState(null);
   const [changeModeTarget, setChangeModeTarget] = useState(null);
-  const [balanceTarget,    setBalanceTarget]    = useState(null); // NOUVEAU
+  const [balanceTarget,    setBalanceTarget]    = useState(null);
+  const [showAllPortfolio, setShowAllPortfolio] = useState(false); // NOUVEAU
   const [filter,           setFilter]           = useState('all');
   const [search,           setSearch]           = useState('');
 
@@ -521,7 +632,7 @@ export default function Exchanges() {
       .finally(() => setLoading(false));
   }, []);
 
-  const handleConnected    = (id, mode) => setConnections(c => ({ ...c, [id]: { mode, connectedAt: 'Just now', lastSync: '—' } }));
+  const handleConnected    = (id, mode) => setConnections(c => ({ ...c, [id]: { mode, connectedAt: 'Just now', lastSync: '—', healthStatus: 'unknown', consecutiveFailures: 0 } }));
   const handleDisconnected = (id)       => setConnections(c => { const n = { ...c }; delete n[id]; return n; });
   const handleModeChanged  = (id, mode) => setConnections(c => ({ ...c, [id]: { ...c[id], mode } }));
 
@@ -557,6 +668,9 @@ export default function Exchanges() {
       {balanceTarget && (
         <BalanceModal exchange={balanceTarget} onClose={() => setBalanceTarget(null)} />
       )}
+      {showAllPortfolio && (
+        <AllPortfolioModal onClose={() => setShowAllPortfolio(false)} />
+      )}
 
       <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between' }}>
         <div>
@@ -567,13 +681,21 @@ export default function Exchanges() {
             {paperCount > 0 && <span style={{ color:'#00f5d4', marginLeft:12 }}>◈ {paperCount} paper</span>}
           </div>
         </div>
-        <div style={{ display:'flex', gap:4, background:'rgba(255,255,255,0.03)', border:'1px solid var(--border)', borderRadius:9, padding:4 }}>
-          {['all','connected'].map(f => (
-            <button key={f} onClick={() => setFilter(f)}
-              style={{ ...mono, fontSize:10, padding:'6px 14px', borderRadius:6, border:'none', cursor:'pointer', background: filter===f ? 'rgba(0,245,212,0.1)' : 'transparent', color: filter===f ? 'var(--cyan)' : 'var(--text-muted)', fontWeight: filter===f ? 700 : 400, transition:'all .15s' }}>
-              {f === 'all' ? `All (${EXCHANGES.length})` : `Connected (${connectedCount})`}
+        <div style={{ display:'flex', gap:10, alignItems:'center' }}>
+          {connectedCount > 0 && (
+            <button onClick={() => setShowAllPortfolio(true)}
+              style={{ ...mono, fontSize:10, padding:'8px 14px', borderRadius:8, border:'1px solid rgba(0,245,212,0.25)', background:'rgba(0,245,212,0.06)', color:'var(--cyan)', cursor:'pointer', fontWeight:700 }}>
+              ◈ Combined Portfolio
             </button>
-          ))}
+          )}
+          <div style={{ display:'flex', gap:4, background:'rgba(255,255,255,0.03)', border:'1px solid var(--border)', borderRadius:9, padding:4 }}>
+            {['all','connected'].map(f => (
+              <button key={f} onClick={() => setFilter(f)}
+                style={{ ...mono, fontSize:10, padding:'6px 14px', borderRadius:6, border:'none', cursor:'pointer', background: filter===f ? 'rgba(0,245,212,0.1)' : 'transparent', color: filter===f ? 'var(--cyan)' : 'var(--text-muted)', fontWeight: filter===f ? 700 : 400, transition:'all .15s' }}>
+                {f === 'all' ? `All (${EXCHANGES.length})` : `Connected (${connectedCount})`}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 

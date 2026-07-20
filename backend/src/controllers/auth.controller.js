@@ -12,6 +12,7 @@ const jwt     = require('jsonwebtoken');
 const { query } = require('../config/db');
 const env     = require('../config/env');
 const logger  = require('../utils/logger');
+const { logAuditEvent } = require('../utils/auditLog');
 
 // ── Helper : générer un JWT ───────────────────────────────
 function signToken(userId, email, plan) {
@@ -91,6 +92,11 @@ async function register(req, res) {
 
 // ─────────────────────────────────────────────────────────
 // POST /api/auth/login
+// ✅ Feature: journalisation des tentatives de connexion (login_success /
+// login_failed) dans audit_log — alimente l'Activity Log de Settings.
+// login_failed utilise user_id = null quand l'email n'existe pas (identité
+// pas confirmée), ou l'id réel si le mot de passe est faux — dans les deux
+// cas l'email tenté est tracé dans metadata.
 // ─────────────────────────────────────────────────────────
 async function login(req, res) {
   const { email, password } = req.body;
@@ -108,6 +114,7 @@ async function login(req, res) {
 
     if (result.rows.length === 0) {
       // Réponse volontairement vague pour éviter l'énumération d'emails
+      await logAuditEvent(null, 'login_failed', req, { email: email.toLowerCase() });
       return res.status(401).json({ success: false, error: 'Email ou mot de passe incorrect' });
     }
 
@@ -116,11 +123,13 @@ async function login(req, res) {
     // Vérifier le mot de passe
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
+      await logAuditEvent(user.id, 'login_failed', req, { email: user.email });
       return res.status(401).json({ success: false, error: 'Email ou mot de passe incorrect' });
     }
 
     const token = signToken(user.id, user.email, user.plan);
 
+    await logAuditEvent(user.id, 'login_success', req);
     logger.info(`[auth] Connexion : ${user.email}`);
 
     res.json({

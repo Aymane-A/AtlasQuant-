@@ -4,6 +4,14 @@
  * ✅ Feature: email_frequency par alerte — 'instant' (comportement historique) envoie
  * direct; 'digest' file l'alerte dans alert_digest_queue, flushée 1x/jour par
  * runDailyDigest() (voir cron séparé dans server.js / app.js).
+ *
+ * ✅ Fix: fetchPrice() n'avait aucun timeout — un Yahoo/Binance lent bloquait
+ * checkAlerts() pendant des dizaines de secondes (boucle for...of séquentielle
+ * sur les symboles), retardant d'autant la libération des connexions pg
+ * utilisées plus bas dans la même fonction.
+ * ✅ Fix: garde anti-chevauchement exportée (isCheckAlertsRunning) — à utiliser
+ * dans le fichier qui planifie ce cron (app.js / cron bootstrap) pour éviter
+ * que deux cycles de checkAlerts() tournent en même temps.
  */
 
 const db                                    = require('../config/db');
@@ -11,18 +19,36 @@ const logger                                = require('../utils/logger');
 const { sendAlertEmail, sendDigestEmail }   = require('./email.service');
 const { sendTelegramAlert }                 = require('./telegram.service');
 
+const PRICE_FETCH_TIMEOUT_MS = 6000;
+
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timeout`)), ms)),
+  ]);
+}
+
 async function fetchPrice(symbol) {
   try {
     const YahooFinance = require('yahoo-finance2').default;
     const yf    = new YahooFinance({ suppressNotices: ['yahooSurvey'] });
-    const quote = await yf.quote(symbol);
+    const quote = await withTimeout(yf.quote(symbol), PRICE_FETCH_TIMEOUT_MS, 'yahoo');
     if (quote?.regularMarketPrice) return quote.regularMarketPrice;
-  } catch {}
+  } catch (e) {
+    logger.warn(`[alertChecker] Yahoo fetch failed for ${symbol}: ${e.message}`);
+  }
   try {
-    const res  = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}USDT`);
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), PRICE_FETCH_TIMEOUT_MS);
+    const res  = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}USDT`, {
+      signal: controller.signal,
+    });
+    clearTimeout(t);
     const data = await res.json();
     if (data?.price) return parseFloat(data.price);
-  } catch {}
+  } catch (e) {
+    logger.warn(`[alertChecker] Binance fetch failed for ${symbol}: ${e.message}`);
+  }
   return null;
 }
 
@@ -34,7 +60,19 @@ function conditionMet(condition, currentPrice, target) {
   return false;
 }
 
+// ✅ Fix: garde anti-chevauchement — exportée pour que le fichier qui
+// planifie ce cron (app.js / cron.js) puisse la vérifier avant de relancer
+// checkAlerts(). Voir exemple de wiring en bas de ce fichier.
+let isCheckAlertsRunning = false;
+function isRunning() { return isCheckAlertsRunning; }
+
 async function checkAlerts() {
+  if (isCheckAlertsRunning) {
+    logger.warn('[alertChecker] previous checkAlerts() run still in progress — skipping this tick');
+    return;
+  }
+  isCheckAlertsRunning = true;
+
   try {
     const { rows: alerts } = await db.query(`
       SELECT a.id, a.symbol, a.type, a.condition, a.target,
@@ -114,6 +152,8 @@ async function checkAlerts() {
     }
   } catch (err) {
     logger.error(`[alertChecker] Error: ${err.message}`);
+  } finally {
+    isCheckAlertsRunning = false;
   }
 }
 
@@ -158,4 +198,4 @@ async function runDailyDigest() {
   }
 }
 
-module.exports = { checkAlerts, runDailyDigest };
+module.exports = { checkAlerts, runDailyDigest, isRunning };

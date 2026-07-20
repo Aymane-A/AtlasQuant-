@@ -8,6 +8,7 @@ import { ProtectedRoute as PrivateRoute } from './components/ProtectedRoute';
 import Cursor from './components/Cursor';
 
 import Login       from './pages/Login';
+import VerifyEmail from './pages/VerifyEmail';
 import Landing     from './pages/Landing';
 import Dashboard   from './pages/Dashboard';
 import Signals     from './pages/signals';
@@ -48,6 +49,7 @@ export default function App() {
         {/* Public */}
         <Route path="/"      element={<Landing />} />
         <Route path="/login" element={<Login />}   />
+        <Route path="/verify-email" element={<VerifyEmail />} />
 
         {/* Protected */}
         <Route path="/" element={<PrivateRoute><Layout /></PrivateRoute>}>

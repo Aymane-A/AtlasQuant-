@@ -1,8 +1,14 @@
 import { useState, useEffect, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import api from '../services/api';
 
 const monoSm  = { fontFamily:'JetBrains Mono,monospace', fontSize:11 };
 const label10 = { fontSize:10, letterSpacing:'.15em', textTransform:'uppercase', fontFamily:'JetBrains Mono,monospace', color:'var(--text-muted)', marginBottom:8, display:'block' };
+
+const CURRENCY_SYMBOLS = {
+  USD: '$', EUR: '€', MAD: 'DH', GBP: '£', JPY: '¥',
+  CHF: 'CHF', CAD: 'CA$', AUD: 'A$', CNY: '¥', AED: 'AED',
+};
 
 const TABS = [
   { id:'profile',       icon:'◉', label:'Profile'        },
@@ -18,6 +24,22 @@ const TABS = [
   { id:'auditLog',      icon:'📜', label:'Activity Log'   },
   { id:'danger',        icon:'⚠',  label:'Danger Zone'    },
 ];
+
+// ✅ Fix: les <option> dans un <select> natif ne respectent pas toujours le
+// rgba() transparent du parent — certains navigateurs (Chrome/Edge sur
+// Windows notamment) les rendent sur fond blanc par défaut, quel que soit
+// le style du <select> lui-même. On force un fond solide + couleur de texte
+// sur chaque <option>, globalement, une seule fois par page.
+function GlobalSelectStyles() {
+  return (
+    <style>{`
+      select option {
+        background: var(--surface, #12141c);
+        color: var(--text-primary, #e5e7eb);
+      }
+    `}</style>
+  );
+}
 
 function Field({ label, children }) {
   return (
@@ -44,6 +66,21 @@ function Input({ value, onChange, type='text', placeholder='', disabled=false, m
       onFocus={e => !disabled && (e.target.style.borderColor='rgba(0,245,212,0.4)')}
       onBlur={e  => (e.target.style.borderColor='var(--border)')}
     />
+  );
+}
+
+// ✅ Fix: composant Select partagé — fond solide garanti via GlobalSelectStyles
+// pour les <option>, plus besoin de dupliquer le style inline sur chaque select.
+function Select({ value, onChange, children }) {
+  return (
+    <select value={value} onChange={onChange} style={{
+      width:'100%', background:'rgba(255,255,255,0.04)', border:'1px solid var(--border)',
+      borderRadius:8, padding:'10px 14px', color:'var(--text-primary)',
+      fontFamily:'JetBrains Mono,monospace', fontSize:13, outline:'none',
+      cursor:'pointer', boxSizing:'border-box',
+    }}>
+      {children}
+    </select>
   );
 }
 
@@ -322,6 +359,7 @@ function NotificationsSection({ data, onToast }) {
 // ── Trading (+ Risk Management) ──────────────────────────
 function TradingSection({ data, onToast }) {
   const s = data?.settings || {};
+  const currency = CURRENCY_SYMBOLS[s.currency] || '$';
   const [capital,   setCapital]   = useState(s.default_capital   || 100000);
   const [riskPct,   setRiskPct]   = useState(s.default_risk_pct  || 1);
   const [timeframe, setTimeframe] = useState(s.default_timeframe || 'Daily');
@@ -353,7 +391,7 @@ function TradingSection({ data, onToast }) {
   return (
     <div>
       <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 }}>
-        <Field label="Default Capital ($)">
+        <Field label={`Default Capital (${currency})`}>
           <Input value={capital} onChange={e => setCapital(Number(e.target.value))} type="number" min="1" step="100" />
         </Field>
         <Field label="Risk per Trade (%)">
@@ -361,17 +399,13 @@ function TradingSection({ data, onToast }) {
         </Field>
       </div>
       <Field label="Default Timeframe">
-        <select value={timeframe} onChange={e => setTimeframe(e.target.value)} style={{
-          width:'100%', background:'rgba(255,255,255,0.04)', border:'1px solid var(--border)',
-          borderRadius:8, padding:'10px 14px', color:'var(--text-primary)',
-          fontFamily:'JetBrains Mono,monospace', fontSize:13, outline:'none',
-        }}>
+        <Select value={timeframe} onChange={e => setTimeframe(e.target.value)}>
           {['1h','4h','Daily','Weekly'].map(tf => <option key={tf} value={tf}>{tf}</option>)}
-        </select>
+        </Select>
       </Field>
       <div style={{ background:'rgba(251,191,36,0.06)', border:'1px solid rgba(251,191,36,0.15)', borderRadius:10, padding:'12px 16px', marginBottom:24 }}>
         <div style={{ ...monoSm, color:'var(--amber)' }}>
-          ⚠ Risk: ${((capital || 0) * (riskPct || 0) / 100).toLocaleString()} per trade ({riskPct || 0}% of ${Number(capital || 0).toLocaleString()})
+          ⚠ Risk: {currency}{((capital || 0) * (riskPct || 0) / 100).toLocaleString()} per trade ({riskPct || 0}% of {currency}{Number(capital || 0).toLocaleString()})
         </div>
       </div>
 
@@ -1021,8 +1055,6 @@ function ApiKeysSection({ onToast }) {
 }
 
 // ── Language, Region & Currency ──────────────────────────
-import { useTranslation } from 'react-i18next';
-
 const LANGUAGES = [
   { code:'en', label:'English'    }, { code:'fr', label:'Français'   },
   { code:'ar', label:'العربية'    }, { code:'es', label:'Español'    },
@@ -1064,34 +1096,22 @@ function LocaleSection({ data, onToast }) {
   return (
     <div>
       <Field label="Language">
-        <select value={language} onChange={e => setLanguage(e.target.value)} style={{
-          width:'100%', background:'rgba(255,255,255,0.04)', border:'1px solid var(--border)',
-          borderRadius:8, padding:'10px 14px', color:'var(--text-primary)',
-          fontFamily:'JetBrains Mono,monospace', fontSize:13, outline:'none',
-        }}>
+        <Select value={language} onChange={e => setLanguage(e.target.value)}>
           {LANGUAGES.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}
-        </select>
+        </Select>
       </Field>
       <Field label="Timezone">
-        <select value={timezone} onChange={e => setTimezone(e.target.value)} style={{
-          width:'100%', background:'rgba(255,255,255,0.04)', border:'1px solid var(--border)',
-          borderRadius:8, padding:'10px 14px', color:'var(--text-primary)',
-          fontFamily:'JetBrains Mono,monospace', fontSize:13, outline:'none',
-        }}>
+        <Select value={timezone} onChange={e => setTimezone(e.target.value)}>
           {timezones.map(tz => <option key={tz} value={tz}>{tz}</option>)}
-        </select>
+        </Select>
         <div style={{ ...monoSm, color:'var(--text-muted)', marginTop:6 }}>
           Toutes les dates (trades, alertes, signaux) s'afficheront dans ce fuseau
         </div>
       </Field>
       <Field label="Currency">
-        <select value={currency} onChange={e => setCurrency(e.target.value)} style={{
-          width:'100%', background:'rgba(255,255,255,0.04)', border:'1px solid var(--border)',
-          borderRadius:8, padding:'10px 14px', color:'var(--text-primary)',
-          fontFamily:'JetBrains Mono,monospace', fontSize:13, outline:'none',
-        }}>
+        <Select value={currency} onChange={e => setCurrency(e.target.value)}>
           {CURRENCIES.map(c => <option key={c.code} value={c.code}>{c.label}</option>)}
-        </select>
+        </Select>
         <div style={{ ...monoSm, color:'var(--text-muted)', marginTop:6 }}>
           Utilisée pour l'affichage du capital, du P&L, et des montants dans les emails d'alerte
         </div>
@@ -1314,6 +1334,7 @@ export default function Settings() {
 
   return (
     <>
+      <GlobalSelectStyles />
       <div style={{ marginBottom:4 }}>
         <div style={{ fontSize:11, letterSpacing:'.2em', color:'var(--text-muted)', textTransform:'uppercase', fontFamily:'JetBrains Mono,monospace', marginBottom:4 }}>
           // Settings

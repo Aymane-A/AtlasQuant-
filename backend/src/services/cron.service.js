@@ -11,6 +11,7 @@ const { takePortfolioSnapshot }     = require('./portfolioSnapshot.service');
 const paperTradeMonitor             = require('./paperTradeMonitor.service');
 const db                            = require('../config/db');
 const logger                        = require('../utils/logger');
+const { healthCheckAllConnections } = require('./exchanges.service');
 
 const initCronJobs = () => {
 
@@ -92,6 +93,32 @@ const initCronJobs = () => {
       logger.info('[cron] ✅ Portfolio snapshot saved');
     } catch (err) {
       logger.error(`[cron] Snapshot error: ${err.message}`);
+    }
+  });
+
+  // ── Exchange API health check every 15 minutes ─────────────────────────
+  // Vérifie la santé de toutes les connexions exchange de tous les
+  // utilisateurs. Détecte les clés API expirées/invalides avant
+  // qu'un ordre réel ou paper trading échoue.
+  cron.schedule('*/15 * * * *', async () => {
+    logger.info('[cron] Running exchange health check...');
+
+    try {
+      const results = await healthCheckAllConnections();
+
+      const failed = results.filter(r => r.healthStatus === 'failed');
+
+      if (failed.length > 0) {
+        logger.warn(
+          `[cron] Exchange health check: ${failed.length} failed connection(s)`
+        );
+      } else {
+        logger.info('[cron] ✅ All exchange connections are healthy.');
+      }
+    } catch (err) {
+      logger.error(
+        `[cron] Exchange health check crashed: ${err.message}`
+      );
     }
   });
 

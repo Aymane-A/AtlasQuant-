@@ -5,6 +5,13 @@
  * public ticker (no auth needed); OANDA needs the user's own credentials
  * since pricing is account-scoped there.
  *
+ * ✅ Fix: garde anti-chevauchement (isRunning) — sans ça, si un cycle
+ * traîne plus longtemps que l'intervalle (ex: Binance/OANDA lent), le
+ * setInterval relance un nouveau cycle par-dessus l'ancien. Plusieurs
+ * cycles simultanés = plusieurs connexions pg ouvertes en même temps =
+ * pool épuisé pour tout le reste de l'app ("Connection terminated due
+ * to connection timeout" sur /api/alerts etc.)
+ *
  * Wiring: in your existing cron bootstrap file (wherever the screener /
  * checkAlerts crons are started), add:
  *
@@ -16,6 +23,8 @@ const axios         = require('axios');
 const logger        = require('../utils/logger');
 const exchangesSvc  = require('./exchanges.service');
 
+const PRICE_FETCH_TIMEOUT_MS = 6000;
+
 // Fetches the current price for a trade's symbol on its exchange.
 // Returns null (not throws) on failure so one bad symbol doesn't stop
 // the rest of the batch from being checked.
@@ -24,9 +33,15 @@ async function getCurrentPrice(trade) {
     if (trade.exchange_id === 'oanda') {
       const creds = await exchangesSvc.getDecryptedCredentials(trade.user_id, 'oanda');
       if (!creds) return null;
-      const { mid } = await exchangesSvc.getOandaPrice(
-        creds.apiKey, creds.apiSecret, creds.mode, trade.symbol.toUpperCase()
-      );
+
+      // ✅ Fix: getOandaPrice() n'a pas de timeout garanti côté exchanges.service —
+      // on le borne ici en dernier recours pour ne jamais bloquer le cycle entier.
+      const { mid } = await Promise.race([
+        exchangesSvc.getOandaPrice(creds.apiKey, creds.apiSecret, creds.mode, trade.symbol.toUpperCase()),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('OANDA price fetch timeout')), PRICE_FETCH_TIMEOUT_MS)
+        ),
+      ]);
       return mid;
     }
 
@@ -94,13 +109,19 @@ async function checkAndCloseTriggeredTrades() {
 }
 
 let intervalHandle = null;
+let isRunning       = false; // ✅ Fix: empêche deux cycles de tourner en parallèle
 
 function start(intervalMs = 60000) {
   if (intervalHandle) return; // already running — avoid double-scheduling on hot reload
   intervalHandle = setInterval(() => {
-    checkAndCloseTriggeredTrades().catch(err =>
-      logger.error(`[paperTradeMonitor] run error: ${err.message}`)
-    );
+    if (isRunning) {
+      logger.warn('[paperTradeMonitor] previous run still in progress — skipping this tick');
+      return;
+    }
+    isRunning = true;
+    checkAndCloseTriggeredTrades()
+      .catch(err => logger.error(`[paperTradeMonitor] run error: ${err.message}`))
+      .finally(() => { isRunning = false; });
   }, intervalMs);
   logger.info(`[paperTradeMonitor] started — checking every ${intervalMs / 1000}s`);
 }
@@ -108,6 +129,7 @@ function start(intervalMs = 60000) {
 function stop() {
   if (intervalHandle) clearInterval(intervalHandle);
   intervalHandle = null;
+  isRunning = false;
 }
 
 module.exports = { checkAndCloseTriggeredTrades, start, stop };

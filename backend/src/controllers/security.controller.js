@@ -7,6 +7,7 @@ const qrcode     = require('qrcode');
 const crypto     = require('crypto');
 const db         = require('../config/db');
 const logger     = require('../utils/logger');
+const { logAuditEvent } = require('../utils/auditLog');
 
 // ═══════════════════════════════════════════════════════════
 // 2FA (TOTP)
@@ -69,6 +70,8 @@ async function verify2FA(req, res) {
       [JSON.stringify(hashedBackupCodes), userId]
     );
 
+    await logAuditEvent(userId, '2fa_enabled', req);
+
     // ⚠ Les codes de secours en clair ne sont retournés qu'une seule fois ici.
     res.json({ success: true, message: '2FA activé', backupCodes });
   } catch (err) {
@@ -94,6 +97,8 @@ async function disable2FA(req, res) {
       'UPDATE users SET twofa_enabled = false, twofa_secret = NULL, twofa_backup_codes = \'[]\' WHERE id = $1',
       [userId]
     );
+
+    await logAuditEvent(userId, '2fa_disabled', req);
 
     res.json({ success: true, message: '2FA désactivé' });
   } catch (err) {
@@ -242,6 +247,8 @@ async function createApiKey(req, res) {
       [userId, name.trim(), prefix, hash, JSON.stringify(cleanScopes)]
     );
 
+    await logAuditEvent(userId, 'api_key_created', req, { name: name.trim(), scopes: cleanScopes });
+
     // ⚠ rawKey n'est JAMAIS stockée ni récupérable après cette réponse.
     res.json({ success: true, key: rawKey, meta: rows[0] });
   } catch (err) {
@@ -260,6 +267,9 @@ async function revokeApiKey(req, res) {
       [id, req.user.id]
     );
     if (!rowCount) return res.status(404).json({ success: false, error: 'Clé introuvable' });
+
+    await logAuditEvent(req.user.id, 'api_key_revoked', req, { keyId: id });
+
     res.json({ success: true, message: 'Clé révoquée' });
   } catch (err) {
     logger.error(`[security] revokeApiKey: ${err.message}`);

@@ -17,6 +17,11 @@
  * Future providers (Polygon, Finnhub, AlphaVantage, IEX) ghadi
  * ykono just implementations jdod dyal `fetchXxxBatch()`, bla ma
  * tbddl wa7ed men l'controllers li kayst3mlo l'API dyal had service.
+ *
+ * ✅ Fix: fetchYahooBatch() n'avait aucun timeout — contrairement à ccxt
+ * (Binance) qui a un timeout par défaut de 10s, yahoo-finance2 pouvait
+ * rester en attente indéfiniment si Yahoo traînait, bloquant toute requête
+ * qui dépend de getLivePrices() (dashboard, alerts, market prices...).
  * ----------------------------------------------------------------
  */
 
@@ -34,6 +39,7 @@ const yahooFinance = new YahooFinance({ suppressNotices: ['yahooSurvey'] });
 // ==================================================================
 
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const YAHOO_TIMEOUT_MS = 8000;      // ✅ Fix: borne le temps d'attente Yahoo
 
 // Known ETF tickers (mzid feha ila bghiti)
 const ETF_SYMBOLS = new Set([
@@ -187,6 +193,15 @@ function toYahooTicker(symbol, assetType) {
   return symbol; // stock / etf
 }
 
+// ✅ Fix: helper générique pour borner n'importe quel appel yahoo-finance2,
+// qui n'expose pas d'option de timeout native.
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timeout after ${ms}ms`)), ms)),
+  ]);
+}
+
 async function fetchYahooBatch(symbolsWithType) {
   if (symbolsWithType.length === 0) return {};
 
@@ -196,7 +211,11 @@ async function fetchYahooBatch(symbolsWithType) {
   );
 
   try {
-    const quotes = await yahooFinance.quote(yahooTickers);
+    const quotes = await withTimeout(
+      yahooFinance.quote(yahooTickers),
+      YAHOO_TIMEOUT_MS,
+      'yahoo batch'
+    );
     const quotesArray = Array.isArray(quotes) ? quotes : [quotes];
     const quoteByTicker = new Map(quotesArray.map((q) => [q.symbol, q]));
 
@@ -218,9 +237,15 @@ async function fetchYahooBatch(symbolsWithType) {
   } catch (err) {
     console.error('[livePrices] Yahoo batch fetch failed:', err.message);
     // Fallback: haweel wa7ed wa7ed bach ma tt-block-ch l batch kamla
+    // ✅ Fix: chaque essai individuel est aussi borné dans le temps, sinon
+    // un seul ticker à problème peut re-bloquer toute la boucle fallback.
     for (const { symbol, assetType } of symbolsWithType) {
       try {
-        const q = await yahooFinance.quote(toYahooTicker(symbol, assetType));
+        const q = await withTimeout(
+          yahooFinance.quote(toYahooTicker(symbol, assetType)),
+          YAHOO_TIMEOUT_MS,
+          `yahoo single ${symbol}`
+        );
         result[symbol] = q
           ? {
               price: q.regularMarketPrice,

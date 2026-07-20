@@ -53,13 +53,34 @@ async function testConnection(req, res) {
   try {
     res.json(await svc.testConnection(req.user.id, req.params.exchangeId));
   } catch (err) {
-    // ✅ Fix diagnostic : avant, un 500 ici n'affichait dans le terminal que
-    // la ligne d'accès morgan (method/status/ms), jamais le message ni le
-    // stack trace réel — impossible de distinguer une erreur de
-    // déchiffrement (rotation de clé), une erreur ccxt, un timeout réseau,
-    // etc. sans deviner à l'aveugle.
     console.error(`[exchanges.controller] testConnection(${req.params.exchangeId}) error:`, err);
     res.status(err.status || 500).json({ message: err.message });
+  }
+}
+
+// POST /api/exchanges/:exchangeId/health-check
+// Vérification manuelle à la demande (met à jour health_status/consecutive_failures
+// exactement comme le ferait le cron, mais déclenchée immédiatement par l'utilisateur).
+async function healthCheckOne(req, res) {
+  try {
+    const result = await svc.healthCheckConnection(req.user.id, req.params.exchangeId);
+    if (!result) return res.status(404).json({ message: 'Exchange not connected' });
+    res.json(result);
+  } catch (err) {
+    console.error(`[exchanges.controller] healthCheckOne(${req.params.exchangeId}) error:`, err);
+    res.status(err.status || 500).json({ message: err.message });
+  }
+}
+
+// GET /api/exchanges/portfolio/all
+// Portfolio agrégé de toutes les exchanges connectées de l'utilisateur.
+async function getAggregatedPortfolio(req, res) {
+  try {
+    const result = await svc.getAggregatedPortfolio(req.user.id);
+    res.json(result);
+  } catch (err) {
+    console.error('[exchanges.controller] getAggregatedPortfolio error:', err);
+    res.status(500).json({ message: err.message });
   }
 }
 
@@ -157,6 +178,7 @@ async function getPaperTrades(req, res) {
 
 module.exports = {
   getConnections, connect, changeMode, disconnect,
-  testConnection, getPortfolio, placeOrder,
+  testConnection, healthCheckOne, getAggregatedPortfolio,
+  getPortfolio, placeOrder,
   closePaperTrade, getPaperTrades,
 };

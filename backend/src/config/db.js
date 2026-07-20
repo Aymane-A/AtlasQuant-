@@ -350,6 +350,20 @@ async function migrate() {
     ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS signal_alert_min_confidence INTEGER NOT NULL DEFAULT 75;
 
     ALTER TABLE signals ADD COLUMN IF NOT EXISTS asset_class TEXT NOT NULL DEFAULT 'Crypto';
+    -- ✅ Feature: health monitoring des connexions exchange — permet de
+    -- détecter une clé API cassée/expirée AVANT qu'un ordre réel échoue,
+    -- au lieu de le découvrir seulement au moment critique.
+    ALTER TABLE user_exchange_connections ADD COLUMN IF NOT EXISTS health_status VARCHAR(10) NOT NULL DEFAULT 'unknown';
+    DO $$ BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'uec_health_status_check'
+      ) THEN
+        ALTER TABLE user_exchange_connections ADD CONSTRAINT uec_health_status_check
+          CHECK (health_status IN ('ok','degraded','failed','unknown'));
+      END IF;
+    END $$;
+    ALTER TABLE user_exchange_connections ADD COLUMN IF NOT EXISTS consecutive_failures INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE user_exchange_connections ADD COLUMN IF NOT EXISTS last_health_check TIMESTAMPTZ;
 
     -- migration: 2fa, sessions, api_keys
     ALTER TABLE users ADD COLUMN IF NOT EXISTS twofa_secret TEXT;

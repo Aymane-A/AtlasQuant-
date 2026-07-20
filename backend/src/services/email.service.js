@@ -1,6 +1,6 @@
 /**
  * src/services/email.service.js — AtlasQuant AI
- * Nodemailer + Gmail SMTP — 3 email templates
+ * Nodemailer + Gmail SMTP — 4 email templates
  */
 
 const nodemailer = require('nodemailer');
@@ -458,4 +458,93 @@ async function sendDigestEmail({ to, name, items }) {
   logger.info(`[email] ✅ Digest email → ${to} (${items.length} item(s))`);
 }
 
-module.exports = { sendAlertEmail, sendSignalEmail, sendDigestEmail };
+// ── TEMPLATE 4 — Email Verification ──────────────────────
+// ✅ Feature: envoyée par POST /settings/email/resend-verification.
+// Le lien pointe vers FRONTEND_URL/verify-email?token=... (page VerifyEmail.jsx).
+async function sendVerificationEmail({ to, name, verifyUrl }) {
+  const accentColor = '#00f5d4';
+  const accentGlow  = 'rgba(0,245,212,0.1)';
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Vérifie ton email — AtlasQuant AI</title>
+<style>
+${BASE_STYLES}
+.verify-badge {
+  display:inline-flex; align-items:center; gap:8px;
+  background:${accentGlow}; border:1px solid ${accentColor}22;
+  border-radius:8px; padding:8px 14px; margin-bottom:20px;
+}
+.verify-badge-text { font-size:11px; font-family:'JetBrains Mono',monospace; color:${accentColor}; letter-spacing:.1em; text-transform:uppercase; font-weight:700; }
+.verify-icon-block { text-align:center; margin:28px 0; }
+.verify-icon { font-size:40px; }
+.link-fallback { margin-top:20px; padding:14px 16px; background:#ffffff03; border:1px solid #ffffff0a; border-radius:8px; font-size:11px; font-family:'JetBrains Mono',monospace; color:#475569; word-break:break-all; text-align:center; }
+</style>
+</head>
+<body>
+<div class="outer">
+  <div class="wrap">
+
+    <div class="topbar">
+      <div>
+        <div class="logo">Atlas<span>Quant</span> <span style="color:#475569;font-size:13px;font-weight:400">AI</span></div>
+        <div class="logo-tag">Account Security</div>
+      </div>
+      <div style="font-size:11px;font-family:'JetBrains Mono',monospace;color:#334155">${new Date().toUTCString().slice(0,16)}</div>
+    </div>
+
+    <div class="card">
+      <div class="card-hero">
+        <div class="verify-badge">
+          <div class="verify-badge-text">Email Verification</div>
+        </div>
+        <div class="eyebrow">Confirme ton adresse</div>
+        <div class="h1">
+          <span>Vérifie ton</span>
+          <span style="color:${accentColor}">adresse email</span>
+        </div>
+        <div class="subtitle">Salut ${name || 'là'}, confirme ton adresse email pour sécuriser ton compte AtlasQuant AI.</div>
+
+        <div class="verify-icon-block">
+          <div class="verify-icon">✉️</div>
+        </div>
+
+        <div class="cta-wrap">
+          <a href="${verifyUrl}" class="cta-btn" style="background:${accentColor};color:#06060f">
+            Vérifier mon email →
+          </a>
+        </div>
+
+        <div class="link-fallback">${verifyUrl}</div>
+      </div>
+
+      <div class="card-footer-inner">
+        <div style="font-size:12px;color:#475569;font-family:'JetBrains Mono',monospace;text-align:center">
+          Ce lien expire dans 24h · Si tu n'as pas demandé cet email, ignore-le · AtlasQuant AI
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">
+      AtlasQuant AI &nbsp;·&nbsp; <a href="#">Paramètres du compte</a>
+    </div>
+
+  </div>
+</div>
+</body>
+</html>`;
+
+  await transporter.sendMail({
+    from:    `"AtlasQuant AI" <${process.env.EMAIL_USER}>`,
+    to,
+    subject: '✉️ Vérifie ton adresse email — AtlasQuant AI',
+    html,
+  });
+
+  logger.info(`[email] ✅ Verification email → ${to}`);
+}
+
+module.exports = { sendAlertEmail, sendSignalEmail, sendDigestEmail, sendVerificationEmail };

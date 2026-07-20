@@ -310,7 +310,7 @@ async function cancelLiveOrder(exchange, credentials, orderId, symbol) {
 // ── DB operations ─────────────────────────────────────────
 async function getUserConnections(userId) {
   const { rows } = await pool.query(
-    `SELECT exchange_id, mode, connected_at, last_sync_at
+    `SELECT exchange_id, mode, connected_at, last_sync_at, health_status, consecutive_failures, last_health_check
      FROM user_exchange_connections WHERE user_id = $1`,
     [userId]
   );
@@ -323,6 +323,8 @@ async function getUserConnections(userId) {
       lastSync: row.last_sync_at
         ? new Date(row.last_sync_at).toLocaleString('en-GB', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' })
         : '—',
+      healthStatus: row.health_status || 'unknown',
+      consecutiveFailures: row.consecutive_failures || 0,
     };
     return acc;
   }, {});
@@ -389,6 +391,114 @@ async function testConnection(userId, exchangeId) {
     [userId, exchangeId]
   );
   return { ok: true, message: 'Connection verified' };
+}
+
+// ── Health monitoring ──────────────────────────────────────
+const FAILURE_THRESHOLD = 3;
+
+function computeHealthStatus(consecutiveFailures) {
+  if (consecutiveFailures === 0) return 'ok';
+  if (consecutiveFailures < FAILURE_THRESHOLD) return 'degraded';
+  return 'failed';
+}
+
+async function healthCheckConnection(userId, exchangeId) {
+  const creds = await getDecryptedCredentials(userId, exchangeId);
+  if (!creds) return null;
+
+  let ok = true;
+  try {
+    await verifyWithExchange(exchangeId, creds, creds.mode);
+  } catch {
+    ok = false;
+  }
+
+  const { rows } = await pool.query(
+    `SELECT consecutive_failures FROM user_exchange_connections WHERE user_id=$1 AND exchange_id=$2`,
+    [userId, exchangeId]
+  );
+  const prevFailures = rows[0]?.consecutive_failures || 0;
+  const consecutiveFailures = ok ? 0 : prevFailures + 1;
+  const healthStatus = computeHealthStatus(consecutiveFailures);
+  const justCrossedThreshold = healthStatus === 'failed' && consecutiveFailures === FAILURE_THRESHOLD;
+
+  await pool.query(
+    `UPDATE user_exchange_connections
+     SET health_status=$3, consecutive_failures=$4, last_health_check=NOW()
+     WHERE user_id=$1 AND exchange_id=$2`,
+    [userId, exchangeId, healthStatus, consecutiveFailures]
+  );
+
+  return { userId, exchangeId, ok, healthStatus, consecutiveFailures, justCrossedThreshold };
+}
+
+async function healthCheckAllConnections() {
+  const { rows } = await pool.query(`SELECT user_id, exchange_id FROM user_exchange_connections`);
+  const results = [];
+
+  for (const row of rows) {
+    try {
+      const result = await healthCheckConnection(row.user_id, row.exchange_id);
+      if (result) results.push(result);
+
+      if (result?.justCrossedThreshold) {
+        await pool.query(
+          `INSERT INTO alert_digest_queue (user_id, symbol, type, condition, target, current_price, triggered_at)
+           VALUES ($1, $2, 'exchange_connection', 'failed', 0, 0, NOW())`,
+          [row.user_id, row.exchange_id]
+        );
+      }
+    } catch (err) {
+      console.error(`[exchanges.service] healthCheck failed for ${row.exchange_id} (user ${row.user_id}):`, err.message);
+    }
+    await new Promise(r => setTimeout(r, 500));
+  }
+
+  return results;
+}
+
+// ── Portfolio agrégé (toutes les exchanges connectées d'un user) ──────
+// IMPORTANT — PAS de conversion de devise ici (voir explication complète
+// dans le message). On agrège uniquement le même symbole entre exchanges.
+async function getAggregatedPortfolio(userId) {
+  const { rows } = await pool.query(
+    `SELECT exchange_id, mode FROM user_exchange_connections WHERE user_id=$1`,
+    [userId]
+  );
+
+  const settled = await Promise.allSettled(rows.map(async row => {
+    const creds = await getDecryptedCredentials(userId, row.exchange_id);
+    if (!creds) throw new Error('Credentials introuvables');
+
+    if (creds.mode === 'paper') {
+      const trades = await getPaperTrades(userId, row.exchange_id, 'open');
+      return {
+        exchangeId: row.exchange_id,
+        mode: 'paper',
+        positions: trades.map(t => ({ symbol: t.symbol, side: t.side, quantity: t.quantity, price: t.price })),
+      };
+    }
+
+    const positions = await fetchPortfolio(row.exchange_id, creds);
+    return { exchangeId: row.exchange_id, mode: creds.mode, positions };
+  }));
+
+  const exchanges = [];
+  const skipped = [];
+  settled.forEach((r, i) => {
+    if (r.status === 'fulfilled') exchanges.push(r.value);
+    else skipped.push({ exchangeId: rows[i].exchange_id, reason: r.reason.message });
+  });
+
+  const totalsBySymbol = {};
+  for (const ex of exchanges) {
+    if (ex.mode === 'paper') continue;
+    for (const p of ex.positions || []) {
+      totalsBySymbol[p.symbol] = (totalsBySymbol[p.symbol] || 0) + parseFloat(p.total ?? 0);
+    }
+  }
+
+  return { exchanges, totalsBySymbol, skipped };
 }
 
 async function getDecryptedCredentials(userId, exchangeId) {
@@ -494,4 +604,7 @@ module.exports = {
   getOandaBaseUrl,
   getOandaPrice,
   SUPPORTED,
+  healthCheckConnection,
+  healthCheckAllConnections,
+  getAggregatedPortfolio,
 };

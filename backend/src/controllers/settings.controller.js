@@ -358,10 +358,11 @@ async function testTelegram(req, res) {
 // ── POST /api/settings/email/resend-verification ──────────
 // ⚠️ Adapte l'import de sendMail ci-dessous à ton service mailer existant
 // (celui déjà utilisé par alertChecker.service.js pour les emails Nodemailer).
-async function resendVerification(req, res) {
+// ── POST /api/settings/email/resend-verification ──────────
+async function sendVerificationEmail(req, res) {
   try {
     const userId = req.user.id;
-    const { rows } = await db.query('SELECT email, email_verified FROM users WHERE id = $1', [userId]);
+    const { rows } = await db.query('SELECT name, email, email_verified FROM users WHERE id = $1', [userId]);
     if (!rows.length) return res.status(404).json({ success: false, error: 'Utilisateur introuvable' });
     if (rows[0].email_verified) return res.json({ success: true, message: 'Email déjà vérifié' });
 
@@ -373,14 +374,12 @@ async function resendVerification(req, res) {
       [tokenHash, userId]
     );
 
-    const { sendMail } = require('../services/emailService'); // ⚠️ adapte le chemin/nom si différent
+    const { sendVerificationEmail: sendVerificationMail } = require('../services/email.service');
     const verifyUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/verify-email?token=${token}`;
-    await sendMail({
+    await sendVerificationMail({
       to: rows[0].email,
-      subject: 'Vérifie ton adresse email — AtlasQuant AI',
-      html: `<p>Clique sur le lien ci-dessous pour vérifier ton adresse email :</p>
-             <p><a href="${verifyUrl}">${verifyUrl}</a></p>
-             <p>Ce lien expire dans 24h.</p>`,
+      name: rows[0].name,
+      verifyUrl,
     });
 
     res.json({ success: true, message: 'Email de vérification envoyé' });
@@ -389,7 +388,6 @@ async function resendVerification(req, res) {
     res.status(500).json({ success: false, error: err.message });
   }
 }
-
 // ── POST /api/settings/email/verify (public, sans auth) ───
 async function verifyEmail(req, res) {
   try {
@@ -577,5 +575,5 @@ async function deleteAccount(req, res) {
 
 module.exports = {
   getSettings, updateSettings, changePassword, exportUserData, deleteAccount,
-  testWebhook, testTelegram, resendVerification, verifyEmail, getAuditLog,
+  testWebhook, testTelegram, sendVerificationEmail, verifyEmail, getAuditLog,
 };
