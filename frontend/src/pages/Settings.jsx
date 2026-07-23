@@ -25,19 +25,108 @@ const TABS = [
   { id:'danger',        icon:'⚠',  label:'Danger Zone'    },
 ];
 
-// ✅ Fix: les <option> dans un <select> natif ne respectent pas toujours le
-// rgba() transparent du parent — certains navigateurs (Chrome/Edge sur
-// Windows notamment) les rendent sur fond blanc par défaut, quel que soit
-// le style du <select> lui-même. On force un fond solide + couleur de texte
-// sur chaque <option>, globalement, une seule fois par page.
-function GlobalSelectStyles() {
+// ✅ Fix: les <option> d'un <select> natif restent parfois rendus par le
+// système d'exploitation (popup natif Windows/macOS) plutôt que par le
+// CSS de la page, même avec un style forcé sur <option>. CustomSelect
+// ci-dessous est un dropdown entièrement rendu en React (button + div
+// positionnée en absolute) : il n'y a plus de popup natif, donc plus
+// jamais de fond blanc, quel que soit le navigateur/OS.
+function CustomSelect({ value, onChange, options, placeholder = 'Select...' }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    function handleClickOutside(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const selected = options.find(o => o.value === value);
+
   return (
-    <style>{`
-      select option {
-        background: var(--surface, #12141c);
-        color: var(--text-primary, #e5e7eb);
-      }
-    `}</style>
+    <div ref={ref} style={{ position:'relative' }}>
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        style={{
+          width:'100%', textAlign:'left', background:'rgba(255,255,255,0.04)',
+          border:'1px solid var(--border)', borderRadius:8, padding:'10px 14px',
+          color:'var(--text-primary)', fontFamily:'JetBrains Mono,monospace', fontSize:13,
+          cursor:'pointer', display:'flex', justifyContent:'space-between', alignItems:'center',
+          boxSizing:'border-box',
+        }}
+      >
+        <span>{selected ? selected.label : placeholder}</span>
+        <span style={{ opacity:.5, fontSize:10, marginLeft:8 }}>{open ? '▲' : '▼'}</span>
+      </button>
+
+      {open && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 6px)',
+            left: 0,
+            right: 0,
+            zIndex: 999,
+
+            background: 'rgba(10,15,28,0.45)',
+            backdropFilter: 'blur(24px)',
+            WebkitBackdropFilter: 'blur(24px)',
+
+            border: '1px solid rgba(255,255,255,0.08)',
+            borderRadius: 14,
+
+            overflow: 'hidden',
+            overflowY: 'auto',
+            maxHeight: 280,
+
+            boxShadow:
+              '0 20px 60px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.04)',
+
+            transition: 'all .25s ease',
+          }}
+        >
+          {options.map(opt => (
+            <div
+              key={opt.value}
+              onClick={() => {
+                onChange(opt.value);
+                setOpen(false);
+              }}
+              style={{
+                padding: '12px 16px',
+                color:
+                  opt.value === value
+                    ? 'var(--cyan)'
+                    : 'rgba(255,255,255,.88)',
+
+                background:
+                  opt.value === value
+                    ? 'rgba(0,245,212,.12)'
+                    : 'transparent',
+
+                borderBottom: '1px solid rgba(255,255,255,.03)',
+
+                cursor: 'pointer',
+                transition: 'all .18s ease',
+              }}
+              onMouseEnter={e => {
+                if (opt.value !== value)
+                  e.currentTarget.style.background = 'rgba(255,255,255,.05)';
+              }}
+              onMouseLeave={e => {
+                if (opt.value !== value)
+                  e.currentTarget.style.background = 'transparent';
+              }}
+            >
+              {opt.label}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -69,8 +158,6 @@ function Input({ value, onChange, type='text', placeholder='', disabled=false, m
   );
 }
 
-// ✅ Fix: composant Select partagé — fond solide garanti via GlobalSelectStyles
-// pour les <option>, plus besoin de dupliquer le style inline sur chaque select.
 function Select({ value, onChange, children }) {
   return (
     <select value={value} onChange={onChange} style={{
@@ -903,6 +990,9 @@ function SessionsSection({ onToast }) {
 
   return (
     <div>
+      {sessions.length === 0 && (
+        <div style={{ ...monoSm, color:'var(--text-muted)' }}>No active sessions found</div>
+      )}
       {sessions.map(s => (
         <div key={s.id} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'14px 0', borderBottom:'1px solid rgba(255,255,255,0.04)' }}>
           <div>
@@ -1056,19 +1146,19 @@ function ApiKeysSection({ onToast }) {
 
 // ── Language, Region & Currency ──────────────────────────
 const LANGUAGES = [
-  { code:'en', label:'English'    }, { code:'fr', label:'Français'   },
-  { code:'ar', label:'العربية'    }, { code:'es', label:'Español'    },
-  { code:'tr', label:'Türkçe'     }, { code:'pt', label:'Português'  },
-  { code:'ru', label:'Русский'    }, { code:'de', label:'Deutsch'    },
-  { code:'hi', label:'हिन्दी'      }, { code:'ko', label:'한국어'      },
+  { value:'en', label:'English'    }, { value:'fr', label:'Français'   },
+  { value:'ar', label:'العربية'    }, { value:'es', label:'Español'    },
+  { value:'tr', label:'Türkçe'     }, { value:'pt', label:'Português'  },
+  { value:'ru', label:'Русский'    }, { value:'de', label:'Deutsch'    },
+  { value:'hi', label:'हिन्दी'      }, { value:'ko', label:'한국어'      },
 ];
 
 const CURRENCIES = [
-  { code:'USD', label:'USD — US Dollar'     }, { code:'EUR', label:'EUR — Euro'          },
-  { code:'MAD', label:'MAD — Dirham marocain' }, { code:'GBP', label:'GBP — British Pound' },
-  { code:'JPY', label:'JPY — Japanese Yen'  }, { code:'CHF', label:'CHF — Swiss Franc'   },
-  { code:'CAD', label:'CAD — Canadian Dollar' }, { code:'AUD', label:'AUD — Australian Dollar' },
-  { code:'CNY', label:'CNY — Chinese Yuan'  }, { code:'AED', label:'AED — UAE Dirham'    },
+  { value:'USD', label:'USD — US Dollar'     }, { value:'EUR', label:'EUR — Euro'          },
+  { value:'MAD', label:'MAD — Dirham marocain' }, { value:'GBP', label:'GBP — British Pound' },
+  { value:'JPY', label:'JPY — Japanese Yen'  }, { value:'CHF', label:'CHF — Swiss Franc'   },
+  { value:'CAD', label:'CAD — Canadian Dollar' }, { value:'AUD', label:'AUD — Australian Dollar' },
+  { value:'CNY', label:'CNY — Chinese Yuan'  }, { value:'AED', label:'AED — UAE Dirham'    },
 ];
 
 function LocaleSection({ data, onToast }) {
@@ -1079,9 +1169,10 @@ function LocaleSection({ data, onToast }) {
   const [currency, setCurrency] = useState(s.currency || 'USD');
   const [saving, setSaving] = useState(false);
 
-  const timezones = typeof Intl.supportedValuesOf === 'function'
+  const timezoneOptions = (typeof Intl.supportedValuesOf === 'function'
     ? Intl.supportedValuesOf('timeZone')
-    : ['UTC','Africa/Casablanca','Europe/Paris','America/New_York','Asia/Dubai','Asia/Tokyo'];
+    : ['UTC','Africa/Casablanca','Europe/Paris','America/New_York','Asia/Dubai','Asia/Tokyo']
+  ).map(tz => ({ value: tz, label: tz }));
 
   const save = async () => {
     setSaving(true);
@@ -1096,22 +1187,16 @@ function LocaleSection({ data, onToast }) {
   return (
     <div>
       <Field label="Language">
-        <Select value={language} onChange={e => setLanguage(e.target.value)}>
-          {LANGUAGES.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}
-        </Select>
+        <CustomSelect value={language} onChange={setLanguage} options={LANGUAGES} />
       </Field>
       <Field label="Timezone">
-        <Select value={timezone} onChange={e => setTimezone(e.target.value)}>
-          {timezones.map(tz => <option key={tz} value={tz}>{tz}</option>)}
-        </Select>
+        <CustomSelect value={timezone} onChange={setTimezone} options={timezoneOptions} />
         <div style={{ ...monoSm, color:'var(--text-muted)', marginTop:6 }}>
           Toutes les dates (trades, alertes, signaux) s'afficheront dans ce fuseau
         </div>
       </Field>
       <Field label="Currency">
-        <Select value={currency} onChange={e => setCurrency(e.target.value)}>
-          {CURRENCIES.map(c => <option key={c.code} value={c.code}>{c.label}</option>)}
-        </Select>
+        <CustomSelect value={currency} onChange={setCurrency} options={CURRENCIES} />
         <div style={{ ...monoSm, color:'var(--text-muted)', marginTop:6 }}>
           Utilisée pour l'affichage du capital, du P&L, et des montants dans les emails d'alerte
         </div>
@@ -1334,7 +1419,6 @@ export default function Settings() {
 
   return (
     <>
-      <GlobalSelectStyles />
       <div style={{ marginBottom:4 }}>
         <div style={{ fontSize:11, letterSpacing:'.2em', color:'var(--text-muted)', textTransform:'uppercase', fontFamily:'JetBrains Mono,monospace', marginBottom:4 }}>
           // Settings

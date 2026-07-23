@@ -5,6 +5,14 @@
  * direct; 'digest' file l'alerte dans alert_digest_queue, flushée 1x/jour par
  * runDailyDigest() (voir cron séparé dans server.js / app.js).
  *
+ * ✅ Feature: enforcement des Quiet Hours (Settings → Notifications → Quiet
+ * Hours). Si l'user est dans sa plage horaire silencieuse (comparée dans SON
+ * fuseau, via user_settings.timezone) au moment où une alerte se déclenche :
+ *   - Email : mis en file dans alert_digest_queue (peu importe email_frequency)
+ *     — l'alerte n'est pas perdue, elle arrive avec le prochain digest quotidien.
+ *   - Telegram : suspendu pour ce cycle, pas de mécanisme de file d'attente
+ *     équivalent — l'alerte reste tracée dans les logs mais n'est pas renvoyée.
+ *
  * ✅ Fix: fetchPrice() n'avait aucun timeout — un Yahoo/Binance lent bloquait
  * checkAlerts() pendant des dizaines de secondes (boucle for...of séquentielle
  * sur les symboles), retardant d'autant la libération des connexions pg
@@ -60,6 +68,40 @@ function conditionMet(condition, currentPrice, target) {
   return false;
 }
 
+// ✅ Feature: compare l'heure locale actuelle de l'user (via son fuseau) à sa
+// plage de quiet hours. Gère le cas "overnight" (ex. 23:00 → 07:00, où start
+// > end) en plus du cas classique (ex. 09:00 → 17:00, où start < end).
+function isWithinQuietHours(enabled, start, end, timezone) {
+  if (!enabled) return false;
+  try {
+    const tz = timezone || 'UTC';
+    const localTime = new Intl.DateTimeFormat('en-GB', {
+      timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false,
+    }).format(new Date()); // "HH:MM"
+
+    const toMinutes = (hhmm) => {
+      const [h, m] = String(hhmm).split(':').map(Number);
+      return (h || 0) * 60 + (m || 0);
+    };
+
+    const nowMin   = toMinutes(localTime);
+    const startMin = toMinutes(start);
+    const endMin   = toMinutes(end);
+
+    if (startMin === endMin) return false; // plage nulle → traité comme désactivé
+
+    if (startMin < endMin) {
+      // plage classique dans la même journée, ex. 09:00 → 17:00
+      return nowMin >= startMin && nowMin < endMin;
+    }
+    // plage "overnight", ex. 23:00 → 07:00
+    return nowMin >= startMin || nowMin < endMin;
+  } catch (e) {
+    logger.warn(`[alertChecker] isWithinQuietHours failed (tz=${timezone}): ${e.message}`);
+    return false;
+  }
+}
+
 // ✅ Fix: garde anti-chevauchement — exportée pour que le fichier qui
 // planifie ce cron (app.js / cron.js) puisse la vérifier avant de relancer
 // checkAlerts(). Voir exemple de wiring en bas de ce fichier.
@@ -74,12 +116,21 @@ async function checkAlerts() {
   isCheckAlertsRunning = true;
 
   try {
+    // ✅ Feature: LEFT JOIN user_settings pour récupérer les préférences de
+    // quiet hours + le fuseau horaire de chaque user. LEFT JOIN (pas JOIN)
+    // car un user peut ne pas encore avoir de ligne dans user_settings —
+    // dans ce cas COALESCE applique les mêmes défauts que settings.controller.js.
     const { rows: alerts } = await db.query(`
       SELECT a.id, a.symbol, a.type, a.condition, a.target,
              a.notify_email, a.notify_telegram, a.email_frequency,
-             u.id AS user_id, u.email, u.name
+             u.id AS user_id, u.email, u.name,
+             COALESCE(us.quiet_hours_enabled, false)   AS quiet_hours_enabled,
+             COALESCE(us.quiet_hours_start, '23:00')   AS quiet_hours_start,
+             COALESCE(us.quiet_hours_end, '07:00')     AS quiet_hours_end,
+             COALESCE(us.timezone, 'UTC')              AS timezone
       FROM alerts a
       JOIN users u ON u.id = a.user_id
+      LEFT JOIN user_settings us ON us.user_id = u.id
       WHERE a.triggered = false AND a.paused = false
     `);
 
@@ -119,9 +170,28 @@ async function checkAlerts() {
           currentPrice,
         };
 
-        // Email — instant (envoi direct) vs digest (mise en queue)
+        const inQuietHours = isWithinQuietHours(
+          alert.quiet_hours_enabled, alert.quiet_hours_start, alert.quiet_hours_end, alert.timezone
+        );
+
+        // Email — instant / digest / quiet hours (queue systématique)
         if (alert.notify_email) {
-          if (alert.email_frequency === 'digest') {
+          if (inQuietHours) {
+            // ✅ Quiet hours actives : on ne réveille pas l'user — l'alerte
+            // part dans la même file que le digest quotidien, peu importe
+            // son email_frequency habituel. Elle arrivera au prochain
+            // runDailyDigest() plutôt que d'être perdue.
+            try {
+              await db.query(`
+                INSERT INTO alert_digest_queue
+                  (user_id, alert_id, symbol, type, condition, target, current_price)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+              `, [alert.user_id, alert.id, symbol, alert.type, alert.condition, alert.target, currentPrice]);
+              logger.info(`[alertChecker] Quiet hours active for user ${alert.user_id} — ${symbol} email queued for digest`);
+            } catch (e) {
+              logger.error(`[alertChecker] Digest queue insert (quiet hours) failed: ${e.message}`);
+            }
+          } else if (alert.email_frequency === 'digest') {
             try {
               await db.query(`
                 INSERT INTO alert_digest_queue
@@ -140,12 +210,18 @@ async function checkAlerts() {
           }
         }
 
-        // Telegram — reste toujours instant, pas concerné par le mode digest
+        // Telegram — suspendu pendant les quiet hours (pas de file d'attente
+        // équivalente au digest email ; l'alerte reste tracée dans triggered_at
+        // mais le message Telegram n'est simplement pas envoyé ce cycle-ci).
         if (alert.notify_telegram) {
-          try {
-            await sendTelegramAlert(payload);
-          } catch (e) {
-            logger.error(`[alertChecker] Telegram failed: ${e.message}`);
+          if (inQuietHours) {
+            logger.info(`[alertChecker] Quiet hours active for user ${alert.user_id} — ${symbol} Telegram suppressed`);
+          } else {
+            try {
+              await sendTelegramAlert(payload);
+            } catch (e) {
+              logger.error(`[alertChecker] Telegram failed: ${e.message}`);
+            }
           }
         }
       }

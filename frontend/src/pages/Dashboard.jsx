@@ -16,6 +16,14 @@ const CLASS_COLOR = {
   Indices:   'var(--green)',
 };
 
+// ✅ Feature: même table que Settings.jsx (CURRENCY_SYMBOLS) — l'user choisit
+// sa devise dans Settings → Language & Region, et ce symbole remplace le $
+// qui était hardcodé dans tout le Dashboard (KPIs + prix live des signaux).
+const CURRENCY_SYMBOLS = {
+  USD: '$', EUR: '€', MAD: 'DH', GBP: '£', JPY: '¥',
+  CHF: 'CHF', CAD: 'CA$', AUD: 'A$', CNY: '¥', AED: 'AED',
+};
+
 // ── Helper: extract numeric price from any shape ──────────
 const extractPrice = (p) => {
   if (!p) return 0;
@@ -61,11 +69,21 @@ export default function Dashboard() {
     alertsSummary: { active: 0, triggeredToday: 0 },
     recentActivity: [],
   });
+  const [currencySymbol, setCurrencySymbol] = useState('$');
 
   useEffect(() => {
     // Live prices (Binance only — sert au lookup live des signaux Crypto)
     marketAPI.prices()
       .then(r => setPrices(r?.data?.prices || {}))
+      .catch(() => {});
+
+    // ✅ Feature: devise de l'user (Settings → Language & Region), appliquée
+    // aux KPIs et aux prix live ci-dessous au lieu du $ hardcodé.
+    api.get('/settings')
+      .then(res => {
+        const code = res.data?.settings?.currency || 'USD';
+        setCurrencySymbol(CURRENCY_SYMBOLS[code] || '$');
+      })
       .catch(() => {});
 
     // Dashboard summary
@@ -100,14 +118,14 @@ export default function Dashboard() {
   const kpis = dashData.stats ? [
     {
       label: t('dashboard.portfolioValue'),
-      value: `$${dashData.stats.portfolioValue.value.toLocaleString()}`,
+      value: `${currencySymbol}${dashData.stats.portfolioValue.value.toLocaleString()}`,
       delta: `▲ ${dashData.stats.portfolioValue.delta}`,
       color: 'var(--cyan)',
       sub:   t('dashboard.vsYesterday'),
     },
     {
       label: t('dashboard.dailyPnl'),
-      value: `+$${dashData.stats.dailyPnl.value.toLocaleString()}`,
+      value: `+${currencySymbol}${dashData.stats.dailyPnl.value.toLocaleString()}`,
       delta: `▲ ${dashData.stats.dailyPnl.delta}`,
       color: 'var(--green)',
       sub:   t('dashboard.unrealized'),
@@ -166,7 +184,7 @@ export default function Dashboard() {
               <YAxis hide />
               <Tooltip
                 contentStyle={{ background:'rgba(3,7,18,0.95)', border:'1px solid rgba(0,245,212,0.3)', borderRadius:8, fontFamily:'JetBrains Mono,monospace', fontSize:11 }}
-                formatter={v => '$' + Math.round(v).toLocaleString()}
+                formatter={v => currencySymbol + Math.round(v).toLocaleString()}
               />
               <Line type="monotone" dataKey="value" stroke="var(--cyan)" strokeWidth={1.5} dot={false} />
             </LineChart>
@@ -247,7 +265,7 @@ export default function Dashboard() {
                   </div>
                   <div style={{ textAlign:'right' }}>
                     <div style={{ fontSize:13, fontWeight:600, fontFamily:'JetBrains Mono,monospace', color: COLOR[sig.signal] || 'var(--text-primary)' }}>
-                      ${fmt(displayPrice)}
+                      {currencySymbol}{fmt(displayPrice)}
                     </div>
                     <div style={{ fontSize:11, color: changePct >= 0 ? 'var(--green)' : 'var(--red)', fontFamily:'JetBrains Mono,monospace' }}>
                       {changePct >= 0 ? '+' : ''}{parseFloat(changePct).toFixed(2)}%

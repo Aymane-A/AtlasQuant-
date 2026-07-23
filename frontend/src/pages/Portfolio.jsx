@@ -39,12 +39,25 @@ const BENCHMARKS = [
   { symbol:'SPY', label:'S&P 500' },
 ];
 
+// ✅ Feature: même table que Settings.jsx / Dashboard.jsx (CURRENCY_SYMBOLS).
+// ⚠️ Important: cette table ne remplace le "$" QUE pour les valeurs formatées
+// côté frontend (prix live, aperçu du modal, axe du graphique, historique).
+// Les valeurs comme hero.totalValue, p.price, p.pnl, t.pnl arrivent déjà
+// formatées en string depuis le backend (ex. "+$1,204.50") — leur symbole
+// "$" est câblé côté serveur (portfolio.controller.js, non fourni ici) et
+// resterait "$" indépendamment de ce choix tant que ce fichier backend n'est
+// pas adapté pour lire user_settings.currency lui aussi.
+const CURRENCY_SYMBOLS = {
+  USD: '$', EUR: '€', MAD: 'DH', GBP: '£', JPY: '¥',
+  CHF: 'CHF', CAD: 'CA$', AUD: 'A$', CNY: '¥', AED: 'AED',
+};
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
-function fmtPrice(sym, price) {
+function fmtPrice(sym, price, currencySymbol = '$') {
   if (typeof price === 'string') return price;
   if ((sym === 'BTC' || sym === 'ETH') && price >= 1000)
-    return `$${price.toLocaleString('en-US', { maximumFractionDigits:2 })}`;
-  return `$${price.toFixed(2)}`;
+    return `${currencySymbol}${price.toLocaleString('en-US', { maximumFractionDigits:2 })}`;
+  return `${currencySymbol}${price.toFixed(2)}`;
 }
 function colorPnl(str) {
   if (!str || str === 'N/A') return T.slate;
@@ -153,7 +166,9 @@ function Divider({ style={} }) {
 // En mode 'trim', un bandeau rappelle la position actuelle pour guider la
 // nouvelle quantité à saisir (le endpoint fait un upsert, donc entrer un
 // montant plus bas réduit effectivement la position).
-function AddPositionModal({ onClose, onAdded, prefill }) {
+// ✅ Feature: accepte aussi `currencySymbol` pour afficher le bon symbole
+// dans le label "Avg Entry" et l'aperçu, cohérent avec Settings → Currency.
+function AddPositionModal({ onClose, onAdded, prefill, currencySymbol = '$' }) {
   const [form, setForm] = useState({
     symbol:       prefill?.symbol || '',
     side:         prefill?.side   || 'long',
@@ -254,7 +269,7 @@ function AddPositionModal({ onClose, onAdded, prefill }) {
                 placeholder={isTrim ? `< ${prefill.existingAmount}` : '0.5'} style={inputStyle} autoFocus={!!prefill?.symbol} />
             </div>
             <div>
-              <label style={labelStyle}>Avg Entry ($)</label>
+              <label style={labelStyle}>Avg Entry ({currencySymbol})</label>
               <input className="aq-input" type="number" value={form.averageEntry} onChange={e => set('averageEntry', e.target.value)}
                 placeholder="45000" style={inputStyle} />
             </div>
@@ -274,8 +289,8 @@ function AddPositionModal({ onClose, onAdded, prefill }) {
             <div style={{ background:'rgba(0,245,212,0.04)', border:'1px solid rgba(0,245,212,0.1)', borderRadius:9, padding:'12px 14px' }}>
               <div style={{ ...mono, fontSize:10, color:T.slate, marginBottom:6 }}>Preview</div>
               <div style={{ ...mono, fontSize:12, color:'var(--text)' }}>
-                {form.side === 'long' ? '↑' : '↓'} {form.amount} {form.symbol} @ ${parseFloat(form.averageEntry||0).toLocaleString()}
-                {' '}= <span style={{ color:T.cyan }}>${(parseFloat(form.amount||0) * parseFloat(form.averageEntry||0)).toLocaleString('en-US', { maximumFractionDigits:2 })}</span>
+                {form.side === 'long' ? '↑' : '↓'} {form.amount} {form.symbol} @ {currencySymbol}{parseFloat(form.averageEntry||0).toLocaleString()}
+                {' '}= <span style={{ color:T.cyan }}>{currencySymbol}{(parseFloat(form.amount||0) * parseFloat(form.averageEntry||0)).toLocaleString('en-US', { maximumFractionDigits:2 })}</span>
               </div>
             </div>
           )}
@@ -394,6 +409,11 @@ export default function Portfolio() {
   const [error,       setError]       = useState(null);
   const [lastUpdated, setLastUpdated] = useState(null);
 
+  // ✅ Feature: devise de l'user (Settings → Language & Region), appliquée
+  // à tout ce que ce fichier formate lui-même en $ (voir note sur
+  // CURRENCY_SYMBOLS plus haut pour la limite avec les valeurs backend).
+  const [currencySymbol, setCurrencySymbol] = useState('$');
+
   const [hero,             setHero]            = useState({ totalValue:0, todayPnL:'+$0.00', dayReturn:'+0.00%', totalPnL:'+$0.00', totalReturn:'+0.00%', realizedPnL:'+$0.00', lifetimePnL:'+$0.00', openPositions:0, availableCash:'+$0.00' });
   const [allocations,      setAllocations]     = useState([]);
   const [holdingsData,     setHoldingsData]    = useState([]);
@@ -418,7 +438,15 @@ export default function Portfolio() {
   const [addPrefill,      setAddPrefill]      = useState(null); // ✅ pre-fill for recommendation-triggered Add/Trim
   const [closeTarget,     setCloseTarget]     = useState(null); // position to close
 
-  useEffect(() => { injectStyles(); }, []);
+  useEffect(() => {
+    injectStyles();
+    api.get('/settings')
+      .then(res => {
+        const code = res.data?.settings?.currency || 'USD';
+        setCurrencySymbol(CURRENCY_SYMBOLS[code] || '$');
+      })
+      .catch(() => {});
+  }, []);
 
   const fetchPortfolioData = async (silent = false, benchmark = benchmarkSymbol) => {
     if (!silent) {} // keep loading state on first load only
@@ -479,7 +507,7 @@ export default function Portfolio() {
   const applyLive = (h) => {
     const live = liveP[h.sym];
     if (!live) return h;
-    return { ...h, price: fmtPrice(h.sym, live.price), ch: sign(live.change), up: live.up };
+    return { ...h, price: fmtPrice(h.sym, live.price, currencySymbol), ch: sign(live.change), up: live.up };
   };
 
   const holdings = holdingsData.map(applyLive);
@@ -556,6 +584,7 @@ export default function Portfolio() {
           onClose={closeAddModal}
           onAdded={() => fetchPortfolioData(true)}
           prefill={addPrefill}
+          currencySymbol={currencySymbol}
         />
       )}
       {closeTarget && (
@@ -580,7 +609,7 @@ export default function Portfolio() {
               <LiveDot />
             </div>
             <div style={{ display:'flex', alignItems:'baseline', gap:14, flexWrap:'wrap' }}>
-              <Counter value={typeof hero.totalValue === 'number' ? hero.totalValue : 0} decimals={2}
+              <Counter value={typeof hero.totalValue === 'number' ? hero.totalValue : 0} decimals={2} prefix={currencySymbol}
                 style={{ ...mono, fontSize:46, fontWeight:800, color:T.cyan, lineHeight:1, letterSpacing:'-1px' }} />
               <span style={{ ...mono, fontSize:12, fontWeight:700, padding:'4px 12px', borderRadius:20,
                 background: dayUp ? 'rgba(52,211,153,0.1)' : 'rgba(244,63,94,0.1)',
@@ -714,8 +743,8 @@ export default function Portfolio() {
                 </defs>
                 <CartesianGrid stroke="rgba(255,255,255,0.03)" vertical={false} />
                 <XAxis dataKey="t" tick={{ ...mono, fontSize:9, fill:T.slate }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
-                <YAxis tick={{ ...mono, fontSize:9, fill:T.slate }} axisLine={false} tickLine={false} tickFormatter={v => `$${(v/1000).toFixed(0)}k`} width={42} />
-                <Tooltip {...ttStyle} formatter={v => [`$${parseFloat(v).toLocaleString()}`, 'Value']} />
+                <YAxis tick={{ ...mono, fontSize:9, fill:T.slate }} axisLine={false} tickLine={false} tickFormatter={v => `${currencySymbol}${(v/1000).toFixed(0)}k`} width={42} />
+                <Tooltip {...ttStyle} formatter={v => [`${currencySymbol}${parseFloat(v).toLocaleString()}`, 'Value']} />
                 <Area type="monotone" dataKey="v" stroke={T.purple} strokeWidth={1.5} fill="url(#aqEqGrad)" dot={false} activeDot={{ r:4, fill:T.purple, stroke:'var(--surface)', strokeWidth:2 }} />
               </AreaChart>
             </ResponsiveContainer>
@@ -923,8 +952,8 @@ export default function Portfolio() {
                           </span>
                         </td>
                         <td style={{ ...mono, fontSize:12, color:T.slate, padding:'10px 16px 10px 0' }}>{t.quantity}</td>
-                        <td style={{ ...mono, fontSize:12, color:T.slate, padding:'10px 16px 10px 0' }}>${t.entry.toLocaleString('en-US', { maximumFractionDigits:4 })}</td>
-                        <td style={{ ...mono, fontSize:12, color:'var(--text)', padding:'10px 16px 10px 0' }}>${t.exit.toLocaleString('en-US', { maximumFractionDigits:4 })}</td>
+                        <td style={{ ...mono, fontSize:12, color:T.slate, padding:'10px 16px 10px 0' }}>{currencySymbol}{t.entry.toLocaleString('en-US', { maximumFractionDigits:4 })}</td>
+                        <td style={{ ...mono, fontSize:12, color:'var(--text)', padding:'10px 16px 10px 0' }}>{currencySymbol}{t.exit.toLocaleString('en-US', { maximumFractionDigits:4 })}</td>
                         <td style={{ ...mono, fontSize:12, fontWeight:600, color:colorPnl(t.pnl), padding:'10px 16px 10px 0' }}>{t.pnl}</td>
                         <td style={{ ...mono, fontSize:12, color:colorPnl(t.pnlPct), padding:'10px 16px 10px 0' }}>{t.pnlPct}</td>
                         <td style={{ ...mono, fontSize:12, color:T.slate, padding:'10px 16px 10px 0' }}>{t.holdDays != null ? `${t.holdDays}d` : '—'}</td>

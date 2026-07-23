@@ -121,6 +121,39 @@ function ReadonlyBanner({ exchangeName }) {
   );
 }
 
+// ── Missing Requested-Exchange Banner ─────────────────────
+// Shown when the URL asked for a specific exchange (e.g. Quick Trade
+// from Watchlist for a forex/commodity symbol → ?exchangeId=oanda) but
+// that exchange isn't connected — instead of silently falling back to
+// whichever exchange connects first and showing the wrong instrument type.
+function MissingExchangeBanner({ exchangeName, onDismiss }) {
+  return (
+    <div style={{
+      display:'flex', alignItems:'center', gap:14,
+      background:'rgba(56,189,248,0.06)', border:'1px solid rgba(56,189,248,0.25)',
+      borderRadius:12, padding:'12px 18px',
+    }}>
+      <span style={{ fontSize:18, flexShrink:0 }}>ℹ</span>
+      <div style={{ flex:1 }}>
+        <div style={{ ...mono, fontSize:11, fontWeight:700, color:T.sky, marginBottom:2 }}>
+          {exchangeName} isn't connected yet
+        </div>
+        <div style={{ ...mono, fontSize:10, color:T.slate }}>
+          Showing another exchange instead — connect {exchangeName} to trade this instrument
+        </div>
+      </div>
+      <a href="/exchanges" style={{
+        ...mono, fontSize:10, padding:'6px 14px', borderRadius:7, textDecoration:'none',
+        border:'1px solid rgba(56,189,248,0.35)', background:'rgba(56,189,248,0.1)',
+        color:T.sky, flexShrink:0, transition:'all .15s',
+      }}>
+        Connect →
+      </a>
+      <button onClick={onDismiss} style={{ background:'transparent', border:'none', color:T.slate, cursor:'pointer', fontSize:14, flexShrink:0, padding:0 }}>✕</button>
+    </div>
+  );
+}
+
 // ── Order Confirmation Modal ──────────────────────────────
 function ConfirmModal({ order, exchange, onConfirm, onCancel }) {
   const [loading, setLoading] = useState(false);
@@ -1243,6 +1276,9 @@ export default function Trading() {
   // prices map: { 'BTC': 62000, 'BTCUSDT': 62000, 'ETH': 1700, ... }
   // fed into OrdersPanel for Live P&L computation without extra fetches.
   const [prices,        setPrices]        = useState({});
+  // Set when the URL requested a specific exchange (Quick Trade from
+  // Watchlist) that isn't connected yet — see MissingExchangeBanner.
+  const [missingRequestedEx, setMissingRequestedEx] = useState(null);
 
   const isOandaAccount = selectedExId === 'oanda';
   const isCommodity     = isOandaAccount && COMMODITY_SYMBOLS.includes(symbol);
@@ -1259,7 +1295,10 @@ export default function Trading() {
     const params  = new URLSearchParams(window.location.search);
     const prefill = params.get('symbol');
     if (prefill) {
-      const clean = prefill.toUpperCase().replace('/','').replace(/USDT$/,'').replace(/[^A-Z0-9]/g,'');
+      // Keep underscores — OANDA instrument names (e.g. "EUR_USD") rely on
+      // them, and stripping them here used to silently turn forex/commodity
+      // symbols into invalid crypto-looking ones (EUR_USD → EURUSD).
+      const clean = prefill.toUpperCase().replace(/USDT$/,'').replace(/[^A-Z0-9_]/g,'');
       if (clean) { setSymbol(clean); setSymbolInput(clean); }
     }
     // Pre-fill from SignalModal "Trade this Signal":
@@ -1293,12 +1332,25 @@ export default function Trading() {
   };
 
   useEffect(() => {
+    // A specific exchange may be requested via URL (e.g. Quick Trade from
+    // Watchlist for a forex/commodity symbol → ?exchangeId=oanda). Prefer
+    // it if connected; otherwise fall back to whichever connects first and
+    // surface a banner instead of silently showing the wrong instrument type.
+    const params = new URLSearchParams(window.location.search);
+    const requestedExId = params.get('exchangeId');
+
     api.get('/exchanges/connections')
       .then(res => {
         const conns = res.data || {};
         setConnections(conns);
-        const first = Object.keys(conns)[0];
-        if (first) setSelectedExId(first);
+
+        if (requestedExId && !conns[requestedExId]) {
+          const exMeta = EXCHANGES.find(e => e.id === requestedExId);
+          setMissingRequestedEx(exMeta?.name || requestedExId);
+        }
+
+        const target = (requestedExId && conns[requestedExId]) ? requestedExId : Object.keys(conns)[0];
+        if (target) setSelectedExId(target);
       }).catch(() => {});
   }, []);
 
@@ -1373,6 +1425,12 @@ export default function Trading() {
       )}
 
       {isReadonly && <ReadonlyBanner exchangeName={selectedEx?.name} />}
+      {missingRequestedEx && (
+        <MissingExchangeBanner
+          exchangeName={missingRequestedEx}
+          onDismiss={() => setMissingRequestedEx(null)}
+        />
+      )}
 
       {/* Header */}
       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', flexWrap:'wrap', gap:12 }}>
