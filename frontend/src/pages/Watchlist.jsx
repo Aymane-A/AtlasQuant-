@@ -299,12 +299,22 @@ export default function Watchlist() {
     }
   };
 
+  // ── Quick Trade routing — crypto, forex & commodities all supported ──
+  // Crypto (no slash, e.g. "BTCUSDT") routes to Trading.jsx's default
+  // crypto/ccxt flow. Forex & Commodity symbols (e.g. "EUR/USD", "XAU/USD")
+  // carry a slash — Trading.jsx's OANDA integration expects underscore
+  // instrument names ("EUR_USD"), and we also need to tell the page to
+  // select the OANDA exchange explicitly (otherwise it defaults to
+  // whichever exchange connected first, which is usually a crypto one).
   const goToTrade = (sym) => {
-    // Reuses the existing Trading page form instead of duplicating
-    // order-placement UI here — prefill via query param.
-    // Trading.jsx appends "USDT" itself, so strip it here to avoid "BTCUSDTUSDT".
-    const cleanSymbol = sym.replace(/USDT$/, '');
-    navigate(`/trading?symbol=${encodeURIComponent(cleanSymbol)}`);
+    if (!sym.includes('/')) {
+      // Trading.jsx appends "USDT" itself, so strip it here to avoid "BTCUSDTUSDT".
+      const cleanSymbol = sym.replace(/USDT$/, '');
+      navigate(`/trading?symbol=${encodeURIComponent(cleanSymbol)}`);
+      return;
+    }
+    const oandaSymbol = sym.toUpperCase().replace('/', '_');
+    navigate(`/trading?symbol=${encodeURIComponent(oandaSymbol)}&exchangeId=oanda`);
   };
 
   return (
@@ -450,14 +460,12 @@ export default function Watchlist() {
                     title="Set price alert"
                     color="var(--amber)" bg="rgba(251,191,36,0.1)" border="rgba(251,191,36,0.25)"
                   ><BellIcon /></IconButton>
-                  {/* Quick trade only supports crypto — Trading page order form is Binance/ccxt based */}
-                  {!s.sym.includes('/') && (
-                    <IconButton
-                      onClick={() => goToTrade(s.sym)}
-                      title="Quick trade"
-                      color="var(--cyan)" bg="rgba(0,245,212,0.1)" border="rgba(0,245,212,0.25)"
-                    ><BoltIcon /></IconButton>
-                  )}
+                  {/* Quick trade — supports crypto, forex & commodities (OANDA) */}
+                  <IconButton
+                    onClick={() => goToTrade(s.sym)}
+                    title="Quick trade"
+                    color="var(--cyan)" bg="rgba(0,245,212,0.1)" border="rgba(0,245,212,0.25)"
+                  ><BoltIcon /></IconButton>
                   <IconButton
                     onClick={() => removeSymbol(s.sym)}
                     title="Remove from watchlist"
@@ -561,13 +569,12 @@ export default function Watchlist() {
                           title="Set price alert"
                           color="var(--amber)" bg="rgba(251,191,36,0.1)" border="rgba(251,191,36,0.25)"
                         ><BellIcon size={12} /></IconButton>
-                        {!s.sym.includes('/') && (
-                          <IconButton
-                            onClick={() => goToTrade(s.sym)}
-                            title="Quick trade"
-                            color="var(--cyan)" bg="rgba(0,245,212,0.1)" border="rgba(0,245,212,0.25)"
-                          ><BoltIcon size={12} /></IconButton>
-                        )}
+                        {/* Quick trade — supports crypto, forex & commodities (OANDA) */}
+                        <IconButton
+                          onClick={() => goToTrade(s.sym)}
+                          title="Quick trade"
+                          color="var(--cyan)" bg="rgba(0,245,212,0.1)" border="rgba(0,245,212,0.25)"
+                        ><BoltIcon size={12} /></IconButton>
                         <button onClick={() => removeSymbol(s.sym)} style={{
                           background:'rgba(248,113,113,0.08)', border:'1px solid rgba(248,113,113,0.2)',
                           color:'var(--red)', borderRadius:6, padding:'4px 10px',

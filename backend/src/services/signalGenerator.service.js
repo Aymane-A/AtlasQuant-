@@ -1,91 +1,40 @@
 /**
- * services/yahooFinance.service.js
- * Commodities, Forex & Indices via Yahoo Finance (no API key needed)
+ * services/signalGenerator.service.js — AtlasQuant AI
  *
- * + getStockCandles : ajouté pour le Backtester, permet de récupérer
- *   n'importe quel symbole boursier (AAPL, SPY, NVDA...), pas seulement
- *   les paires de YF_SYMBOLS ci-dessous.
+ * Crypto signal generation (Binance via marketData.service).
+ * Mirrors exactly the pattern used in yahooFinance.service.js for
+ * forex/commodities/indices, so both scans behave identically:
+ *   - same indicator-scoring logic (bull/bear tally)
+ *   - same ATR-based SL/TP
+ *   - same local reasoning builder (no external AI call, no latency,
+ *     no crash risk if ai.service export names drift)
+ *   - same batched-parallel scanning with onProgress callback
+ *
+ * Exposes CRYPTO_SYMBOLS + scanAll(interval, onProgress) so that
+ * controllers/signals.controller.js can do:
+ *
+ *   const { scanAll, CRYPTO_SYMBOLS } = require('./signalGenerator.service');
+ *   const cryptoTotal = CRYPTO_SYMBOLS.length;
+ *   const cryptoResult = await scanAll(interval, onProgress); // { signals: [...] }
  */
 
-const YahooFinance = require('yahoo-finance2').default;
-const yahooFinance  = new YahooFinance({ suppressNotices: ['yahooSurvey'] });
-const logger        = require('../utils/logger');
+const logger = require('../utils/logger');
+const { getCandles } = require('./marketData.service');
+const { computeAllIndicators } = require('./indicators.service');
 
-// asset_class doit matcher: 'Commodity' | 'Forex' | 'Indices'
-const YF_SYMBOLS = {
-  // ── Commodities ──
-  'GC=F':     { display: 'XAU/USD', asset_class: 'Commodity', category: 'Gold'        },
-  'SI=F':     { display: 'XAG/USD', asset_class: 'Commodity', category: 'Silver'      },
-  'CL=F':     { display: 'OIL/USD', asset_class: 'Commodity', category: 'Crude Oil'   },
-  'NG=F':     { display: 'NATGAS',  asset_class: 'Commodity', category: 'Natural Gas' },
-  'HG=F':     { display: 'COPPER',  asset_class: 'Commodity', category: 'Copper'      },
-  'PL=F':     { display: 'XPT/USD', asset_class: 'Commodity', category: 'Platinum'    },
+// Major pairs — extend freely, kept to a reasonable count to keep scan time down.
+const CRYPTO_SYMBOLS = [
+  'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT',
+  'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'DOTUSDT', 'LINKUSDT',
+  'MATICUSDT', 'LTCUSDT', 'TRXUSDT', 'ATOMUSDT', 'UNIUSDT',
+  'ETCUSDT', 'BCHUSDT', 'NEARUSDT', 'APTUSDT', 'ARBUSDT',
+];
 
-  // ── Forex ──
-  'EURUSD=X': { display: 'EUR/USD', asset_class: 'Forex', category: 'Forex' },
-  'GBPUSD=X': { display: 'GBP/USD', asset_class: 'Forex', category: 'Forex' },
-  'USDJPY=X': { display: 'USD/JPY', asset_class: 'Forex', category: 'Forex' },
-  'USDCHF=X': { display: 'USD/CHF', asset_class: 'Forex', category: 'Forex' },
-  'AUDUSD=X': { display: 'AUD/USD', asset_class: 'Forex', category: 'Forex' },
-  'USDCAD=X': { display: 'USD/CAD', asset_class: 'Forex', category: 'Forex' },
-  'NZDUSD=X': { display: 'NZD/USD', asset_class: 'Forex', category: 'Forex' },
-  'EURGBP=X': { display: 'EUR/GBP', asset_class: 'Forex', category: 'Forex' },
+const INTERVAL_MAP = { '1h': '1h', '4h': '4h', '1d': '1d' };
 
-  // ── Indices ──
-  '^GSPC':    { display: 'SPX500',  asset_class: 'Indices', category: 'US Index'    },
-  '^NDX':     { display: 'NAS100',  asset_class: 'Indices', category: 'US Index'    },
-  '^DJI':     { display: 'US30',    asset_class: 'Indices', category: 'US Index'    },
-  '^VIX':     { display: 'VIX',     asset_class: 'Indices', category: 'Volatility'  },
-};
-
-const INTERVAL_MAP = {
-  '1h': '1h',
-  '4h': '1h',  // Yahoo ma 3andha-sh 4h — nakhdo 1h u ncompute
-  '1d': '1d',
-};
-
-// Reward:Risk multiple appliqué au SL/TP calculé via ATR
+// Reward:Risk multiple appliqué au SL/TP calculé via ATR — même valeur
+// que yahooFinance.service.js pour rester cohérent entre les deux scans.
 const RR_MULTIPLE = 2;
-
-async function getYFData(symbol, interval = '4h', limit = 100) {
-  const yfInterval = INTERVAL_MAP[interval] || '1h';
-
-  const now     = new Date();
-  const period1 = new Date(now);
-  if (yfInterval === '1h') {
-    period1.setDate(period1.getDate() - 7);
-  } else {
-    period1.setFullYear(period1.getFullYear() - 1);
-  }
-
-  const result = await yahooFinance.chart(symbol, {
-    period1:  period1.toISOString().split('T')[0],
-    period2:  now.toISOString().split('T')[0],
-    interval: yfInterval,
-  });
-
-  if (!result?.quotes?.length) {
-    throw new Error(`No data for ${symbol}`);
-  }
-
-  const candles = result.quotes
-    .filter(q => q.open && q.high && q.low && q.close)
-    .slice(-limit)
-    .map(q => ({
-      open:   q.open,
-      high:   q.high,
-      low:    q.low,
-      close:  q.close,
-      volume: q.volume || 0,
-    }));
-
-  if (candles.length < 30) {
-    throw new Error(`Not enough candles for ${symbol}: ${candles.length}`);
-  }
-
-  const price = candles[candles.length - 1].close;
-  return { candles, price };
-}
 
 // ── ATR (Average True Range) ──────────────────────────────
 function computeATR(candles, period = 14) {
@@ -129,11 +78,7 @@ function calcRiskLevels(price, candles, signal) {
 }
 
 // ── Local reasoning (no Groq) ─────────────────────────────
-// Mirrors exactly what signalGenerator.service.js does for crypto — keeps
-// YF signals fast and consistent. Groq was being called per-symbol here
-// before, which caused the "generateReasoning is not a function" crash
-// whenever ai.service export names drifted, and added ~15s latency per
-// symbol during the batch scan.
+// Same shape as buildLocalSignal() in yahooFinance.service.js.
 function buildLocalSignal(display, price, indicators, bull, bear) {
   const total      = bull + bear;
   const bullPct    = total > 0 ? bull / total : 0.5;
@@ -144,7 +89,6 @@ function buildLocalSignal(display, price, indicators, bull, bear) {
   else if (bear > bull + 2) signal = 'SELL';
   else                      signal = 'HOLD';
 
-  // Reasoning built from indicators — same pattern as signalGenerator.service.js
   const { rsi, macd, ema, bollinger, fibonacci } = indicators;
   const parts = [];
 
@@ -169,16 +113,19 @@ function buildLocalSignal(display, price, indicators, bull, bear) {
   return { signal, confidence, reasoning: parts.join(' ') };
 }
 
-async function generateYFSignal(symbol, interval = '4h') {
-  logger.info(`[yahooFinance] Processing ${symbol} (${interval})...`);
+// ── Single-symbol signal ───────────────────────────────────
+async function generateCryptoSignal(symbol, interval = '4h') {
+  logger.info(`[signalGenerator] Processing ${symbol} (${interval})...`);
 
-  const meta = YF_SYMBOLS[symbol];
-  if (!meta) throw new Error(`Unknown YF symbol: ${symbol}`);
+  const yfInterval = INTERVAL_MAP[interval] || '4h';
+  const candles = await getCandles(symbol, yfInterval, 200);
 
-  const { computeAllIndicators } = require('./indicators.service');
+  if (!candles || candles.length < 30) {
+    throw new Error(`Not enough candles for ${symbol}: ${candles?.length || 0}`);
+  }
 
-  const { candles, price } = await getYFData(symbol, interval, 100);
   const indicators = computeAllIndicators(candles);
+  const price = candles[candles.length - 1].close;
 
   const { rsi, macd, ema, bollinger, volume } = indicators;
   let bull = 0, bear = 0;
@@ -196,21 +143,22 @@ async function generateYFSignal(symbol, interval = '4h') {
   if (bollinger.signal === 'OVERBOUGHT')  bear++;
   if (volume.ratio >= 1.5) { bull > bear ? bull++ : bear++; }
 
-  // Local reasoning — no Groq, no external call, no crash risk.
+  const display = symbol.endsWith('USDT') ? `${symbol.slice(0, -4)}/USDT` : symbol;
+
   const { signal, confidence, reasoning } = buildLocalSignal(
-    meta.display, price, indicators, bull, bear
+    display, price, indicators, bull, bear
   );
 
-  logger.info(`[yahooFinance] ${meta.display} → ${signal} (${confidence}%)`);
+  logger.info(`[signalGenerator] ${display} → ${signal} (${confidence}%)`);
 
   const { entry, stop_loss, take_profit } = calcRiskLevels(price, candles, signal);
 
   return {
     id:          `${symbol}_${Date.now()}`,
-    symbol:      meta.display,
+    symbol:      display,
     rawSymbol:   symbol,
-    asset_class: meta.asset_class,
-    category:    meta.category,
+    asset_class: 'Crypto',
+    category:    'Crypto',
     timestamp:   new Date().toISOString(),
     price,
     signal,
@@ -225,124 +173,38 @@ async function generateYFSignal(symbol, interval = '4h') {
   };
 }
 
-// onProgress(symbol) is called after each symbol completes (success or fail).
-// ✅ Fix Bug 8: traitement par petits lots parallèles (BATCH_SIZE symboles
-// en même temps) au lieu de séquentiel — total attendu divisé par BATCH_SIZE.
-const YF_BATCH_SIZE = 4;
+// ── Batched full scan ──────────────────────────────────────
+// onProgress(symbol) called after each symbol completes (success or fail),
+// same contract as scanAllYF() in yahooFinance.service.js.
+const CRYPTO_BATCH_SIZE = 4;
 
-async function scanAllYF(interval = '4h', onProgress = () => {}) {
-  const symbols = Object.keys(YF_SYMBOLS);
-  logger.info(`[yahooFinance] Scanning ${symbols.length} forex/commodities/indices...`);
+async function scanAll(interval = '4h', onProgress = () => {}) {
+  logger.info(`[signalGenerator] Scanning ${CRYPTO_SYMBOLS.length} crypto pairs...`);
   const results = [];
 
-  for (let i = 0; i < symbols.length; i += YF_BATCH_SIZE) {
-    const batch   = symbols.slice(i, i + YF_BATCH_SIZE);
-    const settled = await Promise.allSettled(batch.map(symbol => generateYFSignal(symbol, interval)));
+  for (let i = 0; i < CRYPTO_SYMBOLS.length; i += CRYPTO_BATCH_SIZE) {
+    const batch   = CRYPTO_SYMBOLS.slice(i, i + CRYPTO_BATCH_SIZE);
+    const settled = await Promise.allSettled(batch.map(symbol => generateCryptoSignal(symbol, interval)));
 
     settled.forEach((outcome, idx) => {
       const symbol = batch[idx];
       if (outcome.status === 'fulfilled') {
         results.push(outcome.value);
       } else {
-        logger.error(`[yahooFinance] ${symbol} error: ${outcome.reason?.message}`);
+        logger.error(`[signalGenerator] ${symbol} error: ${outcome.reason?.message}`);
       }
       try { onProgress(symbol); } catch { /* never let progress reporting break the scan */ }
     });
 
-    if (i + YF_BATCH_SIZE < symbols.length) {
+    if (i + CRYPTO_BATCH_SIZE < CRYPTO_SYMBOLS.length) {
       await new Promise(r => setTimeout(r, 300));
     }
   }
 
-  return results;
+  // Wrapped in { signals } to match how signals.controller.js consumes it:
+  // const [cryptoResult, yfResult] = await Promise.all([scanAll(...), scanAllYF(...)]);
+  // const allSignals = [...cryptoResult.signals, ...yfResult];
+  return { signals: results };
 }
 
-// ── EXTENSION BACKTESTER ──────────────────────────────────
-const STOCK_INTERVAL_MAP = {
-  '15M':  '15m',
-  '1H':   '60m',
-  '4H':   '60m',
-  Daily:  '1d',
-};
-
-function aggregateTo4H(candles) {
-  const result = [];
-  for (let i = 0; i < candles.length; i += 4) {
-    const chunk = candles.slice(i, i + 4);
-    if (chunk.length === 0) continue;
-    result.push({
-      date:   chunk[0].date,
-      open:   chunk[0].open,
-      high:   Math.max(...chunk.map(c => c.high)),
-      low:    Math.min(...chunk.map(c => c.low)),
-      close:  chunk[chunk.length - 1].close,
-      volume: chunk.reduce((sum, c) => sum + (c.volume || 0), 0),
-    });
-  }
-  return result;
-}
-
-async function getStockCandles(symbol, timeframe, startDate, endDate) {
-  const interval = STOCK_INTERVAL_MAP[timeframe] || '1d';
-  const isIntraday = interval !== '1d';
-
-  let effectiveStart = new Date(startDate);
-  let effectiveEnd   = new Date(endDate);
-
-  if (isIntraday) {
-    const maxLookback = new Date();
-    maxLookback.setDate(maxLookback.getDate() - 59);
-
-    if (effectiveEnd < maxLookback) {
-      throw new Error(
-        `Yahoo Finance ne supporte pas ${timeframe} avant ${maxLookback.toISOString().slice(0,10)}`
-      );
-    }
-
-    if (effectiveStart < maxLookback) {
-      effectiveStart = maxLookback;
-      logger.info(
-        `[yahooFinance] Intraday limité à 60j — startDate ajusté à ${effectiveStart.toISOString().slice(0,10)}`
-      );
-    }
-  }
-
-  if (effectiveStart > effectiveEnd) {
-    throw new Error(`Période invalide: ${effectiveStart} > ${effectiveEnd}`);
-  }
-
-  try {
-    const raw = await yahooFinance.chart(symbol, {
-      period1: effectiveStart,
-      period2: effectiveEnd,
-      interval,
-    });
-
-    if (!raw?.quotes?.length) {
-      throw new Error(`Aucune donnée pour ${symbol}`);
-    }
-
-    let candles = raw.quotes
-      .filter(q => q.open && q.high && q.low && q.close)
-      .map(q => ({
-        date:   q.date,
-        open:   q.open,
-        high:   q.high,
-        low:    q.low,
-        close:  q.close,
-        volume: q.volume || 0,
-      }));
-
-    if (timeframe === '4H') {
-      candles = aggregateTo4H(candles);
-    }
-
-    return candles;
-
-  } catch (error) {
-    logger.error(`[yahooFinance] getStockCandles error (${symbol}): ${error.message}`);
-    throw new Error(`Impossible de récupérer les données pour ${symbol}: ${error.message}`);
-  }
-}
-
-module.exports = { generateYFSignal, scanAllYF, YF_SYMBOLS, getStockCandles };
+module.exports = { generateCryptoSignal, scanAll, CRYPTO_SYMBOLS };

@@ -336,31 +336,33 @@ async function connectExchange(userId, exchange, credentials, mode = 'readonly')
   }
   validateCredentials(exchange, credentials);
 
-  // ✅ Fix : pour les exchanges crypto (ccxt), le mode 'paper' est une
-  // simulation 100% locale (aucun appel réseau réel) — sauter la
-  // vérification a du sens. Mais OANDA "paper" = compte demo RÉEL sur
-  // les serveurs OANDA (api-fxpractice.oanda.com), utilisé ensuite pour
-  // de vrais appels prix/portfolio. Avant ce fix, des credentials OANDA
-  // invalides en mode paper étaient acceptés silencieusement à la
-  // connexion, et échouaient seulement plus tard au premier appel prix —
-  // mauvaise UX (connexion "réussie" puis tout casse après coup).
   const skipVerification = mode === 'paper' && exchange !== 'oanda';
   if (!skipVerification) await verifyWithExchange(exchange, credentials, mode);
 
   const encKey    = encrypt(credentials.apiKey.trim());
   const encSecret = encrypt(credentials.apiSecret.trim());
   const encPass   = credentials.passphrase ? encrypt(credentials.passphrase.trim()) : null;
+
+  // ✅ Fix : si on vient de vérifier les credentials avec succès (verifyWithExchange
+  // n'a pas throw), on sait DÉJÀ que la connexion est saine — inutile de laisser
+  // health_status à 'unknown' et forcer l'utilisateur à cliquer "Test Connection"
+  // ou attendre le cron (jusqu'à 15 min) pour voir un point vert.
+  const initialHealth = skipVerification ? 'unknown' : 'ok';
+
   await pool.query(
     `INSERT INTO user_exchange_connections
-       (user_id, exchange_id, api_key_enc, api_secret_enc, passphrase_enc, mode, connected_at)
-     VALUES ($1,$2,$3,$4,$5,$6,NOW())
+       (user_id, exchange_id, api_key_enc, api_secret_enc, passphrase_enc, mode, connected_at, health_status, last_health_check)
+     VALUES ($1,$2,$3,$4,$5,$6,NOW(),$7,NOW())
      ON CONFLICT (user_id, exchange_id) DO UPDATE SET
-       api_key_enc    = EXCLUDED.api_key_enc,
-       api_secret_enc = EXCLUDED.api_secret_enc,
-       passphrase_enc = EXCLUDED.passphrase_enc,
-       mode           = EXCLUDED.mode,
-       connected_at   = NOW()`,
-    [userId, exchange, encKey, encSecret, encPass, mode]
+       api_key_enc       = EXCLUDED.api_key_enc,
+       api_secret_enc    = EXCLUDED.api_secret_enc,
+       passphrase_enc    = EXCLUDED.passphrase_enc,
+       mode              = EXCLUDED.mode,
+       connected_at      = NOW(),
+       health_status     = EXCLUDED.health_status,
+       consecutive_failures = 0,
+       last_health_check = NOW()`,
+    [userId, exchange, encKey, encSecret, encPass, mode, initialHealth]
   );
 }
 

@@ -13,6 +13,8 @@ const { query } = require('../config/db');
 const env     = require('../config/env');
 const logger  = require('../utils/logger');
 const { logAuditEvent } = require('../utils/auditLog');
+const { recordSession } = require('./security.controller');
+const crypto  = require('crypto');
 
 // ── Helper : générer un JWT ───────────────────────────────
 function signToken(userId, email, plan) {
@@ -75,6 +77,13 @@ async function register(req, res) {
     const user  = result.rows[0];
     const token = signToken(user.id, user.email, user.plan);
 
+    // ✅ Fix: on trace cette session dans user_sessions dès la création du
+    // compte — sans cet appel, l'onglet Sessions de Settings restait vide
+    // indéfiniment (recordSession n'était jamais invoqué). On hash le JWT
+    // lui-même comme identifiant de session (pas de refresh token distinct
+    // dans ce système d'auth stateless).
+    await recordSession(user.id, token, req);
+
     logger.info(`[auth] Nouveau compte : ${user.email}`);
 
     res.status(201).json({
@@ -128,6 +137,10 @@ async function login(req, res) {
     }
 
     const token = signToken(user.id, user.email, user.plan);
+
+    // ✅ Fix: voir commentaire équivalent dans register() — sans ça,
+    // /api/security/sessions renvoie toujours un tableau vide.
+    await recordSession(user.id, token, req);
 
     await logAuditEvent(user.id, 'login_success', req);
     logger.info(`[auth] Connexion : ${user.email}`);
