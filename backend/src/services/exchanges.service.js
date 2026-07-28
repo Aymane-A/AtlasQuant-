@@ -72,7 +72,11 @@ const SUPPORTED = CCXT_IDS.reduce((acc, id) => {
     : ['apiKey', 'apiSecret'] };
   return acc;
 }, {
-  oanda: { requiredFields: ['apiKey', 'apiSecret'] },
+  oanda:  { requiredFields: ['apiKey', 'apiSecret'] },
+  // Alpaca — US stocks/ETFs broker, not a crypto exchange. Same shape as
+  // OANDA: apiKey/apiSecret pair, separate paper/live base URLs, own
+  // account+order REST API rather than ccxt.
+  alpaca: { requiredFields: ['apiKey', 'apiSecret'] },
 });
 
 const VALID_MODES = ['readonly', 'paper', 'live'];
@@ -130,6 +134,34 @@ async function getOandaPrice(accountId, token, mode, instrument) {
   return { bid, ask, mid: (bid + ask) / 2 };
 }
 
+// ── Alpaca helpers ─────────────────────────────────────────
+// Alpaca has three separate hosts: trading (paper/live split by base URL,
+// same credential pair works for both), and a shared market-data host.
+const ALPACA_LIVE_TRADING_BASE  = 'https://api.alpaca.markets';
+const ALPACA_PAPER_TRADING_BASE = 'https://paper-api.alpaca.markets';
+const ALPACA_DATA_BASE          = 'https://data.alpaca.markets';
+
+function getAlpacaBaseUrl(mode) {
+  return mode === 'live' ? ALPACA_LIVE_TRADING_BASE : ALPACA_PAPER_TRADING_BASE;
+}
+
+function alpacaHeaders(credentials) {
+  return {
+    'APCA-API-KEY-ID':     credentials.apiKey,
+    'APCA-API-SECRET-KEY': credentials.apiSecret,
+  };
+}
+
+async function getAlpacaQuote(credentials, symbol) {
+  const res = await axios.get(`${ALPACA_DATA_BASE}/v2/stocks/${symbol}/quotes/latest`, {
+    headers: alpacaHeaders(credentials), timeout: 8000,
+  });
+  const q = res.data?.quote;
+  if (!q) throw new Error(`No Alpaca quote for ${symbol}`);
+  const bid = q.bp, ask = q.ap;
+  return { bid, ask, mid: (bid + ask) / 2 };
+}
+
 // ── Live key verification ─────────────────────────────────
 // ✅ Fix : liste blanche d'erreurs "non fatales" (réseau/indispo) au lieu
 // d'une liste noire d'erreurs "fatales". Avant, seules AuthenticationError
@@ -159,6 +191,23 @@ async function verifyWithExchange(exchange, credentials, mode) {
         e.status = 401; throw e;
       }
       console.warn('[exchanges] Could not reach oanda for verification:', err.message);
+    }
+    return;
+  }
+
+  if (exchange === 'alpaca') {
+    try {
+      const base = getAlpacaBaseUrl(effMode);
+      const res  = await axios.get(`${base}/v2/account`, {
+        headers: alpacaHeaders(credentials), timeout: 8000,
+      });
+      console.log('[alpaca] verify ok — account:', res.data?.account_number);
+    } catch (err) {
+      if (err.response) {
+        const e = new Error('Invalid API credentials — exchange rejected the key');
+        e.status = 401; throw e;
+      }
+      console.warn('[exchanges] Could not reach alpaca for verification:', err.message);
     }
     return;
   }
@@ -203,6 +252,26 @@ async function fetchPortfolio(exchange, credentials) {
       locked: marginUsed,
       total:  balance,
     }];
+  }
+
+  if (exchange === 'alpaca') {
+    const base = getAlpacaBaseUrl(credentials.mode || 'paper');
+    const [acctRes, posRes] = await Promise.all([
+      axios.get(`${base}/v2/account`,   { headers: alpacaHeaders(credentials), timeout: 10000 }),
+      axios.get(`${base}/v2/positions`, { headers: alpacaHeaders(credentials), timeout: 10000 }),
+    ]);
+    const acct = acctRes.data;
+    const cash = parseFloat(acct.cash);
+    console.log(`[alpaca] cash=${cash}, equity=${acct.equity}`);
+
+    const positions = (posRes.data || []).map(p => ({
+      symbol: p.symbol,
+      free:   parseFloat(p.qty_available ?? p.qty),
+      locked: parseFloat(p.qty) - parseFloat(p.qty_available ?? p.qty),
+      total:  parseFloat(p.qty),
+    }));
+
+    return [{ symbol: 'USD', free: cash, locked: 0, total: parseFloat(acct.equity) }, ...positions];
   }
 
   const ex      = getCcxtInstance(exchange, credentials);
@@ -263,6 +332,51 @@ async function placeLiveOrder(exchange, credentials, { symbol, side, type, quant
     };
   }
 
+  if (exchange === 'alpaca') {
+    const base = getAlpacaBaseUrl(credentials.mode || 'paper');
+
+    // Alpaca bracket orders require BOTH legs on entry — if only one of
+    // stopLoss/takeProfit was set, fall back to a plain order and flag it
+    // as bracket-unsupported (same convention as ccxt's NotSupported path
+    // below), rather than silently dropping the lone leg.
+    const hasBothLegs = !!(stopLoss && takeProfit);
+
+    const body = {
+      symbol,
+      qty:  String(Math.abs(quantity)),
+      side,
+      type: type === 'limit' ? 'limit' : 'market',
+      time_in_force: 'day',
+      ...(type === 'limit' && { limit_price: String(price) }),
+      ...(hasBothLegs && {
+        order_class: 'bracket',
+        take_profit: { limit_price: String(takeProfit) },
+        stop_loss:   { stop_price:  String(stopLoss) },
+      }),
+    };
+
+    let order;
+    try {
+      const res = await axios.post(`${base}/v2/orders`, body, {
+        headers: { ...alpacaHeaders(credentials), 'Content-Type': 'application/json' },
+        timeout: 10000,
+      });
+      order = res.data;
+    } catch (err) {
+      const msg = err.response?.data?.message || err.message;
+      const e = new Error(`Alpaca rejected order: ${msg}`);
+      e.status = err.response?.status || 400;
+      throw e;
+    }
+
+    return {
+      exchangeOrderId:    order.id,
+      status:             (order.status || 'accepted').toUpperCase(),
+      bracketUnsupported: (stopLoss || takeProfit) && !hasBothLegs,
+      raw:                order,
+    };
+  }
+
   const ex           = getCcxtInstance(exchange, credentials);
   const marketSymbol = toCcxtSymbol(symbol);
   const ccxtParams   = {};
@@ -303,6 +417,13 @@ async function cancelLiveOrder(exchange, credentials, orderId, symbol) {
     );
     return;
   }
+  if (exchange === 'alpaca') {
+    const base = getAlpacaBaseUrl(credentials.mode || 'paper');
+    await axios.delete(`${base}/v2/orders/${orderId}`, {
+      headers: alpacaHeaders(credentials), timeout: 8000,
+    });
+    return;
+  }
   const ex = getCcxtInstance(exchange, credentials);
   await ex.cancelOrder(orderId, symbol ? toCcxtSymbol(symbol) : undefined);
 }
@@ -336,7 +457,12 @@ async function connectExchange(userId, exchange, credentials, mode = 'readonly')
   }
   validateCredentials(exchange, credentials);
 
-  const skipVerification = mode === 'paper' && exchange !== 'oanda';
+  // Both OANDA and Alpaca have real practice/paper environments backed by
+  // their own APIs, so verifying credentials against them (even in paper
+  // mode) is cheap and catches bad keys immediately — unlike crypto ccxt
+  // exchanges, where "paper" is purely simulated locally and there's
+  // nothing external to verify against.
+  const skipVerification = mode === 'paper' && exchange !== 'oanda' && exchange !== 'alpaca';
   if (!skipVerification) await verifyWithExchange(exchange, credentials, mode);
 
   const encKey    = encrypt(credentials.apiKey.trim());
@@ -605,6 +731,9 @@ module.exports = {
   getOpenBracketTrades,
   getOandaBaseUrl,
   getOandaPrice,
+  getAlpacaBaseUrl,
+  getAlpacaQuote,
+  alpacaHeaders,
   SUPPORTED,
   healthCheckConnection,
   healthCheckAllConnections,

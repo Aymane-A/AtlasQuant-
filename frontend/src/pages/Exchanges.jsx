@@ -17,6 +17,10 @@ const EXCHANGES = [
   { id:'phemex',   name:'Phemex',            type:'CEX', region:'Global', logo:'⬢', color:'#9B59B6', desc:'Ultra-low latency, institutional-grade API',       features:['Spot','Perpetuals','Options','WebSocket'], fields:[{key:'apiKey',label:'API Key',placeholder:'Phemex API key...'},{key:'apiSecret',label:'API Secret',placeholder:'Phemex secret key...',secret:true}] },
   { id:'bitmex',   name:'BitMEX',            type:'CEX', region:'Global', logo:'⬣', color:'#FF4757', desc:'OG derivatives exchange, perpetual swaps',         features:['Perpetuals','Futures','Options','REST'], fields:[{key:'apiKey',label:'API Key',placeholder:'BitMEX API key...'},{key:'apiSecret',label:'API Secret',placeholder:'BitMEX secret key...',secret:true}] },
   { id:'oanda',    name:'OANDA',             type:'Forex/CFD', region:'Global', logo:'⬢', color:'#0090D4', desc:'Forex majors, gold & silver — free demo + live API', features:['Forex','Metals','Indices','REST'], fields:[{key:'apiKey',label:'Account ID',placeholder:'e.g. 101-004-12345678-001'},{key:'apiSecret',label:'Personal Access Token',placeholder:'OANDA API token...',secret:true}] },
+  // Alpaca — US stocks/ETFs broker, not a crypto exchange. Free paper
+  // trading account (own $100k practice environment) + live API using the
+  // same key pair, same shape as OANDA's practice/live split.
+  { id:'alpaca',   name:'Alpaca',            type:'Stocks/ETF', region:'US',    logo:'▲', color:'#FFC72C', desc:'US stocks & ETFs — free paper trading + live API', features:['Stocks','ETFs','Fractional','REST'], fields:[{key:'apiKey',label:'API Key ID',placeholder:'Alpaca API Key ID...'},{key:'apiSecret',label:'Secret Key',placeholder:'Alpaca secret key...',secret:true}] },
 ];
 
 const MODES = [
@@ -51,7 +55,7 @@ function ModeBadge({ mode }) {
   );
 }
 
-function ModeSelector({ selected, onChange, isOanda }) {
+function ModeSelector({ selected, onChange, isOanda, isAlpaca }) {
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
       {MODES.map(m => (
@@ -79,8 +83,12 @@ function ModeSelector({ selected, onChange, isOanda }) {
               {m.icon} {m.label}
             </div>
             <div style={{ fontSize:11, color:'var(--text-muted)' }}>
-              {isOanda && m.id === 'paper' ? 'Free OANDA practice account — virtual funds, real live prices.' : m.desc}
-              {isOanda && m.id === 'live'  ? ' Requires a funded OANDA live account.' : ''}
+              {isOanda  && m.id === 'paper' ? 'Free OANDA practice account — virtual funds, real live prices.' : null}
+              {isOanda  && m.id === 'live'  ? 'Requires a funded OANDA live account.' : null}
+              {isAlpaca && m.id === 'paper' ? 'Free Alpaca paper account — $100k virtual funds, real live prices.' : null}
+              {isAlpaca && m.id === 'live'  ? 'Requires a funded, approved Alpaca live brokerage account.' : null}
+              {!isOanda && !isAlpaca ? m.desc : null}
+              {(isOanda || isAlpaca) && m.id === 'readonly' ? m.desc : null}
             </div>
           </div>
         </div>
@@ -103,7 +111,8 @@ function ConnectModal({ exchange, onClose, onConnected }) {
   const [error,    setError]    = useState('');
   const [success,  setSuccess]  = useState(false);
 
-  const isOanda = exchange.id === 'oanda';
+  const isOanda  = exchange.id === 'oanda';
+  const isAlpaca = exchange.id === 'alpaca';
   const set = (k, v) => setValues(p => ({ ...p, [k]: v }));
   const allFilled = exchange.fields.every(f => (values[f.key] || '').trim());
 
@@ -151,6 +160,8 @@ function ConnectModal({ exchange, onClose, onConnected }) {
               <p style={{ ...mono, fontSize:10, color:'var(--text-muted)', margin:0, lineHeight:1.6 }}>
                 {isOanda
                   ? <>Generate a token from <span style={{ color:'var(--cyan)' }}>My Account → Manage API Access</span> on your OANDA account. Use a practice (demo) account ID/token for risk-free testing. Keys encrypted AES-256.</>
+                  : isAlpaca
+                  ? <>Generate a key pair from <span style={{ color:'var(--cyan)' }}>Paper Trading → API Keys</span> (or Live if approved) in your Alpaca dashboard. The same key pair works for the ticker/quotes endpoints too. Keys encrypted AES-256.</>
                   : <>Enable <span style={{ color:'var(--cyan)' }}>Read + Trade</span> only — never withdrawals. Keys encrypted AES-256.</>
                 }
               </p>
@@ -187,6 +198,11 @@ function ConnectModal({ exchange, onClose, onConnected }) {
                 Don't have an account? <a href="https://www.oanda.com" target="_blank" rel="noreferrer" style={{ color:'var(--cyan)' }}>Sign up for free at oanda.com</a> — demo accounts are instant and free.
               </div>
             )}
+            {isAlpaca && (
+              <div style={{ ...mono, fontSize:9, color:'var(--text-muted)', marginBottom:16, lineHeight:1.6 }}>
+                Don't have an account? <a href="https://alpaca.markets" target="_blank" rel="noreferrer" style={{ color:'var(--cyan)' }}>Sign up for free at alpaca.markets</a> — paper trading accounts are instant, free, and start with $100k virtual funds.
+              </div>
+            )}
 
             <div style={{ display:'flex', gap:10 }}>
               <button onClick={() => setStep(2)} disabled={!allFilled}
@@ -202,7 +218,7 @@ function ConnectModal({ exchange, onClose, onConnected }) {
           <>
             <div style={{ ...mono, fontSize:9, letterSpacing:'.15em', textTransform:'uppercase', color:'var(--text-muted)', marginBottom:12 }}>Select Mode</div>
             <div style={{ marginBottom:22 }}>
-              <ModeSelector selected={mode} onChange={setMode} isOanda={isOanda} />
+              <ModeSelector selected={mode} onChange={setMode} isOanda={isOanda} isAlpaca={isAlpaca} />
             </div>
 
             {error && (
@@ -256,7 +272,7 @@ function ChangeModeModal({ exchange, currentMode, onClose, onChanged }) {
         <div style={{ fontSize:15, fontWeight:700, color:'var(--text-primary)', marginBottom:20 }}>
           Change Mode — {exchange.name}
         </div>
-        <ModeSelector selected={mode} onChange={setMode} isOanda={exchange.id === 'oanda'} />
+        <ModeSelector selected={mode} onChange={setMode} isOanda={exchange.id === 'oanda'} isAlpaca={exchange.id === 'alpaca'} />
         <div style={{ display:'flex', gap:10, marginTop:22 }}>
           <button onClick={handleSave} disabled={loading}
             style={{ flex:1, padding:12, borderRadius:9, border:'1px solid var(--cyan-dim)', background:'var(--cyan-glow)', color:'var(--cyan)', fontFamily:'Syne,sans-serif', fontSize:13, fontWeight:700, cursor:'pointer' }}>

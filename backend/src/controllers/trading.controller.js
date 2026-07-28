@@ -13,7 +13,8 @@ const exchangesSvc  = require('../services/exchanges.service');
 // stopLoss / takeProfit are optional trigger prices for a bracket order.
 // For crypto exchanges, `symbol` is the base asset (e.g. "BTC") and gets
 // "USDT" appended. For OANDA, `symbol` is already the full instrument
-// (e.g. "EUR_USD") and is used as-is.
+// (e.g. "EUR_USD") and is used as-is. For Alpaca, `symbol` is the stock
+// ticker (e.g. "AAPL") and is used as-is.
 async function placeOrder(req, res) {
   const userId = req.user.id;
   const {
@@ -40,7 +41,8 @@ async function placeOrder(req, res) {
     }
   }
 
-  const isOanda = exchangeId === 'oanda';
+  const isOanda  = exchangeId === 'oanda';
+  const isAlpaca = exchangeId === 'alpaca';
 
   try {
     const creds = await exchangesSvc.getDecryptedCredentials(userId, exchangeId);
@@ -54,6 +56,9 @@ async function placeOrder(req, res) {
         try {
           if (isOanda) {
             const { mid } = await exchangesSvc.getOandaPrice(creds.apiKey, creds.apiSecret, creds.mode, symbol.toUpperCase());
+            fillPrice = mid;
+          } else if (isAlpaca) {
+            const { mid } = await exchangesSvc.getAlpacaQuote(creds, symbol.toUpperCase());
             fillPrice = mid;
           } else {
             const r = await axios.get(
@@ -176,8 +181,8 @@ async function cancelOrder(req, res) {
       return res.json({ success:true, message:'Paper order cancelled' });
     }
 
-    // Live cancel — call exchange (generic ccxt path + OANDA custom, both
-    // live in exchangesSvc.cancelLiveOrder now)
+    // Live cancel — call exchange (generic ccxt path + OANDA/Alpaca custom,
+    // all live in exchangesSvc.cancelLiveOrder now)
     const creds = await exchangesSvc.getDecryptedCredentials(userId, exchangeId);
     if (!creds) return res.status(404).json({ success:false, error:'Exchange not connected' });
 
@@ -196,10 +201,11 @@ async function cancelOrder(req, res) {
 }
 
 // ── GET /api/trading/ticker/:symbol ──────────────────────────────────────────
-// ?exchangeId=oanda — routes forex/commodity instruments to OANDA's
-// pricing + candles endpoints instead of Binance. OANDA pricing requires
-// an authenticated account (unlike Binance's public ticker), so this
-// path needs the connected credentials.
+// ?exchangeId=oanda|alpaca — routes forex/commodity instruments to OANDA's
+// pricing + candles endpoints, and stock/ETF instruments to Alpaca's
+// market-data endpoints, instead of Binance. Both require authenticated
+// credentials (unlike Binance's public ticker), so these paths need the
+// connected credentials.
 async function getTicker(req, res) {
   const { symbol }     = req.params;
   const { exchangeId } = req.query;
@@ -258,6 +264,69 @@ async function getTicker(req, res) {
 
     } catch (err) {
       logger.error(`[trading.getTicker] oanda(${symbol}): ${err.message}`);
+      return res.status(500).json({ success:false, error: err.message });
+    }
+  }
+
+  if (exchangeId === 'alpaca') {
+    try {
+      const creds = await exchangesSvc.getDecryptedCredentials(userId, 'alpaca');
+      if (!creds) return res.status(404).json({ success:false, error:'Alpaca not connected' });
+
+      const sym     = symbol.toUpperCase();
+      const headers = exchangesSvc.alpacaHeaders(creds);
+
+      const [quoteRes, barsRes] = await Promise.allSettled([
+        axios.get(`https://data.alpaca.markets/v2/stocks/${sym}/quotes/latest`, {
+          headers, timeout: 8000,
+        }),
+        axios.get(`https://data.alpaca.markets/v2/stocks/${sym}/bars`, {
+          headers, timeout: 8000, params: { timeframe: '1Hour', limit: 24 },
+        }),
+      ]);
+
+      let ticker = null;
+      if (quoteRes.status === 'fulfilled') {
+        const q = quoteRes.value.data?.quote;
+        if (q && q.bp && q.ap) {
+          ticker = {
+            symbol: sym, price: (q.bp + q.ap) / 2, change24h: 0,
+            high24h: null, low24h: null, volume24h: null, quoteVol: null,
+            bid: q.bp, ask: q.ap,
+          };
+        }
+      }
+
+      let candles = [];
+      if (barsRes.status === 'fulfilled') {
+        const raw = barsRes.value.data?.bars || [];
+        candles = raw.map(b => ({
+          t:    new Date(b.t).getTime(),
+          open: b.o, high: b.h, low: b.l, close: b.c, vol: b.v,
+        }));
+        if (ticker && candles.length >= 2) {
+          const first = candles[0].close, last = candles[candles.length - 1].close;
+          ticker.change24h = ((last - first) / first) * 100;
+          ticker.high24h   = Math.max(...candles.map(c => c.high));
+          ticker.low24h    = Math.min(...candles.map(c => c.low));
+        } else if (!ticker && candles.length) {
+          // Market-closed fallback — quotes/latest can be empty outside
+          // trading hours while bars still return the last session's data.
+          const last = candles[candles.length - 1];
+          ticker = {
+            symbol: sym, price: last.close, change24h: 0,
+            high24h: Math.max(...candles.map(c => c.high)),
+            low24h:  Math.min(...candles.map(c => c.low)),
+            volume24h: null, quoteVol: null, bid: null, ask: null,
+          };
+        }
+      }
+
+      if (!ticker) return res.status(404).json({ success:false, error:'Symbol not found on Alpaca' });
+      return res.json({ success:true, ticker, candles });
+
+    } catch (err) {
+      logger.error(`[trading.getTicker] alpaca(${symbol}): ${err.message}`);
       return res.status(500).json({ success:false, error: err.message });
     }
   }
@@ -321,7 +390,7 @@ async function getBalance(req, res) {
     if (!creds) return res.status(404).json({ success:false, error:'Exchange not connected' });
 
     if (creds.mode === 'paper') {
-      // OANDA paper: still hit the free practice API for a realistic
+      // OANDA/Alpaca paper: still hit the free practice API for a realistic
       // simulated balance instead of a hardcoded crypto-style fixture.
       if (exchangeId === 'oanda') {
         try {
@@ -330,6 +399,15 @@ async function getBalance(req, res) {
         } catch (err) {
           logger.error(`[trading.getBalance] oanda paper: ${err.message}`);
           return res.json({ success:true, mode:'paper', balances: [{ symbol:'USD', free:10000, locked:0, total:10000 }] });
+        }
+      }
+      if (exchangeId === 'alpaca') {
+        try {
+          const balances = await exchangesSvc.fetchPortfolio('alpaca', creds);
+          return res.json({ success:true, mode:'paper', balances });
+        } catch (err) {
+          logger.error(`[trading.getBalance] alpaca paper: ${err.message}`);
+          return res.json({ success:true, mode:'paper', balances: [{ symbol:'USD', free:100000, locked:0, total:100000 }] });
         }
       }
       // Return simulated $10,000 paper balance
