@@ -17,6 +17,36 @@
  * fallbackApplied (true si le timeframe demandé a été rétrogradé vers
  * Daily faute de couverture intraday Yahoo). Le controller agrège ces
  * flags en UN SEUL message de warning au lieu d'un message par symbole.
+ *
+ * FIX (audit multi-asset) :
+ *   - `insertSlash()` normalise les symboles écrits SANS séparateur
+ *     (BTCUSD, EURUSD, USDJPY, XAUUSD...) AVANT toute classification.
+ *     Avant ce fix, ces formats tombaient tous silencieusement dans la
+ *     classe 'equity' par défaut → routés vers Yahoo avec un ticker
+ *     invalide → échec silencieux ou mauvaises données.
+ *   - "BTC/USD" (slash + quote fiat) était classé à tort comme non-crypto
+ *     (car 'USD' ∈ FOREX_CURRENCIES) et finissait aussi en 'equity'.
+ *     Désormais toute base crypto connue (BTC, ETH, SOL...) force la
+ *     classification 'crypto', quelle que soit la devise de cotation.
+ *   - Le filtre de dates crypto (Binance) lève maintenant une erreur
+ *     explicite si la période demandée ne contient aucune bougie, au
+ *     lieu de retomber silencieusement sur la série NON filtrée (ce qui
+ *     faisait tourner le backtest sur une période différente de celle
+ *     demandée sans avertir l'utilisateur).
+ *   - `getQuoteCurrency('equity')` retournait TOUJOURS 'USD', même pour
+ *     des tickers cotés sur d'autres places (Londres, Paris, Tokyo...).
+ *     `EXCHANGE_SUFFIX_CURRENCY` détecte la devise via le suffixe Yahoo
+ *     du ticker (".L", ".PA", ".T"...) quand il est présent.
+ *   - `convertAmount()` : le capital et le "Fixed $ per trade" sont
+ *     saisis par l'utilisateur dans SA devise de settings (ex: MAD), pas
+ *     dans la devise de cotation du symbole tradé (ex: USD pour AAPL,
+ *     JPY pour USD/JPY). Avant ce fix, ce montant était utilisé tel
+ *     quel comme s'il était déjà dans la bonne devise — un capital de
+ *     "100 000" en MAD tournait comme 100 000 USD, 10x trop gros.
+ *     `convertAmount()` récupère le taux de change le plus récent via
+ *     Yahoo Finance et convertit ; en cas d'échec (devise inconnue,
+ *     service indisponible), il retombe sur le montant NON converti
+ *     plutôt que de faire échouer tout le backtest.
  */
 
 const logger = require('../utils/logger');
@@ -26,6 +56,19 @@ const { getStockCandles } = require('./yahooFinance.service');
 // Devises fiat connues — utilisées pour distinguer forex ("EUR/USD") de
 // crypto avec slash ("BTC/USDT" — USDT n'est pas dans cette liste).
 const FOREX_CURRENCIES = ['USD', 'EUR', 'GBP', 'JPY', 'CHF', 'AUD', 'CAD', 'NZD', 'CNH', 'MXN', 'SEK', 'NOK'];
+
+// Codes de métaux précieux traités comme des commodities (XAUUSD, XAGUSD
+// écrits sans slash) — distincts de FOREX_CURRENCIES.
+const COMMODITY_METAL_BASES = ['XAU', 'XAG'];
+
+// Bases crypto connues — sert à désambiguïser "BTC/USD" (crypto, PAS forex)
+// et à reconstituer le slash pour "BTCUSD", "ETHUSDT" écrits collés.
+const KNOWN_CRYPTO_BASES = [
+  'BTC', 'ETH', 'SOL', 'XRP', 'ADA', 'DOGE', 'BNB', 'MATIC', 'DOT', 'AVAX',
+  'LINK', 'LTC', 'ATOM', 'UNI', 'TRX', 'SHIB', 'NEAR', 'APT', 'ARB', 'OP',
+  'FIL', 'ICP', 'ETC', 'XLM', 'BCH', 'VET', 'ALGO', 'AAVE', 'SAND', 'MANA',
+  'FTM', 'SUI', 'INJ',
+];
 
 // Commodities : nom(s) affiché(s) → ticker Yahoo Finance. Plusieurs alias
 // pointent vers le même ticker pour tolérer différentes façons d'écrire.
@@ -49,17 +92,94 @@ const CRYPTO_QUOTE_SUFFIXES = ['USDT', 'USDC', 'BUSD', 'BTC', 'ETH'];
 // que sur les ~60 derniers jours. Au-delà, il faut retomber sur le Daily.
 const YAHOO_INTRADAY_LOOKBACK_DAYS = 60;
 
+// Suffixe de ticker Yahoo → devise de cotation, pour les actions/ETF
+// listés hors des États-Unis. Liste non-exhaustive mais couvre les
+// places les plus courantes. Sans suffixe reconnu → défaut USD.
+const EXCHANGE_SUFFIX_CURRENCY = {
+  L: 'GBP',   // London Stock Exchange
+  PA: 'EUR',  // Paris (Euronext)
+  DE: 'EUR',  // Xetra / Frankfurt
+  MI: 'EUR',  // Milan (Borsa Italiana)
+  AS: 'EUR',  // Amsterdam (Euronext)
+  BR: 'EUR',  // Bruxelles (Euronext)
+  MC: 'EUR',  // Madrid
+  LS: 'EUR',  // Lisbonne
+  TO: 'CAD',  // Toronto (TSX)
+  V: 'CAD',   // TSX Venture
+  HK: 'HKD',  // Hong Kong
+  T: 'JPY',   // Tokyo
+  SW: 'CHF',  // Suisse (SIX)
+  ST: 'SEK',  // Stockholm
+  OL: 'NOK',  // Oslo
+  CO: 'DKK',  // Copenhague
+  SI: 'SGD',  // Singapour
+  AX: 'AUD',  // Australie (ASX)
+};
+
+// Fenêtre de recherche pour le taux de change le plus récent — on ne
+// veut qu'une seule bougie récente, pas tout l'historique.
+const FX_RATE_LOOKBACK_DAYS = 7;
+
+/**
+ * Insère un "/" dans un symbole écrit sans séparateur, en se basant sur
+ * les bases/quotes connues. Idempotent : ne touche pas à un symbole qui
+ * a déjà un slash, et ne touche pas non plus à un ticker action/ETF
+ * classique (AAPL, SPY...) qui ne matche aucun pattern ci-dessous.
+ *
+ * Exemples : "BTCUSD" → "BTC/USD" | "BTCUSDT" → "BTC/USDT"
+ *            "EURUSD" → "EUR/USD" | "USDJPY" → "USD/JPY"
+ *            "XAUUSD" → "XAU/USD" | "AAPL"   → "AAPL" (inchangé)
+ */
+function insertSlash(rawSymbol) {
+  const clean = rawSymbol.trim().toUpperCase();
+  if (clean.includes('/')) return clean;
+
+  // 1) Suffixe de cotation crypto (USDT, USDC, BUSD, BTC, ETH) — on prend
+  //    le suffixe le plus long en premier pour éviter un split ambigu.
+  const sortedSuffixes = [...CRYPTO_QUOTE_SUFFIXES].sort((a, b) => b.length - a.length);
+  for (const suffix of sortedSuffixes) {
+    if (clean.endsWith(suffix) && clean.length > suffix.length) {
+      const base = clean.slice(0, -suffix.length);
+      if (base.length >= 2) return `${base}/${suffix}`;
+    }
+  }
+
+  // 2) Base crypto connue + devise fiat collée (BTCUSD, ETHEUR...)
+  for (const base of KNOWN_CRYPTO_BASES) {
+    if (clean.startsWith(base)) {
+      const rest = clean.slice(base.length);
+      if (FOREX_CURRENCIES.includes(rest)) return `${base}/${rest}`;
+    }
+  }
+
+  // 3) Paire forex ou métal précieux collée sur 6 caractères (EURUSD,
+  //    USDJPY, XAUUSD...)
+  if (clean.length === 6) {
+    const base = clean.slice(0, 3);
+    const quote = clean.slice(3);
+    if (COMMODITY_METAL_BASES.includes(base) && quote === 'USD') return `${base}/${quote}`;
+    if (FOREX_CURRENCIES.includes(base) && FOREX_CURRENCIES.includes(quote)) return `${base}/${quote}`;
+  }
+
+  // Rien ne matche → probablement une action/ETF, on laisse tel quel.
+  return clean;
+}
+
 /**
  * Détermine si un symbole est une paire crypto.
- * Exemples crypto : "BTC/USDT", "BTCUSDT", "ETH/USDT", "SOLUSDT"
+ * Exemples crypto : "BTC/USDT", "BTCUSDT", "BTC/USD", "ETH/USDT", "SOLUSDT"
  * Exemples stock   : "AAPL", "SPY", "NVDA", "QQQ"
  * Exemples forex   : "EUR/USD", "GBP/USD" — ont un slash, MAIS ne sont pas crypto
  */
 function isCryptoSymbol(symbol) {
-  const clean = symbol.trim().toUpperCase();
+  const clean = insertSlash(symbol);
 
   if (clean.includes('/')) {
-    const quotePart = clean.split('/')[1];
+    const [base, quotePart] = clean.split('/');
+    // Une base crypto connue reste crypto même cotée en devise fiat
+    // (ex: "BTC/USD") — avant ce fix, ce cas tombait dans le "false"
+    // ci-dessous à cause du check FOREX_CURRENCIES sur la quote seule.
+    if (KNOWN_CRYPTO_BASES.includes(base)) return true;
     if (FOREX_CURRENCIES.includes(quotePart)) return false;
     return true;
   }
@@ -72,11 +192,12 @@ function isCryptoSymbol(symbol) {
  * Utilisé pour choisir la source de données et pour l'affichage (devise).
  */
 function detectAssetClass(symbol) {
-  const clean = symbol.trim().toUpperCase();
+  const clean = insertSlash(symbol);
   if (isCryptoSymbol(clean)) return 'crypto';
   if (KNOWN_COMMODITY_KEYS.has(clean)) return 'commodity';
   if (clean.includes('/')) {
     const [base, quote] = clean.split('/');
+    if (COMMODITY_METAL_BASES.includes(base) && quote === 'USD') return 'commodity';
     if (FOREX_CURRENCIES.includes(base) && FOREX_CURRENCIES.includes(quote)) return 'forex';
   }
   return 'equity';
@@ -84,13 +205,13 @@ function detectAssetClass(symbol) {
 
 /**
  * Convertit un symbole d'affichage → ticker Yahoo Finance.
- * - Commodity connue → ticker futures (ex: GOLD → "GC=F")
+ * - Commodity connue → ticker futures (ex: GOLD → "GC=F", XAUUSD → "GC=F")
  * - Forex générique  → convention Yahoo "BASEQUOTE=X", avec USD-base qui
  *   se contracte en "QUOTE=X" (ex: USD/JPY → "JPY=X", EUR/GBP → "EURGBP=X")
  * - Sinon (action/ETF) → symbole inchangé
  */
 function toYahooTicker(symbol) {
-  const clean = symbol.trim().toUpperCase();
+  const clean = insertSlash(symbol);
 
   if (COMMODITY_TICKERS[clean]) return COMMODITY_TICKERS[clean];
 
@@ -105,15 +226,51 @@ function toYahooTicker(symbol) {
 }
 
 /**
+ * Convertit un symbole d'affichage → symbole Binance (pour l'API crypto).
+ * Binance spot n'a pas de paires fiat directes comme "BTCUSD" ; les
+ * devises fiat demandées (USD, EUR...) sont mappées vers le stablecoin
+ * USDT, qui suit ces devises de très près (peg 1:1 pour USD).
+ */
+function toBinanceSymbol(symbol) {
+  const clean = insertSlash(symbol);
+  if (!clean.includes('/')) return clean.replace('/', '');
+
+  const [base, quote] = clean.split('/');
+  const binanceQuote = FOREX_CURRENCIES.includes(quote) ? 'USDT' : quote;
+  return `${base}${binanceQuote}`;
+}
+
+/**
  * Devise de cotation d'un symbole — utilisée par le moteur de backtest
  * pour formater correctement les montants (éviter tout hardcoder en $).
  */
 function getQuoteCurrency(symbol, assetClass) {
-  if (assetClass === 'forex') return symbol.split('/')[1]?.trim().toUpperCase() || 'USD';
-  if (assetClass === 'commodity' || assetClass === 'equity') return 'USD';
+  const clean = insertSlash(symbol);
+
+  if (assetClass === 'forex') return clean.split('/')[1]?.trim().toUpperCase() || 'USD';
+  if (assetClass === 'commodity') return 'USD';
+
+  if (assetClass === 'equity') {
+    // FIX : détecte la devise via le suffixe de place boursière du
+    // ticker (ex: "VOD.L" → GBP, "MC.PA" → EUR) au lieu de forcer USD
+    // pour toute action, même listée hors des États-Unis.
+    const raw = symbol.trim().toUpperCase();
+    const dotIdx = raw.lastIndexOf('.');
+    if (dotIdx > -1) {
+      const suffix = raw.slice(dotIdx + 1);
+      if (EXCHANGE_SUFFIX_CURRENCY[suffix]) return EXCHANGE_SUFFIX_CURRENCY[suffix];
+    }
+    return 'USD';
+  }
+
   if (assetClass === 'crypto') {
-    const clean = symbol.toUpperCase().replace('/', '');
-    const q = CRYPTO_QUOTE_SUFFIXES.find(s => clean.endsWith(s));
+    if (clean.includes('/')) {
+      const quote = clean.split('/')[1];
+      // "BTC/USD" reste affiché en USD même si on fetch via USDT côté Binance.
+      return quote || 'USDT';
+    }
+    const flat = clean.replace('/', '');
+    const q = CRYPTO_QUOTE_SUFFIXES.find(s => flat.endsWith(s));
     return q || 'USDT';
   }
   return 'USD';
@@ -157,11 +314,12 @@ async function fetchCandlesForBacktest(symbol, timeframe, startDate, endDate) {
   const quoteCurrency = getQuoteCurrency(symbol, assetClass);
 
   if (assetClass === 'crypto') {
-    logger.info(`[backtestMarketRouter] ${symbol} détecté comme crypto → Binance`);
+    const binanceSymbol = toBinanceSymbol(symbol);
+    logger.info(`[backtestMarketRouter] ${symbol} détecté comme crypto → Binance (${binanceSymbol})`);
 
     const interval = toBinanceInterval(timeframe);
     const candleCount = estimateCandleCount(timeframe, startDate, endDate);
-    const candles = await getCandles(symbol.replace('/', ''), interval, candleCount);
+    const candles = await getCandles(binanceSymbol, interval, candleCount);
 
     if (!candles || candles.length === 0) {
       throw new Error(`Aucune donnée Binance pour ${symbol}`);
@@ -174,8 +332,20 @@ async function fetchCandlesForBacktest(symbol, timeframe, startDate, endDate) {
       return t >= start && t <= end;
     });
 
+    // FIX : avant, on retombait silencieusement sur `candles` (non filtré)
+    // si `filtered` était vide, ce qui faisait tourner le backtest sur une
+    // période complètement différente de celle demandée sans prévenir
+    // l'utilisateur. Désormais on échoue explicitement — le symbole
+    // apparaît dans `skipped` avec la vraie raison.
+    if (filtered.length === 0) {
+      throw new Error(
+        `Aucune donnée Binance pour ${symbol} sur la période demandée (${startDate} → ${endDate}). ` +
+        `Les ${candles.length} bougies récupérées ne couvrent pas cet intervalle.`
+      );
+    }
+
     return {
-      candles: (filtered.length > 0 ? filtered : candles).map(normalizeCryptoCandle),
+      candles: filtered.map(normalizeCryptoCandle),
       effectiveTimeframe: timeframe,
       fallbackApplied: false,
       assetClass,
@@ -206,9 +376,92 @@ async function fetchCandlesForBacktest(symbol, timeframe, startDate, endDate) {
   return { candles, effectiveTimeframe, fallbackApplied, assetClass, quoteCurrency };
 }
 
+/**
+ * Récupère le taux de change le plus récent FROM → TO via Yahoo Finance
+ * (même convention de ticker que toYahooTicker : base USD se contracte
+ * en "QUOTE=X", sinon "BASEQUOTE=X"). Retourne le nombre d'unités de
+ * `toCurrency` pour 1 unité de `fromCurrency`.
+ */
+async function fetchFxRate(fromCurrency, toCurrency) {
+  if (fromCurrency === toCurrency) return 1;
+
+  const ticker = fromCurrency === 'USD' ? `${toCurrency}=X` : `${fromCurrency}${toCurrency}=X`;
+
+  const end = new Date();
+  const start = new Date();
+  start.setDate(start.getDate() - FX_RATE_LOOKBACK_DAYS);
+
+  const candles = await getStockCandles(
+    ticker, 'Daily', start.toISOString().slice(0, 10), end.toISOString().slice(0, 10)
+  );
+
+  if (!candles || candles.length === 0) {
+    throw new Error(`Taux de change introuvable pour ${fromCurrency}/${toCurrency} (ticker: ${ticker})`);
+  }
+
+  return candles[candles.length - 1].close;
+}
+
+/**
+ * Convertit un montant de `fromCurrency` vers `toCurrency` au taux de
+ * change le plus récent disponible.
+ *
+ * Utilisé pour : le capital initial et le "Fixed $ per trade", tous deux
+ * saisis par l'utilisateur dans SA devise de settings (ex: MAD) mais qui
+ * doivent être exprimés dans la devise de cotation du symbole tradé
+ * avant d'entrer dans runSimulation (ex: USD pour AAPL, JPY pour
+ * USD/JPY) — sinon le moteur traite "100 000" comme 100 000 dans la
+ * mauvaise devise.
+ *
+ * En cas d'échec de récupération du taux (devise inconnue de Yahoo,
+ * service indisponible...), retourne le montant NON converti et loggue
+ * un avertissement plutôt que de faire échouer tout le backtest — un
+ * résultat approximatif reste plus utile qu'un symbole skippé en plus.
+ */
+// FIX: cache les taux FX par paire (TTL 15 min) — sans ça, chaque appel de
+// convertAmount() (potentiellement plusieurs par symbole, par backtest)
+// déclenchait un fetch réseau, même pour la même paire de devises.
+const FX_CACHE = new Map(); // "FROM_TO" -> { rate, expiresAt }
+const FX_CACHE_TTL_MS = 15 * 60 * 1000;
+
+async function getCachedFxRate(fromCurrency, toCurrency) {
+  const key = `${fromCurrency}_${toCurrency}`;
+  const cached = FX_CACHE.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.rate;
+
+  const rate = await fetchFxRate(fromCurrency, toCurrency);
+  FX_CACHE.set(key, { rate, expiresAt: Date.now() + FX_CACHE_TTL_MS });
+  return rate;
+}
+
+/**
+ * `warningsSink` (optionnel) : tableau fourni par l'appelant, dans lequel
+ * on pousse la paire de devises en cas d'échec — pour que le controller
+ * puisse remonter un vrai warning utilisateur au lieu d'un fallback 1:1
+ * silencieux. Paramètre optionnel : les appels existants qui ne le
+ * passent pas continuent de fonctionner à l'identique.
+ */
+async function convertAmount(amount, fromCurrency, toCurrency, warningsSink) {
+  if (!fromCurrency || !toCurrency || fromCurrency === toCurrency) return amount;
+
+  try {
+    const rate = await getCachedFxRate(fromCurrency, toCurrency);
+    return amount * rate;
+  } catch (err) {
+    logger.info(
+      `[backtestMarketRouter] Conversion FX ${fromCurrency}→${toCurrency} indisponible (${err.message}), capital utilisé sans conversion.`
+    );
+    if (Array.isArray(warningsSink)) {
+      warningsSink.push(`${fromCurrency}→${toCurrency}`);
+    }
+    return amount;
+  }
+}
+
 module.exports = {
   fetchCandlesForBacktest,
   isCryptoSymbol,
   detectAssetClass,
   getQuoteCurrency,
+  convertAmount,
 };

@@ -19,6 +19,16 @@ const baseOpts = { responsive: true, maintainAspectRatio: false, plugins: { lege
 // ── Formatage currency-aware ──────────────────────────────────────────
 const CURRENCY_SYMBOLS = { USD: '$', EUR: '€', GBP: '£', JPY: '¥', CHF: 'CHF ', AUD: 'A$', CAD: 'C$', MIXED: '' };
 
+// ✅ Feature: même table que Dashboard.jsx/RiskMatrix.jsx — devise de l'user
+// (Settings → Language & Region), utilisée pour le label "Capital" et le
+// mode de sizing "Fixed Amount", qui avaient un $ hardcodé (indépendant de
+// qc, qui lui reflète la devise du symbole tradé, connue seulement après
+// avoir lancé un backtest).
+const SETTINGS_CURRENCY_SYMBOLS = {
+  USD: '$', EUR: '€', MAD: 'DH', GBP: '£', JPY: '¥',
+  CHF: 'CHF', CAD: 'CA$', AUD: 'A$', CNY: '¥', AED: 'AED',
+};
+
 function fmtAmount(value, currency = 'USD') {
   const sym = CURRENCY_SYMBOLS[currency] ?? '';
   const num = parseFloat(value);
@@ -73,6 +83,24 @@ export default function Backtester() {
   const [error, setError]       = useState(null);
   const [warning, setWarning]   = useState(null);
   const [skipped, setSkipped]   = useState(null);
+  const [settingsCurrency, setSettingsCurrency] = useState('$');
+  // FIX (audit multi-asset) : on garde aussi le CODE devise (ex: 'MAD'),
+  // pas seulement le symbole d'affichage ('DH') — le backend en a besoin
+  // pour convertir le capital saisi vers la devise de cotation de chaque
+  // symbole avant de lancer la simulation. Avant ce fix, le capital
+  // saisi dans une devise ≠ USD était utilisé tel quel par le backend,
+  // comme s'il était déjà dans la bonne devise.
+  const [settingsCurrencyCode, setSettingsCurrencyCode] = useState('USD');
+
+  useEffect(() => {
+    api.get('/settings')
+      .then(res => {
+        const code = res.data?.settings?.currency || 'USD';
+        setSettingsCurrency(SETTINGS_CURRENCY_SYMBOLS[code] || '$');
+        setSettingsCurrencyCode(code);
+      })
+      .catch(() => {});
+  }, []);
 
   const prefillSymbol = location.state?.prefillSymbol;
 
@@ -125,6 +153,10 @@ export default function Backtester() {
         endDate: form.to,
         to: form.to,
         capital: form.capital,
+        // FIX : le backend a besoin de savoir dans quelle devise `capital`
+        // et `positionSizeValue` (mode fixed_dollar) sont exprimés, pour
+        // pouvoir les convertir vers la devise de chaque symbole.
+        capitalCurrency: settingsCurrencyCode,
         maxPos: form.maxPos,
         positionSizeMode: form.posSizeMode,
         positionSizeValue: form.posSizeValue,
@@ -253,7 +285,7 @@ export default function Backtester() {
           </div>
 
           <div style={{ marginBottom: 14 }}>
-            <div style={{ ...label10, marginBottom: 5 }}>Strategy Type</div>
+            <div style={{ ...label10, marginBottom: 5 }}>{t('backtester.strategyType')}</div>
             <select
               style={{ ...inpStyle, color: 'var(--text-secondary)' }}
               value={form.strategyId}
@@ -273,7 +305,7 @@ export default function Backtester() {
             <input style={inpStyle} value={form.universe} onChange={set('universe')} />
           </div>
           <div style={{ marginTop: -8, marginBottom: 14, fontSize: 10, color: 'var(--text-muted)', fontFamily: 'JetBrains Mono,monospace' }}>
-            Crypto, forex (EUR/USD) et commodities (GOLD, WTI...) supportés — max 8 symboles, capital équipondéré.
+            {t('backtester.universeHint')}
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
@@ -295,7 +327,7 @@ export default function Backtester() {
               </select>
             </div>
             <div>
-              <div style={{ ...label10, marginBottom: 5 }}>{t('backtester.capital')}</div>
+              <div style={{ ...label10, marginBottom: 5 }}>{t('backtester.capital', { symbol: settingsCurrency })}</div>
               <input style={inpStyle} value={form.capital} onChange={set('capital')} />
             </div>
           </div>
@@ -334,9 +366,9 @@ export default function Backtester() {
                   posSizeValue: e.target.value === 'fixed_dollar' ? '1000' : '10',
                 }))}
               >
-                <option value="fixed_pct">Fixed %</option>
-                <option value="kelly">Kelly</option>
-                <option value="fixed_dollar">Fixed $</option>
+                <option value="fixed_pct">{t('backtester.posSizeFixedPct')}</option>
+                <option value="kelly">{t('backtester.posSizeKelly')}</option>
+                <option value="fixed_dollar">{t('backtester.posSizeFixedDollar')}</option>
               </select>
             </div>
             <div>
@@ -348,19 +380,21 @@ export default function Backtester() {
           {form.posSizeMode !== 'kelly' ? (
             <div style={{ marginBottom: 16 }}>
               <div style={{ ...label10, marginBottom: 5 }}>
-                {form.posSizeMode === 'fixed_dollar' ? '$ par trade' : '% du capital par trade'}
+                {form.posSizeMode === 'fixed_dollar'
+                  ? t('backtester.posSizeValueCurrency', { symbol: settingsCurrency })
+                  : t('backtester.posSizeValuePct')}
               </div>
               <input style={inpStyle} value={form.posSizeValue} onChange={set('posSizeValue')} />
             </div>
           ) : (
             <div style={{ marginBottom: 16, fontSize: 10.5, color: 'var(--text-muted)', fontFamily: 'JetBrains Mono,monospace', lineHeight: 1.5 }}>
-              Half-Kelly, auto-calculé à partir de 5 trades clôturés (cap 25% du capital). Avant ça, fallback sur 10% fixe.
+              {t('backtester.kellyExplanation')}
             </div>
           )}
 
           {skipped && skipped.length > 0 && (
             <div style={{ marginBottom: 12, fontSize: 10, color: 'var(--text-muted)', fontFamily: 'JetBrains Mono,monospace' }}>
-              {skipped.length} symbole(s) ignoré(s) : {skipped.map(s => s.symbol).join(', ')}
+              {t('backtester.skippedSymbols', { count: skipped.length, symbols: skipped.map(s => s.symbol).join(', ') })}
             </div>
           )}
 

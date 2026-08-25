@@ -23,6 +23,16 @@
  * dans Backtester.jsx (STRATEGY_OPTIONS) — pas d'endpoint dynamique pour
  * l'instant, la liste est dupliquée frontend/backend par simplicité tant
  * qu'il n'y a que 2-3 stratégies.
+ *
+ * FIX (audit multi-asset) :
+ *   `requireVolumeConfirmation` (RSI Momentum) bloquait TOUTES les
+ *   entrées, silencieusement et indéfiniment, dès que la source de
+ *   données ne fournit pas de volume — le cas typique de Yahoo Finance
+ *   pour le forex/les commodities (volume = 0 sur toutes les bougies).
+ *   `state.volAvg` restait alors à 0 pour toujours, donc `volSpike`
+ *   restait `false` pour toujours. On distingue maintenant "pas de
+ *   donnée volume disponible" (confirmation ignorée) de "volume présent
+ *   mais insuffisant" (confirmation appliquée normalement).
  */
 
 const { calculateRSI } = require('../utils/calculateRSI');
@@ -99,8 +109,17 @@ const rsiMomentumStrategy = {
 
     const rsiCrossUp30 = state.prevRsi !== null && state.prevRsi <= params.rsiOversold && state.rsi > params.rsiOversold;
     const aboveEma = price > state.ema * (1 - params.emaTolerancePct / 100);
-    const volSpike = state.volAvg > 0 && vol > state.volAvg * params.volumeMultiplier;
-    const volumeOk = params.requireVolumeConfirmation ? volSpike : true;
+
+    // FIX : distingue "pas de volume dispo" (source de données comme
+    // Yahoo forex/commodities, volume toujours 0) de "volume insuffisant"
+    // (donnée présente mais sous le seuil). Avant ce fix, l'absence de
+    // volume bloquait silencieusement TOUTES les entrées pour toujours
+    // dès que requireVolumeConfirmation était activé.
+    const hasVolumeData = state.volAvg > 0;
+    const volSpike = hasVolumeData && vol > state.volAvg * params.volumeMultiplier;
+    const volumeOk = params.requireVolumeConfirmation
+      ? (hasVolumeData ? volSpike : true)
+      : true;
 
     return rsiCrossUp30 && aboveEma && volumeOk;
   },

@@ -6,6 +6,45 @@
  * gère uniquement ce qui est commun à TOUTES les stratégies :
  * bookkeeping des trades, equity curve, position sizing, métriques,
  * et agrégation multi-symbole (portefeuille équipondéré).
+ *
+ * FIX (audit multi-asset) :
+ *   - `params.maxPositions` était accepté mais totalement ignoré : une
+ *     seule variable `position` (singulier) limitait chaque symbole à
+ *     UNE position ouverte à la fois, quelle que soit la valeur du champ
+ *     "Max Pos" côté UI. Le moteur gère maintenant un tableau
+ *     `positions[]` et autorise jusqu'à `params.maxPositions` entrées
+ *     concurrentes par symbole (pyramiding), chacune avec son propre
+ *     stop loss et sa propre sortie.
+ *   - Trade Log "#" dupliqués : chaque symbole a son propre compteur
+ *     `n` local (issu de sa propre simulation isolée). En multi-symbole,
+ *     `aggregatePortfolio` faisait un `flatMap` + `slice(-10)` sans
+ *     jamais renuméroter → deux trades de symboles différents pouvaient
+ *     afficher le même "#" dans le tableau "Last 10 trades" (ex: #3 SPY
+ *     ET #3 AAPL). `renumberTrades()` corrige ça en réassignant 1..N
+ *     après le tri/slice final, pour les deux chemins (single ET
+ *     multi-symbole).
+ *
+ * FIX (audit unité de durée) :
+ *   - `dur` était calculé comme `${exitIndex - position.entryIndex}c`,
+ *     c'est-à-dire un nombre de BOUGIES suffixé "c" en dur, sans jamais
+ *     tenir compte du timeframe réel des bougies. Problème : le fallback
+ *     4H→Daily (voir backtestMarketRouter.service.js) s'applique PAR
+ *     SYMBOLE selon la date de début demandée — dans un même backtest
+ *     multi-symbole, un symbole peut tourner en 4H pendant qu'un autre
+ *     est tombé en Daily, et les deux affichaient quand même "173c",
+ *     "31c"... comme si c'était la même unité. `avgHold` (métriques)
+ *     avait le même problème : moyenne arithmétique de nombres de
+ *     bougies d'unités potentiellement différentes.
+ *     Le moteur ne connaît de toute façon pas nativement le timeframe
+ *     (il n'est pas passé dans params) — plutôt que de le propager
+ *     depuis le controller, on calcule la durée réelle à partir de
+ *     `entryDate`/`exitDate` (déjà disponibles sur chaque trade), ce
+ *     qui est correct quel que soit le timeframe et même si deux
+ *     symboles d'un même backtest utilisent des granularités
+ *     différentes. `durationDays()` / `formatDurationDays()` gèrent ça,
+ *     et `avgHold` fait maintenant la moyenne sur les jours (float)
+ *     avant de reformater, au lieu de faire la moyenne sur des chaînes
+ *     à unité mixte.
  */
 
 const { STRATEGIES } = require('./backtestStrategies.service');
@@ -90,6 +129,27 @@ function calculateMaxDrawdown(equityCurve) {
 }
 
 /**
+ * Durée réelle entre deux dates (float, en jours). Indépendant du
+ * timeframe des bougies — fonctionne même si deux symboles d'un même
+ * backtest tournent sur des granularités différentes (fallback Daily
+ * appliqué à l'un et pas à l'autre, par ex.).
+ */
+function durationDays(entryDate, exitDate) {
+  const ms = new Date(exitDate).getTime() - new Date(entryDate).getTime();
+  return ms / (1000 * 60 * 60 * 24);
+}
+
+/**
+ * Formate une durée en jours vers un libellé lisible : "Xd" à partir
+ * d'un jour, sinon "Xh" (minimum 1h affiché pour éviter "0h").
+ */
+function formatDurationDays(days) {
+  if (days >= 1) return `${Math.round(days)}d`;
+  const hours = Math.max(1, Math.round(days * 24));
+  return `${hours}h`;
+}
+
+/**
  * Position sizing — indépendant de la stratégie de trading.
  */
 function computePositionAllocation(cash, params, closedTrades) {
@@ -119,12 +179,41 @@ function computePositionAllocation(cash, params, closedTrades) {
 }
 
 /**
+ * Construit l'objet trade final à partir d'une position fermée.
+ * Partagé entre la sortie "normale" (en cours de boucle) et la clôture
+ * forcée en fin de période, pour éviter la duplication.
+ */
+function buildTradeRecord(position, exitPrice, exitDate, exitIndex, tradeNumber, params) {
+  const pnl = (exitPrice - position.entryPrice) * position.quantity;
+  const pnlPct = ((exitPrice - position.entryPrice) / position.entryPrice) * 100;
+  const days = durationDays(position.entryDate, exitDate);
+
+  return {
+    n: tradeNumber,
+    sym: position.symbol,
+    type: 'LONG',
+    entry: position.entryPrice.toFixed(2),
+    exit: exitPrice.toFixed(2),
+    pnl: `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}`,
+    pnlRaw: pnl,
+    rr: `1:${Math.abs(pnlPct / params.stopLossPct).toFixed(1)}`,
+    isW: pnl >= 0,
+    dur: formatDurationDays(days),
+    durDays: days, // FIX: valeur numérique en jours, utilisée pour la moyenne (avgHold) — le champ `dur` ci-dessus n'est qu'un libellé formaté ("3d"/"12h") et ne doit plus être parsé pour un calcul.
+    entryDate: position.entryDate,
+    exitDate,
+    qc: params.quoteCurrency,
+  };
+}
+
+/**
  * Lance la simulation. Générique : la logique d'entrée/sortie est
  * déléguée à la stratégie sélectionnée via params.strategyId.
  */
 function runSimulation(candles, initialCapital = 100000, userParams = {}, symbol = 'N/A') {
   const params = { ...DEFAULT_PARAMS, ...userParams };
   const strategy = STRATEGIES[params.strategyId] || STRATEGIES.rsi_momentum;
+  const maxPositions = Math.max(1, parseInt(params.maxPositions, 10) || 1);
 
   const minCandles = strategy.minCandles(params);
   if (candles.length < minCandles) {
@@ -138,7 +227,7 @@ function runSimulation(candles, initialCapital = 100000, userParams = {}, symbol
   const state = strategy.initState ? strategy.initState() : {};
 
   let cash = initialCapital;
-  let position = null;
+  let positions = []; // FIX: tableau au lieu d'une position unique → maxPositions concurrentes
 
   const trades = [];
   const equityCurve = [];
@@ -157,47 +246,35 @@ function runSimulation(candles, initialCapital = 100000, userParams = {}, symbol
 
     const price = candles[i].close;
 
-    // ── Sortie ──
-    if (position) {
-      const exitDecision = strategy.shouldExit(ctx, position);
-      if (exitDecision.exit) {
-        const exitPrice = exitDecision.exitPrice;
-        const pnl = (exitPrice - position.entryPrice) * position.quantity;
-        const pnlPct = ((exitPrice - position.entryPrice) / position.entryPrice) * 100;
+    // ── Sorties (on évalue chaque position ouverte indépendamment) ──
+    if (positions.length > 0) {
+      const stillOpen = [];
+      for (const position of positions) {
+        const exitDecision = strategy.shouldExit(ctx, position);
+        if (exitDecision.exit) {
+          cash += position.quantity * exitDecision.exitPrice;
+          trades.push(buildTradeRecord(
+            position, exitDecision.exitPrice, candles[i].date, i, trades.length + 1, params
+          ));
+        } else {
+          stillOpen.push(position);
+        }
+      }
+      positions = stillOpen;
+    }
 
-        cash += position.quantity * exitPrice;
-
-        trades.push({
-          n: trades.length + 1,
-          sym: position.symbol,
-          type: 'LONG',
-          entry: position.entryPrice.toFixed(2),
-          exit: exitPrice.toFixed(2),
-          pnl: `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}`,
-          pnlRaw: pnl,
-          rr: `1:${Math.abs(pnlPct / params.stopLossPct).toFixed(1)}`,
-          isW: pnl >= 0,
-          dur: `${i - position.entryIndex}c`,
-          entryDate: position.entryDate,
-          exitDate: candles[i].date,
-          qc: params.quoteCurrency,
-        });
-
-        position = null;
+    // ── Entrée (uniquement si on a encore de la marge sous maxPositions) ──
+    if (positions.length < maxPositions && strategy.shouldEnter(ctx)) {
+      const allocation = Math.min(computePositionAllocation(cash, params, trades), cash);
+      if (allocation > 0) {
+        const quantity = allocation / price;
+        cash -= quantity * price;
+        positions.push({ symbol, entryPrice: price, entryIndex: i, quantity, entryDate: candles[i].date });
       }
     }
 
-    // ── Entrée ──
-    if (!position && strategy.shouldEnter(ctx)) {
-      const allocation = Math.min(computePositionAllocation(cash, params, trades), cash);
-      const quantity = allocation / price;
-
-      cash -= quantity * price;
-      position = { symbol, entryPrice: price, entryIndex: i, quantity, entryDate: candles[i].date };
-    }
-
     // ── Courbes ──
-    const positionValue = position ? position.quantity * price : 0;
+    const positionValue = positions.reduce((sum, p) => sum + p.quantity * price, 0);
     const equity = cash + positionValue;
 
     equityCurve.push(parseFloat(equity.toFixed(2)));
@@ -212,28 +289,19 @@ function runSimulation(candles, initialCapital = 100000, userParams = {}, symbol
     prevEquity = equity;
   }
 
-  // Clôture forcée d'une position encore ouverte à la fin de la période
-  if (position) {
-    const lastPrice = closes[closes.length - 1];
-    const pnl = (lastPrice - position.entryPrice) * position.quantity;
-    const pnlPct = ((lastPrice - position.entryPrice) / position.entryPrice) * 100;
-    cash += position.quantity * lastPrice;
+  // Clôture forcée de toute position encore ouverte à la fin de la période
+  if (positions.length > 0) {
+    const lastIndex = candles.length - 1;
+    const lastPrice = closes[lastIndex];
+    const lastDate = candles[lastIndex].date;
 
-    trades.push({
-      n: trades.length + 1,
-      sym: position.symbol,
-      type: 'LONG',
-      entry: position.entryPrice.toFixed(2),
-      exit: lastPrice.toFixed(2),
-      pnl: `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}`,
-      pnlRaw: pnl,
-      rr: `1:${Math.abs(pnlPct / params.stopLossPct).toFixed(1)}`,
-      isW: pnl >= 0,
-      dur: `${candles.length - 1 - position.entryIndex}c`,
-      entryDate: position.entryDate,
-      exitDate: candles[candles.length - 1].date,
-      qc: params.quoteCurrency,
-    });
+    for (const position of positions) {
+      cash += position.quantity * lastPrice;
+      trades.push(buildTradeRecord(
+        position, lastPrice, lastDate, lastIndex, trades.length + 1, params
+      ));
+    }
+    positions = [];
   }
 
   const finalEquity = equityCurve[equityCurve.length - 1] || initialCapital;
@@ -245,8 +313,13 @@ function runSimulation(candles, initialCapital = 100000, userParams = {}, symbol
   const avgWin = wins.length > 0 ? wins.reduce((s, t) => s + t.pnlRaw, 0) / wins.length : 0;
   const avgLoss = losses.length > 0 ? losses.reduce((s, t) => s + t.pnlRaw, 0) / losses.length : 0;
   const avgRRRatio = avgLoss !== 0 ? Math.abs(avgWin / avgLoss) : 0;
-  const avgHoldCandles = trades.length > 0
-    ? trades.reduce((s, t) => s + parseInt(t.dur), 0) / trades.length : 0;
+  // FIX: moyenne sur `durDays` (nombre de jours, float) au lieu de
+  // `parseInt(t.dur)` — l'ancien code parsait un libellé du type "173c"
+  // en assumant que "c" (bougies) était une unité commune à tous les
+  // trades, ce qui n'est plus vrai depuis que `dur` peut être "3d" ou
+  // "12h" selon le trade.
+  const avgHoldDays = trades.length > 0
+    ? trades.reduce((s, t) => s + t.durDays, 0) / trades.length : 0;
 
   const metrics = {
     totalReturn: `${totalReturnPct >= 0 ? '+' : ''}${totalReturnPct.toFixed(1)}%`,
@@ -257,7 +330,7 @@ function runSimulation(candles, initialCapital = 100000, userParams = {}, symbol
     totalTrades: String(trades.length),
     avgWin: `+${avgWin.toFixed(0)}`,
     avgLoss: `-${Math.abs(avgLoss).toFixed(0)}`,
-    avgHold: `${avgHoldCandles.toFixed(0)}c`,
+    avgHold: formatDurationDays(avgHoldDays),
     quoteCurrency: params.quoteCurrency,
     strategyId: strategy.id,
     strategyLabel: strategy.label,
@@ -274,13 +347,22 @@ function runSimulation(candles, initialCapital = 100000, userParams = {}, symbol
 }
 
 /**
- * Combine plusieurs runSimulation() (multi-symbole) en un résultat
- * "portefeuille" — INCHANGÉ par rapport à la version précédente.
+ * Réassigne les "#" de trades séquentiellement (1..N) sur la fenêtre
+ * finale affichée. Nécessaire car chaque symbole a son propre compteur
+ * local — sans ça, deux trades de symboles différents peuvent partager
+ * le même "#" une fois combinés dans le Trade Log "Last 10 trades".
  */
-function aggregatePortfolio(perSymbolResults, initialCapitalTotal) {
-  if (perSymbolResults.length === 1) {
+function renumberTrades(trades) {
+  return trades.map((t, idx) => ({ ...t, n: idx + 1 }));
+}
+
+/**
+ * Combine plusieurs runSimulation() (multi-symbole) en un résultat
+ * "portefeuille".
+ */
+async function aggregatePortfolio(perSymbolResults, initialCapitalTotal, targetCurrency, convertAmount, warningsSink) {  if (perSymbolResults.length === 1) {
     const r = perSymbolResults[0];
-    return { metrics: r.metrics, charts: r.charts, trades: r.trades.slice(-10) };
+    return { metrics: r.metrics, charts: r.charts, trades: renumberTrades(r.trades.slice(-10)) };
   }
 
   const maxLen = Math.max(...perSymbolResults.map(r => r.charts.stratData.length));
@@ -291,6 +373,26 @@ function aggregatePortfolio(perSymbolResults, initialCapitalTotal) {
     const last = arr[arr.length - 1];
     return [...arr, ...new Array(len - arr.length).fill(last)];
   };
+
+    // FIX: normalisation cross-currency — chaque symbole peut avoir une
+  // quoteCurrency différente (ex: SPY en USD, un forex en JPY). Sans ça,
+  // sumSeries() additionnait des unités monétaires différentes comme si
+  // c'était la même devise.
+  const convertedResults = await Promise.all(
+    perSymbolResults.map(async r => {
+      const symCurrency = r.metrics.quoteCurrency;
+      if (symCurrency === targetCurrency) return r;
+        const rate = await convertAmount(1, symCurrency, targetCurrency, warningsSink).catch(() => 1);      return {
+        ...r,
+        charts: {
+          ...r.charts,
+          stratData: r.charts.stratData.map(v => v * rate),
+          bhData: r.charts.bhData.map(v => v * rate),
+        },
+      };
+    })
+  );
+  perSymbolResults = convertedResults;
 
   const sumSeries = key => {
     const series = new Array(maxLen).fill(0);
@@ -325,8 +427,11 @@ function aggregatePortfolio(perSymbolResults, initialCapitalTotal) {
   const avgWin = wins.length > 0 ? wins.reduce((s, t) => s + t.pnlRaw, 0) / wins.length : 0;
   const avgLoss = losses.length > 0 ? losses.reduce((s, t) => s + t.pnlRaw, 0) / losses.length : 0;
   const avgRRRatio = avgLoss !== 0 ? Math.abs(avgWin / avgLoss) : 0;
-  const avgHoldCandles = allTrades.length > 0
-    ? allTrades.reduce((s, t) => s + parseInt(t.dur), 0) / allTrades.length : 0;
+  // FIX: idem runSimulation — moyenne sur `durDays`, pas sur un `parseInt(dur)`
+  // à unité mixte (certains trades peuvent être en 4H, d'autres retombés en
+  // Daily via le fallback par-symbole de backtestMarketRouter.service.js).
+  const avgHoldDays = allTrades.length > 0
+    ? allTrades.reduce((s, t) => s + t.durDays, 0) / allTrades.length : 0;
 
   const finalEquity = stratData[stratData.length - 1] || initialCapitalTotal;
   const totalReturnPct = ((finalEquity - initialCapitalTotal) / initialCapitalTotal) * 100;
@@ -348,13 +453,13 @@ function aggregatePortfolio(perSymbolResults, initialCapitalTotal) {
       totalTrades: String(allTrades.length),
       avgWin: `+${avgWin.toFixed(0)}`,
       avgLoss: `-${Math.abs(avgLoss).toFixed(0)}`,
-      avgHold: `${avgHoldCandles.toFixed(0)}c`,
-      quoteCurrency: currencies.size === 1 ? [...currencies][0] : 'MIXED',
+      avgHold: formatDurationDays(avgHoldDays),
+      quoteCurrency: targetCurrency,
       strategyId: perSymbolResults[0].metrics.strategyId,
       strategyLabel: perSymbolResults[0].metrics.strategyLabel,
     },
     charts: { stratData, bhData, ddData, annualReturns },
-    trades: allTrades.slice(-10),
+    trades: renumberTrades(allTrades.slice(-10)),
   };
 }
 

@@ -23,11 +23,22 @@ const SECTOR_COLORS = {
   Healthcare: 'rgba(251,191,36,0.6)',
   Energy:     'rgba(52,211,153,0.6)',
   Crypto:     'rgba(0,245,212,0.4)',
+  Forex:      'rgba(52,211,153,0.35)',
+  Commodities: 'rgba(251,191,36,0.35)',
   'Index/ETF': 'rgba(167,139,250,0.4)',
   Other:      'rgba(100,116,139,0.4)',
 };
 
 const HORIZONS = ['1D', '1W', '1M'];
+
+// ✅ Feature: même table que Dashboard.jsx (CURRENCY_SYMBOLS) — l'user choisit
+// sa devise dans Settings → Language & Region, et ce symbole remplace le $
+// qui était hardcodé dans les KPIs, la table de positions, le stress test
+// et les suggestions de sizing.
+const CURRENCY_SYMBOLS = {
+  USD: '$', EUR: '€', MAD: 'DH', GBP: '£', JPY: '¥',
+  CHF: 'CHF', CAD: 'CA$', AUD: 'A$', CNY: '¥', AED: 'AED',
+};
 
 function corrColor(v) {
   if (v >= .8) return 'rgba(248,113,113,0.7)';
@@ -46,12 +57,25 @@ export default function RiskMatrix() {
   const [data, setData]       = useState(null);
   const [bars, setBars]       = useState([]);
   const [horizon, setHorizon] = useState('1D');
+  const [currencySymbol, setCurrencySymbol] = useState('$');
 
   const [customShock, setCustomShock]   = useState('-15');
   const [customSector, setCustomSector] = useState('all');
   const [customResult, setCustomResult] = useState(null);
   const [customLoading, setCustomLoading] = useState(false);
   const [customError, setCustomError]   = useState(null);
+
+  useEffect(() => {
+    // ✅ Feature: devise de l'user (Settings → Language & Region), appliquée
+    // aux KPIs, à la table de positions et au stress test ci-dessous au lieu
+    // du $ hardcodé.
+    api.get('/settings')
+      .then(res => {
+        const code = res.data?.settings?.currency || 'USD';
+        setCurrencySymbol(CURRENCY_SYMBOLS[code] || '$');
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -179,8 +203,8 @@ export default function RiskMatrix() {
   const availableSectors = [...new Set(positions.map(p => p.sector))];
 
   const KPIS = [
-    { lbl: t('riskMatrix.dailyVar'),   val: `−$${Math.abs(kpis.dailyVaR).toLocaleString()}`, sub: `${kpis.dailyVaRPct}%`,            border:'rgba(248,113,113,0.2)',  vc:'var(--red)'   },
-    { lbl: t('riskMatrix.cvar'),       val: `−$${Math.abs(kpis.cvar).toLocaleString()}`,      sub: `${kpis.cvarPct}%`,                border:'rgba(248,113,113,0.15)', vc:'var(--amber)' },
+    { lbl: t('riskMatrix.dailyVar'),   val: `−${currencySymbol}${Math.abs(kpis.dailyVaR).toLocaleString()}`, sub: `${kpis.dailyVaRPct}%`,            border:'rgba(248,113,113,0.2)',  vc:'var(--red)'   },
+    { lbl: t('riskMatrix.cvar'),       val: `−${currencySymbol}${Math.abs(kpis.cvar).toLocaleString()}`,      sub: `${kpis.cvarPct}%`,                border:'rgba(248,113,113,0.15)', vc:'var(--amber)' },
     { lbl: t('riskMatrix.beta'),       val: kpis.beta.toFixed(2),                              sub: t('riskMatrix.betaSub'),           border:'var(--border)',          vc:'var(--amber)' },
     { lbl: t('riskMatrix.volatility'), val: `${kpis.volatility}%`,                             sub: t('riskMatrix.volSub'),            border:'var(--border)',          vc:'var(--cyan)'  },
     { lbl: t('riskMatrix.riskScore'),  val: `${kpis.riskScore}/100`,                           sub: t('riskMatrix.riskScoreSub'),      border:'rgba(52,211,153,0.15)',  vc:'var(--amber)' },
@@ -414,11 +438,16 @@ export default function RiskMatrix() {
                     <span style={{ background:'rgba(0,245,212,0.08)', color:'var(--cyan)', border:'1px solid rgba(0,245,212,0.15)', padding:'2px 7px', borderRadius:4, fontSize:10, fontWeight:600 }}>{p.symbol}</span>
                   </td>
                   <td style={{ padding:'9px 12px', ...monoSm, color:'var(--text-secondary)' }}>
-                    ${p.marketValue.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                    {currencySymbol}{p.marketValue.toLocaleString(undefined, { maximumFractionDigits: 0 })}
                   </td>
                   <td style={{ padding:'9px 12px', ...monoSm }}>{p.weight}%</td>
-                  <td style={{ padding:'9px 12px', ...monoSm, color:p.beta>1?'var(--amber)':'var(--green)' }}>{p.beta.toFixed(2)}</td>
-                  <td style={{ padding:'9px 12px', ...monoSm, color:'var(--red)' }}>${Math.abs(p.contribVar).toLocaleString()}</td>
+                  <td style={{ padding:'9px 12px', ...monoSm, color:p.beta>1?'var(--amber)':'var(--green)' }} title={p.benchmarkSymbol && p.benchmarkSymbol !== 'SPY' ? `${p.beta.toFixed(2)} vs SPY · ${p.betaClass?.toFixed(2)} vs ${p.benchmarkSymbol}` : undefined}>
+                    {p.betaClass != null && p.benchmarkSymbol && p.benchmarkSymbol !== 'SPY' ? p.betaClass.toFixed(2) : p.beta.toFixed(2)}
+                    {p.benchmarkSymbol && p.benchmarkSymbol !== 'SPY' && (
+                      <span style={{ fontSize:8, color:'var(--text-muted)', marginLeft:3 }}>vs {p.benchmarkSymbol}</span>
+                    )}
+                  </td>
+                  <td style={{ padding:'9px 12px', ...monoSm, color:'var(--red)' }}>{currencySymbol}{Math.abs(p.contribVar).toLocaleString()}</td>
                   <td style={{ padding:'9px 12px', ...monoSm }}>
                     <span style={{ padding:'2px 8px', borderRadius:4, fontSize:10, background:RISK_BG[p.marginalRisk], color:RISK_COLOR[p.marginalRisk] }}>
                       {t(`riskMatrix.${p.marginalRisk}`)}
@@ -433,7 +462,7 @@ export default function RiskMatrix() {
                         → {p.sizing?.suggestedWeightPct}%
                         {typeof p.sizing?.deltaDollar === 'number' && (
                           <span style={{ marginLeft: 4 }}>
-                            ({p.sizing.deltaDollar >= 0 ? '+' : '−'}${Math.abs(p.sizing.deltaDollar).toLocaleString(undefined, { maximumFractionDigits: 0 })})
+                            ({p.sizing.deltaDollar >= 0 ? '+' : '−'}{currencySymbol}{Math.abs(p.sizing.deltaDollar).toLocaleString(undefined, { maximumFractionDigits: 0 })})
                           </span>
                         )}
                       </span>
@@ -518,7 +547,7 @@ export default function RiskMatrix() {
                 <div>
                   <div style={{ ...label10, fontSize: 9 }}>{t('riskMatrix.dollarImpact')}</div>
                   <div style={{ fontSize: 14, fontFamily: 'JetBrains Mono,monospace', color: customResult.impactDollar >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                    {customResult.impactDollar >= 0 ? '+' : '−'}${Math.abs(customResult.impactDollar).toLocaleString()}
+                    {customResult.impactDollar >= 0 ? '+' : '−'}{currencySymbol}{Math.abs(customResult.impactDollar).toLocaleString()}
                   </div>
                 </div>
               </div>

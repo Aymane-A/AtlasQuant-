@@ -9,7 +9,9 @@
  * MÉTRIQUES CALCULÉES :
  *   - Daily returns (rendements journaliers) par position
  *   - Volatilité annualisée
- *   - Beta (sensibilité au marché, benchmark = SPY)
+ *   - Beta vs SPY (marché large, utilisé pour portfolioBeta/stress tests)
+ *     + beta class-relative (vs BTC pour crypto, UUP pour forex, GLD pour
+ *     commodities — champ informatif dans le tableau de positions)
  *   - VaR historique 95% (Value at Risk)
  *   - CVaR / Expected Shortfall (perte moyenne au-delà du VaR)
  *   - Matrice de corrélation entre positions
@@ -18,9 +20,29 @@
  */
 
 const logger = require('../utils/logger');
-const { fetchCandlesForBacktest } = require('./backtestMarketRouter.service');
+const { fetchCandlesForBacktest, detectAssetClass } = require('./backtestMarketRouter.service');
 
 const BENCHMARK_SYMBOL = 'SPY';
+
+// ── Benchmarks par classe d'actif ────────────────────────────────
+// ✅ Fix: auparavant, TOUT était benchmarké contre SPY, y compris crypto,
+// forex et commodities — un beta forex-vs-SPY ou commodity-vs-SPY n'a
+// quasiment aucun sens statistique (pas de lien structurel). On calcule
+// maintenant un beta "class-relative" par position, contre un benchmark
+// adapté à sa classe d'actif — exposé en plus (champ `beta` + `benchmark`)
+// pour donner une lecture pertinente dans le tableau de positions.
+// SPY reste LE benchmark utilisé pour portfolioBeta et les stress tests
+// "marché large" (COVID Crash, 2008...) — ces scénarios représentent des
+// chocs actions, donc rester sur SPY pour eux est correct, pas un bug.
+const CLASS_BENCHMARKS = {
+  Crypto: 'BTC/USDT',
+  Forex: 'UUP',        // Invesco DB US Dollar Index Bullish Fund — proxy de force du dollar, dispo sur Yahoo comme n'importe quel ETF
+  Commodities: 'GLD',  // ETF or — proxy large du risque commodities
+};
+
+function getClassBenchmark(sector) {
+  return CLASS_BENCHMARKS[sector] || BENCHMARK_SYMBOL;
+}
 const TRADING_DAYS_PER_YEAR = 252;
 const VAR_CONFIDENCE = 0.95; // VaR à 95% — standard dans l'industrie
 
@@ -62,9 +84,23 @@ const SECTOR_MAP = {
   VTI: 'Index/ETF', VOO: 'Index/ETF',
 };
 
+// ✅ Fix: SECTOR_MAP ne listait que 3 paires crypto en dur — tout le reste
+// (SOL, ADA, n'importe quelle paire forex EUR/USD·GBP/JPY, commodities
+// XAU/USD·WTI...) tombait dans "Other", un bloc fourre-tout sans distinction
+// entre asset classes complètement différentes. On réutilise
+// detectAssetClass() de backtestMarketRouter.service.js (déjà utilisé pour
+// router les données de prix) comme fallback : n'importe quelle paire forex
+// ou commodity reconnue par ce classifieur est correctement étiquetée, sans
+// avoir à maintenir une seconde liste manuelle en parallèle.
 function getSector(symbol) {
   const clean = symbol.trim().toUpperCase();
-  return SECTOR_MAP[clean] || 'Other';
+  if (SECTOR_MAP[clean]) return SECTOR_MAP[clean];
+
+  const assetClass = detectAssetClass(symbol);
+  if (assetClass === 'crypto') return 'Crypto';
+  if (assetClass === 'forex') return 'Forex';
+  if (assetClass === 'commodity') return 'Commodities';
+  return 'Other'; // équity inconnue (pas dans SECTOR_MAP) — "Other" reste légitime ici
 }
 
 // ✅ Perf: cache en mémoire des closes journaliers par symbole, TTL 5min.
@@ -255,7 +291,18 @@ async function computeRiskMatrix(positions, horizon = '1D') {
   }
   const symbols = Object.keys(aggregated);
 
-  const allSymbols = [...new Set([...symbols, BENCHMARK_SYMBOL])];
+  // Sector/asset-class connu à l'avance (ne dépend pas des prix) → on peut
+  // déterminer quels benchmarks de classe on aura besoin de fetch AVANT
+  // d'aller chercher les closes.
+  const sectorBySymbol = {};
+  const benchmarksNeeded = new Set([BENCHMARK_SYMBOL]); // SPY toujours nécessaire (stress tests "marché large")
+  for (const symbol of symbols) {
+    const sector = getSector(symbol);
+    sectorBySymbol[symbol] = sector;
+    benchmarksNeeded.add(getClassBenchmark(sector));
+  }
+
+  const allSymbols = [...new Set([...symbols, ...benchmarksNeeded])];
   const closesBySymbol = {};
 
   for (const symbol of allSymbols) {
@@ -270,12 +317,39 @@ async function computeRiskMatrix(positions, horizon = '1D') {
   const benchmarkCloses = closesBySymbol[BENCHMARK_SYMBOL] || [];
   const benchmarkReturns = calculateDailyReturns(benchmarkCloses);
 
+  // Cache des rendements par benchmark de classe (évite de recalculer
+  // calculateDailyReturns() à chaque position qui partage le même benchmark).
+  const classBenchmarkReturnsCache = {};
+  function getClassBenchmarkReturns(benchmarkSymbol) {
+    if (benchmarkSymbol === BENCHMARK_SYMBOL) return benchmarkReturns;
+    if (!classBenchmarkReturnsCache[benchmarkSymbol]) {
+      classBenchmarkReturnsCache[benchmarkSymbol] = calculateDailyReturns(closesBySymbol[benchmarkSymbol] || []);
+    }
+    return classBenchmarkReturnsCache[benchmarkSymbol];
+  }
+
   const positionDetails = symbols.map(symbol => {
     const closes = closesBySymbol[symbol] || [];
     const currentPrice = closes.length > 0 ? closes[closes.length - 1] : aggregated[symbol].costBasis / aggregated[symbol].quantity;
     const marketValue = aggregated[symbol].quantity * currentPrice;
     const returns = calculateDailyReturns(closes);
-    const beta = calculateBeta(returns, benchmarkReturns);
+    const sector = sectorBySymbol[symbol];
+    const classBenchmarkSymbol = getClassBenchmark(sector);
+
+    // betaVsMarket (vs SPY) : utilisé pour portfolioBeta, riskScore, les
+    // stress tests "marché large" et les suggestions de sizing — ces
+    // usages représentent tous une exposition au marché actions, donc SPY
+    // reste le bon référentiel pour rester cohérent entre positions.
+    const betaVsMarket = calculateBeta(returns, benchmarkReturns);
+
+    // beta (class-relative) : comparaison à un benchmark de sa propre classe
+    // d'actif — champ informatif affiché dans le tableau de positions,
+    // plus pertinent qu'un beta-vs-SPY pour juger le risque d'un forex ou
+    // d'une commodity par rapport à ses pairs.
+    const betaVsClass = classBenchmarkSymbol === BENCHMARK_SYMBOL
+      ? betaVsMarket
+      : calculateBeta(returns, getClassBenchmarkReturns(classBenchmarkSymbol));
+
     const volatility = annualizedVolatility(returns);
 
     return {
@@ -284,9 +358,11 @@ async function computeRiskMatrix(positions, horizon = '1D') {
       currentPrice,
       marketValue,
       returns,
-      beta,
+      beta: betaVsMarket,
+      betaClass: betaVsClass,
+      benchmarkSymbol: classBenchmarkSymbol,
       volatility,
-      sector: getSector(symbol),
+      sector,
     };
   });
 
@@ -410,6 +486,8 @@ async function computeRiskMatrix(positions, horizon = '1D') {
       marketValue: parseFloat(p.marketValue.toFixed(2)),
       weight: parseFloat((p.weight * 100).toFixed(1)),
       beta: parseFloat(p.beta.toFixed(2)),
+      betaClass: parseFloat(p.betaClass.toFixed(2)),
+      benchmarkSymbol: p.benchmarkSymbol,
       contribVar: parseFloat(p.contribVarDollar.toFixed(2)),
       marginalRisk: p.marginalRisk,
       sector: p.sector,
