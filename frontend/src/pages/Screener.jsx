@@ -1,6 +1,7 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api, { screenerAPI } from '../services/api';
+import SignalModal from '../components/SignalModal';
 
 const FILTERS = ['All','BUY','SELL','HOLD'];
 const ASSET_TABS = [
@@ -58,6 +59,23 @@ const downloadCsv = (csv, filename) => {
   document.body.removeChild(a); URL.revokeObjectURL(url);
 };
 
+// ── Shapes a screener row into what SignalModal expects ────
+const toModalShape = (r) => ({
+  symbol: r.symbol,
+  signal: r.signal,
+  confidence: r.confidence,
+  conf: r.confidence,
+  price: r.price,
+  asset_class: r.asset_class,
+  indicators: r.indicators,
+  reasoning: r.reasoning || '',
+  entry: r.entry ?? r.price,
+  stop_loss: r.stop_loss,
+  take_profit: r.take_profit,
+  risk_reward: r.risk_reward,
+  created_at: r.created_at || new Date().toISOString(),
+});
+
 function WatchlistStar({ symbol, onAdd, added }) {
   return (
     <button
@@ -80,6 +98,7 @@ export default function Screener() {
   const [sortBy,     setSortBy]     = useState('confidence');
   const [scannedAt,  setScannedAt]  = useState(null);
   const [error,      setError]      = useState(null);
+  const [searchQuery, setSearchQuery] = useState('');
 
   // ── Real scan progress, driven by polling /signals/scan-status/:jobId ──
   const [scanProgress, setScanProgress] = useState({ pct: 0, completed: 0, total: 0 });
@@ -96,6 +115,12 @@ export default function Screener() {
   const [presetsLoaded, setPresetsLoaded] = useState(false);
   const [presetName, setPresetName] = useState('');
   const [showPresetInput, setShowPresetInput] = useState(false);
+
+  // ── Bulk select ──
+  const [selected, setSelected] = useState(new Set());
+
+  // ── Signal detail modal ──
+  const [selectedSignal, setSelectedSignal] = useState(null);
 
   // Stop any in-flight polling if the component unmounts mid-scan
   useEffect(() => () => { if (pollTimerRef.current) clearInterval(pollTimerRef.current); }, []);
@@ -127,6 +152,30 @@ export default function Screener() {
     } finally {
       setTimeout(() => setToast(null), 2000);
     }
+  };
+
+  const toggleSelect = (symbol) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      next.has(symbol) ? next.delete(symbol) : next.add(symbol);
+      return next;
+    });
+  };
+
+  const bulkAddToWatchlist = async () => {
+    const symbols = [...selected];
+    if (!symbols.length) return;
+    let ok = 0;
+    for (const sym of symbols) {
+      try {
+        await api.post('/watchlist', { symbol: sym });
+        setWatchlisted(prev => new Set(prev).add(sym.toUpperCase()));
+        ok++;
+      } catch { /* skip failures, keep going */ }
+    }
+    setSelected(new Set());
+    setToast(`${ok}/${symbols.length} added to watchlist`);
+    setTimeout(() => setToast(null), 2500);
   };
 
   // ── Poll /signals/scan-status/:jobId until the job is done or errors ──
@@ -187,6 +236,7 @@ export default function Screener() {
     return allResults
       .filter(r => assetTab === 'All' || r.asset_class === assetTab)
       .filter(r => filter === 'All' || r.signal === filter)
+      .filter(r => !searchQuery || r.symbol.toLowerCase().includes(searchQuery.trim().toLowerCase()))
       .filter(r => inRange(getRsi(r), filters.rsiMin, filters.rsiMax))
       .filter(r => inRange(r.price,   filters.priceMin, filters.priceMax))
       .filter(r => r.confidence === null || filters.confMin === '' || (r.confidence||0) >= parseFloat(filters.confMin))
@@ -196,7 +246,7 @@ export default function Screener() {
         if (sortBy === 'rr')         return (parseFloat(b.risk_reward)||0) - (parseFloat(a.risk_reward)||0);
         return 0;
       });
-  }, [allResults, assetTab, filter, filters, sortBy]);
+  }, [allResults, assetTab, filter, filters, searchQuery, sortBy]);
 
   const tabCounts = useMemo(() => {
     const counts = { All: allResults.length };
@@ -346,6 +396,13 @@ export default function Screener() {
             ))}
           </div>
 
+          <input
+            placeholder="🔍 Search symbol..."
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            style={{ ...inp, width:160 }}
+          />
+
           <button onClick={() => setShowFilters(v => !v)} style={{
             display:'flex', alignItems:'center', gap:6,
             padding:'7px 14px', borderRadius:8, cursor:'pointer',
@@ -365,6 +422,16 @@ export default function Screener() {
           }}>
             ⬇ Export CSV
           </button>
+
+          {selected.size > 0 && (
+            <button onClick={bulkAddToWatchlist} style={{
+              padding:'7px 14px', borderRadius:8, border:'1px solid var(--amber)',
+              background:'rgba(251,191,36,0.1)', color:'var(--amber)',
+              fontFamily:'JetBrains Mono,monospace', fontSize:11, cursor:'pointer', fontWeight:700,
+            }}>
+              ★ Add {selected.size} to watchlist
+            </button>
+          )}
 
           <div style={{ marginLeft:'auto', display:'flex', alignItems:'center', gap:8, fontSize:11, color:'var(--text-secondary)', fontFamily:'JetBrains Mono,monospace' }}>
             Trier par:
@@ -504,7 +571,17 @@ export default function Screener() {
           <table style={{ width:'100%', borderCollapse:'collapse' }}>
             <thead>
               <tr>
-                {['','Symbole','Classe','Prix','Signal','Confiance','R:R','Tendance'].map((h,i) => (
+                <th style={{ padding:'14px 8px 14px 18px', width:20, borderBottom:'1px solid var(--border)' }}>
+                  <input type="checkbox"
+                    checked={selected.size > 0 && filtered.every(r => selected.has(r.symbol))}
+                    onChange={() => {
+                      setSelected(prev => prev.size === filtered.length
+                        ? new Set()
+                        : new Set(filtered.map(r => r.symbol)));
+                    }}
+                  />
+                </th>
+                {['','Symbole','Classe','Prix','Signal','Confiance','R:R','Tendance',''].map((h,i) => (
                   <th key={i} style={{ textAlign:'left', padding:'14px 18px', fontSize:10, letterSpacing:'.15em', color:'var(--text-muted)', textTransform:'uppercase', fontFamily:'JetBrains Mono,monospace', borderBottom:'1px solid var(--border)', fontWeight:400 }}>{h}</th>
                 ))}
               </tr>
@@ -516,18 +593,25 @@ export default function Screener() {
                 const conf   = r.confidence || 0;
                 const rr     = parseFloat(r.risk_reward) || 0;
                 return (
-                  <tr key={r.id || r.symbol || i} style={{ borderBottom:'1px solid rgba(255,255,255,0.03)', transition:'background .15s', cursor:'pointer' }}
+                  <tr key={r.id || r.symbol || i} style={{ borderBottom:'1px solid rgba(255,255,255,0.03)', transition:'background .15s' }}
                     onMouseEnter={e => e.currentTarget.style.background='rgba(255,255,255,0.02)'}
                     onMouseLeave={e => e.currentTarget.style.background='transparent'}
-                    onClick={() => goToBacktest(r.symbol)}
                   >
-                    <td style={{ padding:'14px 8px 14px 18px', width:20 }} onClick={e => e.stopPropagation()}>
+                    <td style={{ padding:'14px 4px 14px 18px', width:20 }} onClick={e => e.stopPropagation()}>
+                      <input type="checkbox" checked={selected.has(r.symbol)} onChange={() => toggleSelect(r.symbol)} />
+                    </td>
+                    <td style={{ padding:'14px 8px 14px 4px', width:20 }} onClick={e => e.stopPropagation()}>
                       <WatchlistStar symbol={r.symbol} onAdd={addToWatchlist} added={watchlisted.has(r.symbol.toUpperCase())} />
                     </td>
                     <td style={{ padding:'14px 18px' }}>
                       <div style={{ display:'flex', alignItems:'center', gap:10 }}>
                         <div style={{ width:8, height:8, borderRadius:'50%', background: isBuy?'var(--green)':isSell?'var(--red)':'var(--amber)', boxShadow: isBuy?'0 0 8px var(--green)':isSell?'0 0 8px var(--red)':'0 0 8px var(--amber)' }} />
-                        <span style={{ fontSize:13, fontWeight:700, fontFamily:'JetBrains Mono,monospace', color:'var(--text-primary)' }}>
+                        <span
+                          onClick={(e) => { e.stopPropagation(); setSelectedSignal(toModalShape(r)); }}
+                          style={{ fontSize:13, fontWeight:700, fontFamily:'JetBrains Mono,monospace', color:'var(--text-primary)', cursor:'pointer', textDecoration:'underline', textDecorationColor:'transparent' }}
+                          onMouseEnter={e => e.currentTarget.style.textDecorationColor = 'var(--cyan)'}
+                          onMouseLeave={e => e.currentTarget.style.textDecorationColor = 'transparent'}
+                        >
                           {r.symbol}
                         </span>
                       </div>
@@ -568,12 +652,23 @@ export default function Screener() {
                         <span style={{ color:'var(--red)' }}>▼{r.score?.bearish ?? '—'}</span>
                       </div>
                     </td>
+                    <td style={{ padding:'14px 18px' }}>
+                      <button onClick={(e) => { e.stopPropagation(); goToBacktest(r.symbol); }} style={{
+                        fontSize:9, padding:'4px 10px', borderRadius:5, cursor:'pointer',
+                        border:'1px solid var(--border)', background:'transparent', color:'var(--text-secondary)',
+                        fontFamily:'JetBrains Mono,monospace', whiteSpace:'nowrap',
+                      }}>→ Backtest</button>
+                    </td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
         </div>
+      )}
+
+      {selectedSignal && (
+        <SignalModal signal={selectedSignal} onClose={() => setSelectedSignal(null)} />
       )}
 
       <style>{`

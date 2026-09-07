@@ -13,10 +13,17 @@
  *                                   d'un indicateur, pour détecter un croisement)
  *   - onCandle(ctx)               → hook appelé une fois par bougie AVANT
  *                                   shouldEnter/shouldExit (met à jour `state`)
- *   - shouldEnter(ctx)            → bool
- *   - shouldExit(ctx, position)   → { exit: bool, exitPrice?: number }
+ *   - shouldEnter(ctx)            → bool (entrée LONG)
+ *   - shouldExit(ctx, position)   → { exit: bool, exitPrice?: number } (sortie LONG)
+ *   - shouldEnterShort(ctx)              → bool (entrée SHORT — optionnel)
+ *   - shouldExitShort(ctx, position)     → { exit: bool, exitPrice?: number } (sortie SHORT — optionnel)
  *
  * `ctx` = { i, candles, closes, precomputed, params, state }
+ *
+ * Une stratégie qui n'implémente pas shouldEnterShort/shouldExitShort ne
+ * prendra jamais de position SHORT (comportement rétro-compatible) — le
+ * moteur (backtestEngine.service.js) vérifie leur présence avant de les
+ * appeler.
  *
  * Pour ajouter une nouvelle stratégie : dupliquer un des deux blocs
  * ci-dessous, l'ajouter à STRATEGIES, et l'ajouter aussi côté frontend
@@ -33,6 +40,24 @@
  *   restait `false` pour toujours. On distingue maintenant "pas de
  *   donnée volume disponible" (confirmation ignorée) de "volume présent
  *   mais insuffisant" (confirmation appliquée normalement).
+ *
+ * FIX (audit direction — SHORT manquant) :
+ *   Les deux stratégies n'exposaient que la moitié haussière de leur
+ *   logique (shouldEnter/shouldExit LONG uniquement) — buildTradeRecord
+ *   côté backtestEngine.service.js posait `type: 'LONG'` en dur, sans
+ *   aucune condition. Le frontend (Backtester.jsx) a pourtant un style
+ *   dédié pour `tr.type === 'SHORT'` dans le Trade Log, qui n'était
+ *   jamais atteint. Chaque stratégie expose maintenant le pendant
+ *   baissier de sa logique d'entrée/sortie :
+ *     - RSI Momentum Reversion (short) : le pendant symétrique du LONG —
+ *       entrée quand le RSI redescend sous la zone de surachat (momentum
+ *       qui plafonne) alors que le prix est sous l'EMA(200) (tendance
+ *       baissière), sortie sur RSI qui repasse sous la zone de survente
+ *       (retour à la moyenne atteint) ou stop loss (prix qui monte de
+ *       +5% depuis l'entrée — le stop est inversé par rapport au LONG).
+ *     - MACD Crossover (short) : entrée sur croisement baissier
+ *       MACD/Signal alors que le prix est sous l'EMA(200), sortie sur
+ *       croisement haussier ou stop loss (prix qui monte de +5%).
  */
 
 const { calculateRSI } = require('../utils/calculateRSI');
@@ -70,9 +95,11 @@ function computeEMASeries(values, period) {
   return out;
 }
 
-// ── STRATÉGIE 1 : RSI Momentum Reversion (comportement inchangé) ────
-// Entrée : RSI(14) sort de survente + prix > EMA(200) (avec tolérance)
-// Sortie : RSI(14) entre en surachat, OU stop loss -5%
+// ── STRATÉGIE 1 : RSI Momentum Reversion ─────────────────────────────
+// LONG  — Entrée : RSI(14) sort de survente + prix > EMA(200) (avec tolérance)
+//         Sortie : RSI(14) entre en surachat, OU stop loss -5%
+// SHORT — Entrée : RSI(14) sort de surachat + prix < EMA(200) (avec tolérance)
+//         Sortie : RSI(14) entre en survente, OU stop loss +5% (prix qui monte)
 
 const rsiMomentumStrategy = {
   id: 'rsi_momentum',
@@ -136,11 +163,51 @@ const rsiMomentumStrategy = {
     }
     return { exit: false };
   },
+
+  // FIX (audit direction — SHORT) : pendant baissier symétrique du LONG.
+  shouldEnterShort(ctx) {
+    const { i, candles, params, state } = ctx;
+    if (state.rsi == null || state.ema == null) return false;
+
+    const price = candles[i].close;
+    const vol = candles[i].volume || 0;
+
+    // Le momentum plafonne (RSI redescend sous la zone de surachat)
+    // alors que le prix est sous l'EMA(200) (tendance baissière).
+    const rsiCrossDown70 = state.prevRsi !== null && state.prevRsi >= params.rsiOverbought && state.rsi < params.rsiOverbought;
+    const belowEma = price < state.ema * (1 + params.emaTolerancePct / 100);
+
+    const hasVolumeData = state.volAvg > 0;
+    const volSpike = hasVolumeData && vol > state.volAvg * params.volumeMultiplier;
+    const volumeOk = params.requireVolumeConfirmation
+      ? (hasVolumeData ? volSpike : true)
+      : true;
+
+    return rsiCrossDown70 && belowEma && volumeOk;
+  },
+
+  shouldExitShort(ctx, position) {
+    const { i, candles, params, state } = ctx;
+    const price = candles[i].close;
+    // Stop loss inversé par rapport au LONG : une position SHORT perd de
+    // l'argent quand le prix MONTE, donc le stop se déclenche au-dessus
+    // du prix d'entrée.
+    const stopPrice = position.entryPrice * (1 + params.stopLossPct / 100);
+    const rsiCrossDown30 = state.prevRsi !== null && state.prevRsi >= params.rsiOversold && state.rsi < params.rsiOversold;
+    const hitStop = price >= stopPrice;
+
+    if (rsiCrossDown30 || hitStop) {
+      return { exit: true, exitPrice: hitStop ? stopPrice : price };
+    }
+    return { exit: false };
+  },
 };
 
-// ── STRATÉGIE 2 : MACD Crossover (nouvelle) ──────────────────────────
-// Entrée : MACD(12,26) croise au-dessus de sa ligne signal(9) + prix > EMA(200)
-// Sortie : MACD croise en-dessous de sa ligne signal, OU stop loss -5%
+// ── STRATÉGIE 2 : MACD Crossover ─────────────────────────────────────
+// LONG  — Entrée : MACD(12,26) croise au-dessus de sa ligne signal(9) + prix > EMA(200)
+//         Sortie : MACD croise en-dessous de sa ligne signal, OU stop loss -5%
+// SHORT — Entrée : MACD(12,26) croise en-dessous de sa ligne signal(9) + prix < EMA(200)
+//         Sortie : MACD croise au-dessus de sa ligne signal, OU stop loss +5%
 
 const macdCrossoverStrategy = {
   id: 'macd_crossover',
@@ -209,6 +276,40 @@ const macdCrossoverStrategy = {
     const hitStop = price <= stopPrice;
 
     if (bearishCross || hitStop) {
+      return { exit: true, exitPrice: hitStop ? stopPrice : price };
+    }
+    return { exit: false };
+  },
+
+  // FIX (audit direction — SHORT) : pendant baissier symétrique du LONG.
+  shouldEnterShort(ctx) {
+    const { i, candles, precomputed, params } = ctx;
+    const macd = precomputed.macdLine[i], prevMacd = precomputed.macdLine[i - 1];
+    const signal = precomputed.signalLine[i], prevSignal = precomputed.signalLine[i - 1];
+    const trendEma = precomputed.emaTrend[i];
+
+    if (macd == null || signal == null || prevMacd == null || prevSignal == null || trendEma == null) return false;
+
+    const bearishCross = prevMacd >= prevSignal && macd < signal;
+    const price = candles[i].close;
+    const belowTrend = price < trendEma * (1 + params.emaTolerancePct / 100);
+
+    return bearishCross && belowTrend;
+  },
+
+  shouldExitShort(ctx, position) {
+    const { i, candles, precomputed, params } = ctx;
+    const price = candles[i].close;
+    // Stop loss inversé par rapport au LONG (voir rsiMomentumStrategy).
+    const stopPrice = position.entryPrice * (1 + params.stopLossPct / 100);
+
+    const macd = precomputed.macdLine[i], prevMacd = precomputed.macdLine[i - 1];
+    const signal = precomputed.signalLine[i], prevSignal = precomputed.signalLine[i - 1];
+    const bullishCross = macd != null && signal != null && prevMacd != null && prevSignal != null &&
+      prevMacd <= prevSignal && macd > signal;
+    const hitStop = price >= stopPrice;
+
+    if (bullishCross || hitStop) {
       return { exit: true, exitPrice: hitStop ? stopPrice : price };
     }
     return { exit: false };

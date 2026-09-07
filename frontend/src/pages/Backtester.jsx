@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation } from 'react-router-dom';
 import { Line, Bar } from 'react-chartjs-2';
@@ -91,15 +91,36 @@ export default function Backtester() {
   // saisi dans une devise ≠ USD était utilisé tel quel par le backend,
   // comme s'il était déjà dans la bonne devise.
   const [settingsCurrencyCode, setSettingsCurrencyCode] = useState('USD');
+// FIX (race condition) : runBacktest() est appelé automatiquement au mount
+// (voir plus bas). Avant ce fix, cet appel initial capturait
+// settingsCurrencyCode='USD' (valeur par défaut du useState), car le fetch
+// /settings n'avait pas encore résolu — capitalCurrency était donc TOUJOURS
+// 'USD' sur le tout premier run, même si l'utilisateur a MAD/EUR en
+// settings. Un ref est lu à l'exécution (pas de closure figée sur un
+// ancien render), donc runBacktest() lit toujours la valeur la plus
+// récente, y compris lors de l'appel synchrone déclenché juste après le
+// fetch initial.
+const settingsCurrencyCodeRef = useRef('USD');
 
-  useEffect(() => {
+useEffect(() => {
+    let cancelled = false;
     api.get('/settings')
       .then(res => {
         const code = res.data?.settings?.currency || 'USD';
+        if (cancelled) return;
         setSettingsCurrency(SETTINGS_CURRENCY_SYMBOLS[code] || '$');
         setSettingsCurrencyCode(code);
+        settingsCurrencyCodeRef.current = code;
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        // Le premier backtest ne se lance qu'une fois /settings résolu
+        // (succès ou échec) — plus jamais avec 'USD' par défaut alors que
+        // l'utilisateur a une autre devise configurée.
+        if (!cancelled) runBacktest();
+      });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const prefillSymbol = location.state?.prefillSymbol;
@@ -116,6 +137,10 @@ export default function Backtester() {
     posSizeMode: 'fixed_pct',
     posSizeValue: '10',
   });
+
+  const [savedConfigs, setSavedConfigs] = useState([]);
+  const [showConfigList, setShowConfigList] = useState(false);
+  const [savingConfig, setSavingConfig] = useState(false);
 
   const [metrics, setMetrics] = useState({
     totalReturn: '0.0%', sharpe: '0.00', maxDrawdown: '0.0%',
@@ -135,6 +160,17 @@ export default function Backtester() {
     setWarning(null);
     setSkipped(null);
     setProgress(5);
+    // FIX (stale results on error) : sans ça, un backtest qui échoue
+    // (ex: connectionError) laisse les métriques et l'equity curve du
+    // run PRÉCÉDENT affichées à l'écran, comme si c'était le résultat
+    // du run actuel — trompeur. On réinitialise à l'état neutre avant
+    // de lancer le nouveau run.
+    setMetrics({
+      totalReturn: '0.0%', sharpe: '0.00', maxDrawdown: '0.0%',
+      winRate: '0.0%', avgRR: '1:0.0', totalTrades: '0',
+      avgWin: '+0', avgLoss: '-0', avgHold: '0d', quoteCurrency: 'USD'
+    });
+    setBacktestData({ stratData: [], bhData: [], ddData: [], annualReturns: [], trades: [] });
 
     try {
       const progressInterval = setInterval(() => {
@@ -156,7 +192,7 @@ export default function Backtester() {
         // FIX : le backend a besoin de savoir dans quelle devise `capital`
         // et `positionSizeValue` (mode fixed_dollar) sont exprimés, pour
         // pouvoir les convertir vers la devise de chaque symbole.
-        capitalCurrency: settingsCurrencyCode,
+        capitalCurrency: settingsCurrencyCodeRef.current,        
         maxPos: form.maxPos,
         positionSizeMode: form.posSizeMode,
         positionSizeValue: form.posSizeValue,
@@ -192,10 +228,52 @@ export default function Backtester() {
     }
   };
 
-  useEffect(() => {
-    runBacktest();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const loadSavedConfigs = async () => {
+    try {
+      const res = await api.get('/backtest/configs');
+      if (res.data.success) setSavedConfigs(res.data.configs);
+    } catch (err) {
+      console.error('Failed to load saved configs:', err);
+    }
+  };
+
+  const saveCurrentConfig = async () => {
+    const name = window.prompt(t('backtester.configNamePrompt'));
+    if (!name || !name.trim()) return;
+
+    setSavingConfig(true);
+    try {
+      await api.post('/backtest/configs', { name: name.trim(), config: form });
+      await loadSavedConfigs();
+    } catch (err) {
+      console.error('Failed to save config:', err);
+      setError(err.response?.data?.error || t('backtester.genericError'));
+    } finally {
+      setSavingConfig(false);
+    }
+  };
+
+  const applyConfig = (cfg) => {
+    setForm(cfg.config);
+    setShowConfigList(false);
+  };
+
+  const deleteConfig = async (id, e) => {
+    e.stopPropagation();
+    try {
+      await api.delete(`/backtest/configs/${id}`);
+      setSavedConfigs(prev => prev.filter(c => c.id !== id));
+    } catch (err) {
+      console.error('Failed to delete config:', err);
+    }
+  };
+
+  const toggleConfigList = () => {
+    if (!showConfigList) loadSavedConfigs();
+    setShowConfigList(prev => !prev);
+  };
+
+  
 
   const qc = metrics.quoteCurrency || 'USD';
   const selectedStrategy = STRATEGY_OPTIONS.find(s => s.id === form.strategyId) || STRATEGY_OPTIONS[0];
@@ -404,6 +482,8 @@ export default function Backtester() {
             </div>
           )}
 
+          {/* FIX : le bouton "Run Backtest" était dupliqué deux fois de
+              suite (copy-paste) — un seul bouton ici, même onClick. */}
           <button
             onClick={runBacktest}
             disabled={running}
@@ -411,6 +491,41 @@ export default function Backtester() {
           >
             {running ? t('backtester.running', { pct: Math.min(Math.round(progress), 100) }) : t('backtester.runBacktest')}
           </button>
+
+          <div style={{ display: 'flex', gap: 8, marginTop: 8, position: 'relative' }}>
+            <button
+              onClick={saveCurrentConfig}
+              disabled={savingConfig}
+              style={{ flex: 1, padding: 10, background: 'transparent', border: '1px solid var(--border)', color: 'var(--text-muted)', fontSize: 12, fontWeight: 600, fontFamily: 'Syne,sans-serif', letterSpacing: '.05em', borderRadius: 8, cursor: 'pointer', opacity: savingConfig ? .6 : 1 }}
+            >
+              {t('backtester.saveConfig')}
+            </button>
+            <button
+              onClick={toggleConfigList}
+              style={{ flex: 1, padding: 10, background: 'transparent', border: '1px solid var(--border)', color: 'var(--text-muted)', fontSize: 12, fontWeight: 600, fontFamily: 'Syne,sans-serif', letterSpacing: '.05em', borderRadius: 8, cursor: 'pointer' }}
+            >
+              {t('backtester.loadConfig')}
+            </button>
+
+            {showConfigList && (
+              <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, marginTop: 6, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, maxHeight: 220, overflowY: 'auto', zIndex: 20 }}>
+                {savedConfigs.length === 0 ? (
+                  <div style={{ padding: 12, fontSize: 12, color: 'var(--text-muted)' }}>{t('backtester.noSavedConfigs')}</div>
+                ) : (
+                  savedConfigs.map(cfg => (
+                    <div
+                      key={cfg.id}
+                      onClick={() => applyConfig(cfg)}
+                      style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '9px 12px', fontSize: 12, color: 'var(--text)', cursor: 'pointer', borderBottom: '1px solid var(--border)' }}
+                    >
+                      <span>{cfg.name}</span>
+                      <span onClick={(e) => deleteConfig(cfg.id, e)} style={{ color: 'var(--red)', cursor: 'pointer', padding: '0 4px' }}>×</span>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>

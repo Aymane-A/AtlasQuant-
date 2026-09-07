@@ -202,9 +202,19 @@ async function addSymbol(req, res) {
         const { symbol } = req.body;
         if (!symbol) return res.status(400).json({ success: false, error: 'Symbol required' });
 
-        // Normalize before storing so forex/commodity symbols are
-        // saved consistently (e.g. always "EUR/USD", not "EURUSD").
         const cleanSymbol = normalizeForexSymbol(symbol.toUpperCase().trim());
+        const baseSymbol   = toBaseSymbol(cleanSymbol);
+
+        // ── Validate the symbol actually resolves to a real quote ──
+        const livePrices = await getLivePrices([baseSymbol]);
+        const priceData  = livePrices[baseSymbol];
+
+        if (!priceData || !priceData.price) {
+            return res.status(400).json({
+                success: false,
+                error: `"${symbol}" n'est pas un symbole reconnu (Crypto/Forex/Commodity)`,
+            });
+        }
 
         await db.query(
             'INSERT INTO watchlist (user_id, symbol) VALUES ($1, $2) ON CONFLICT DO NOTHING',

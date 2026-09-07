@@ -161,12 +161,15 @@ async function getAlphaEngineData(req, res) {
       WHERE created_at >= NOW() - INTERVAL '24 hours'
     `, [confThresh]);
 
+    // ✅ M3EWED — nafs threshold (75%) li kayn f signalAlert.service.js
+    // bach ykon coherent m3a "high-confidence" f l'app kaملها, w khass ykono
+    // deux counters kayحسبو nafs population (directional signals biss)
     const { rows: [monthRow] } = await db.query(`
       SELECT
-        COUNT(*) FILTER (WHERE signal != 'HOLD') AS directional_30d,
-        COUNT(*) FILTER (WHERE confidence >= 70)  AS high_conf_30d,
-        ROUND(AVG(confidence)::numeric, 1)        AS avg_conf_30d,
-        COUNT(DISTINCT symbol)                    AS symbols_scanned
+        COUNT(*) FILTER (WHERE signal != 'HOLD')                          AS directional_30d,
+        COUNT(*) FILTER (WHERE signal != 'HOLD' AND confidence >= 75)     AS high_conf_30d,
+        ROUND(AVG(confidence)::numeric, 1)                                AS avg_conf_30d,
+        COUNT(DISTINCT symbol)                                            AS symbols_scanned
       FROM signals
       WHERE created_at >= NOW() - INTERVAL '30 days'
     `);
@@ -278,6 +281,7 @@ async function getAlphaEngineData(req, res) {
       winRateProxy,
       symbolsScanned:    parseInt(monthRow.symbols_scanned, 10) || 0,
       nextRetrain:       nextRetrainStr,
+      lastSignalAt:      kpiRow.last_signal_at,
       assetClasses:      assetRows,
     };
 

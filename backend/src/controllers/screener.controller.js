@@ -32,7 +32,7 @@ async function savePreset(req, res) {
     const { rows: [preset] } = await db.query(
       `INSERT INTO screener_presets (user_id, name, asset_type, filters)
        VALUES ($1, $2, $3, $4) RETURNING id, name, asset_type, filters, created_at`,
-      [req.user.id, name.trim().slice(0, 100), assetType || 'crypto', JSON.stringify(filters)]
+      [req.user.id, name.trim().slice(0, 100), assetType || 'All', JSON.stringify(filters)]
     );
     res.json({ success: true, preset });
   } catch (err) {

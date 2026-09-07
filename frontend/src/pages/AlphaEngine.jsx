@@ -66,27 +66,37 @@ function KpiCard({ label, value, sub, color, loading }) {
 }
 
 // ── Signal Pipeline ───────────────────────────────────────
-function Pipeline({ running }) {
+function Pipeline({ running, lastSignalAt }) {
+  const minsAgo = lastSignalAt
+    ? Math.floor((Date.now() - new Date(lastSignalAt).getTime()) / 60000)
+    : Infinity;
+  const isActive = running && minsAgo < 5;
+
   return (
     <div style={{ ...panel }}>
-      <Label style={{ marginBottom:14 }}>Signal Generation Pipeline</Label>
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:14 }}>
+        <Label>Signal Generation Pipeline</Label>
+        <span style={{ ...mono, fontSize:9, color: isActive ? T.cyan : T.slate }}>
+          {isActive ? `last signal ${minsAgo}m ago` : running ? 'idle — waiting for next scan' : 'paused'}
+        </span>
+      </div>
       <div style={{ display:'flex', alignItems:'center', overflowX:'auto', gap:0, padding:'4px 0' }}>
         {PIPELINE.map((step, i) => (
           <div key={step} style={{ display:'flex', alignItems:'center', flexShrink:0 }}>
             <div className="aq-pipe-node" style={{
               width:108, padding:'11px 12px', textAlign:'center', borderRadius:10,
-              border:`1px solid ${running ? 'rgba(0,245,212,0.35)' : 'rgba(100,116,139,0.3)'}`,
-              background: running ? 'rgba(0,245,212,0.06)' : 'rgba(255,255,255,0.02)',
+              border:`1px solid ${isActive ? 'rgba(0,245,212,0.35)' : 'rgba(100,116,139,0.3)'}`,
+              background: isActive ? 'rgba(0,245,212,0.06)' : 'rgba(255,255,255,0.02)',
             }}>
-              <div style={{ ...mono, fontSize:11, fontWeight:700, color: running ? 'var(--text)' : T.slate }}>{step}</div>
-              <div style={{ ...mono, fontSize:9, color: running ? T.cyan : T.slate, marginTop:4 }}>
-                {running ? 'active' : 'paused'}
+              <div style={{ ...mono, fontSize:11, fontWeight:700, color: isActive ? 'var(--text)' : T.slate }}>{step}</div>
+              <div style={{ ...mono, fontSize:9, color: isActive ? T.cyan : T.slate, marginTop:4 }}>
+                {isActive ? 'active' : running ? 'idle' : 'paused'}
               </div>
             </div>
             {i < PIPELINE.length - 1 && (
               <div style={{
                 width:24, height:2, flexShrink:0,
-                background: running
+                background: isActive
                   ? 'linear-gradient(90deg, rgba(0,245,212,0.2), rgba(0,245,212,0.7))'
                   : 'rgba(100,116,139,0.2)',
               }}/>
@@ -499,7 +509,7 @@ export default function AlphaEngine() {
       </div>
 
       {/* ── Pipeline ── */}
-      <Pipeline running={running} />
+      <Pipeline running={running} lastSignalAt={stats.lastSignalAt} />
 
       {/* ── Asset class breakdown ── */}
       {stats.assetClasses?.length > 0 && (

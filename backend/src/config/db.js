@@ -125,7 +125,7 @@ async function migrate() {
       closed_at   TIMESTAMPTZ
     );
 
-    CREATE TABLE IF NOT EXISTS backtest_history (
+        CREATE TABLE IF NOT EXISTS backtest_history (
       id          SERIAL PRIMARY KEY,
       user_id     INTEGER REFERENCES users(id) ON DELETE CASCADE,
       symbol      TEXT    NOT NULL,
@@ -135,6 +135,21 @@ async function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_backtest_user ON backtest_history(user_id);
 
+    -- Presets de configuration de backtest sauvegardés par l'utilisateur
+    -- (universe, dates, stratégie, sizing...) — distinct de
+    -- backtest_history qui stocke les RÉSULTATS d'un run déjà exécuté.
+    -- Ici on stocke uniquement les paramètres d'entrée, pour pouvoir les
+    -- recharger dans le formulaire sans ré-exécuter quoi que ce soit.
+    CREATE TABLE IF NOT EXISTS backtest_configs (
+      id          SERIAL PRIMARY KEY,
+      user_id     INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      name        TEXT    NOT NULL,
+      config      JSONB   NOT NULL,
+      created_at  TIMESTAMPTZ DEFAULT NOW(),
+      updated_at  TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_backtest_configs_user ON backtest_configs(user_id);
+    
     -- ✅ Fix: 'notifications' créée directement en JSONB (au lieu de BOOLEAN).
     -- settings.controller.js y stocke un objet {email_alerts, push_alerts,
     -- price_alerts} depuis le début — BOOLEAN cassait toute écriture/lecture

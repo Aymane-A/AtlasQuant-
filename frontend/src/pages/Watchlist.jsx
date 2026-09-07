@@ -275,6 +275,7 @@ export default function Watchlist() {
     return sortBy === 'change-desc' ? sorted.reverse() : sorted;
   }, [stocks, sortBy]);
 
+  
   const addSymbol = async () => {
     if (!input.trim()) return;
     setAdding(true);
@@ -283,8 +284,10 @@ export default function Watchlist() {
       setInput('');
       setShowAdd(false);
       fetchWatchlist();
+      setToast({ message: `${input.trim().toUpperCase()} added to watchlist`, type: 'success' });
     } catch (err) {
       console.error('Add error:', err);
+      setToast({ message: err.response?.data?.error || 'Failed to add symbol', type: 'error' });
     } finally {
       setAdding(false);
     }
@@ -294,8 +297,10 @@ export default function Watchlist() {
     try {
       await api.delete(`/watchlist/${encodeURIComponent(sym)}`);
       fetchWatchlist();
+      setToast({ message: `${sym} removed from watchlist`, type: 'success' });
     } catch (err) {
       console.error('Remove error:', err);
+      setToast({ message: err.response?.data?.error || 'Failed to remove symbol', type: 'error' });
     }
   };
 
@@ -552,9 +557,9 @@ export default function Watchlist() {
                       {up ? '▲' : '▼'} {Math.abs(s.change || 0).toFixed(2)}%
                     </td>
                     <td style={{ padding:'14px 18px', fontSize:11, fontFamily:'JetBrains Mono,monospace' }}>
-                      <span style={{ color:'var(--green)' }}>{s.high24h ? `$${parseFloat(s.high24h).toFixed(2)}` : '—'}</span>
+                      <span style={{ color:'var(--green)' }}>{s.high24h ? `$${parseFloat(s.high24h).toLocaleString('en-US',{maximumFractionDigits:4})}` : '—'}</span>
                       <span style={{ color:'var(--text-muted)', margin:'0 4px' }}>/</span>
-                      <span style={{ color:'var(--red)' }}>{s.low24h ? `$${parseFloat(s.low24h).toFixed(2)}` : '—'}</span>
+                      <span style={{ color:'var(--red)' }}>{s.low24h ? `$${parseFloat(s.low24h).toLocaleString('en-US',{maximumFractionDigits:4})}` : '—'}</span>
                     </td>
                     <td style={{ padding:'14px 18px', fontSize:11, fontFamily:'JetBrains Mono,monospace', color:'var(--text-secondary)' }}>
                       {s.volume || '—'}
