@@ -75,6 +75,15 @@ function resetBinanceExchange() {
 const isTimestampError = (err) =>
   /timestamp/i.test(err?.message || "") || err?.message?.includes("-1021");
 
+// FIX (crypto historical fetch) : mapping timeframe interne → durée en
+// ms, utilisé pour avancer `since` d'une page à l'autre sans re-fetcher
+// la dernière bougie déjà récupérée.
+const TIMEFRAME_MS = {
+  "1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000,
+  "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000, "6h": 21_600_000,
+  "8h": 28_800_000, "12h": 43_200_000, "1d": 86_400_000, "1w": 604_800_000,
+};
+
 // ── 1. BINANCE (Crypto) ─────────────────────────────────────
 const fetchOHLCV = async (symbol = "BTC/USDT", timeframe = "1h", limit = 200) => {
   try {
@@ -88,6 +97,51 @@ const fetchOHLCV = async (symbol = "BTC/USDT", timeframe = "1h", limit = 200) =>
     return candles;
   } catch (error) {
     logger.error(`❌ Binance fetchOHLCV error: ${error.message}`);
+    if (isTimestampError(error)) resetBinanceExchange();
+    return [];
+  }
+};
+
+/**
+ * FIX (crypto historical fetch) : `fetchOHLCV` récupère seulement les N
+ * dernières bougies à partir de MAINTENANT (ccxt sans `since`), quelle
+ * que soit la période demandée. `fetchOHLCVRange` pagine avec
+ * `since`/`until` explicites pour couvrir réellement la période.
+ */
+const fetchOHLCVRange = async (symbol = "BTC/USDT", timeframe = "1h", sinceMs, untilMs, pageLimit = 1000) => {
+  try {
+    const exchange = await getBinanceExchange();
+    const tfMs = TIMEFRAME_MS[timeframe] || 3_600_000;
+    const until = untilMs ?? Date.now();
+    let since = sinceMs;
+    const all = [];
+    const MAX_PAGES = 200;
+
+    let page = 0;
+    while (since <= until && page < MAX_PAGES) {
+      const raw = await exchange.fetchOHLCV(symbol, timeframe, since, pageLimit);
+      if (!raw || raw.length === 0) break;
+
+      let progressed = false;
+      for (const [timestamp, open, high, low, close, volume] of raw) {
+        if (timestamp > until) continue;
+        all.push({ timestamp, open, high, low, close, volume, date: new Date(timestamp).toISOString() });
+        progressed = true;
+      }
+
+      const lastTs = raw[raw.length - 1][0];
+      if (lastTs < since) break;
+      since = lastTs + tfMs;
+      page++;
+      if (!progressed && lastTs > until) break;
+    }
+
+    logger.info(
+      `📊 ${symbol} (${timeframe}) — ${all.length} candles fetched from ${new Date(sinceMs).toISOString().slice(0, 10)} to ${new Date(until).toISOString().slice(0, 10)}`
+    );
+    return all;
+  } catch (error) {
+    logger.error(`❌ Binance fetchOHLCVRange error: ${error.message}`);
     if (isTimestampError(error)) resetBinanceExchange();
     return [];
   }
@@ -153,6 +207,15 @@ const toRawSymbol = (symbol = "BTC/USDT") => symbol.replace("/", "");
 
 const getCandles = async (symbol = "BTCUSDT", interval = "1h", limit = 200) => {
   return fetchOHLCV(toExchangeSymbol(symbol), interval, limit);
+};
+
+/**
+ * FIX (crypto historical fetch) : variante de getCandles() qui couvre
+ * une fenêtre explicite sinceMs/untilMs (pagination), à utiliser pour
+ * tout besoin de données historiques (ex: backtestMarketRouter.service.js).
+ */
+const getCandlesRange = async (symbol = "BTCUSDT", interval = "1h", sinceMs, untilMs) => {
+  return fetchOHLCVRange(toExchangeSymbol(symbol), interval, sinceMs, untilMs);
 };
 
 const get24hrStats = async (symbol = "BTCUSDT") => {
@@ -550,8 +613,8 @@ const fetchAllMarkets = async () => {
 
 
 module.exports = {
-  getCandles, get24hrStats, getMultiplePrices,
-  fetchOHLCV, fetchTicker, fetchMultipleTickers,
+  getCandles, getCandlesRange, get24hrStats, getMultiplePrices,
+  fetchOHLCV, fetchOHLCVRange, fetchTicker, fetchMultipleTickers,
   fetchLowCapGems, fetchGlobalMarket,
   fetchTrendingCMC, fetchFearGreedIndex,
   fetchBitcoinOnChain, fetchAllMarkets,

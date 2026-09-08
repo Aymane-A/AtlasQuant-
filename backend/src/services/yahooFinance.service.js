@@ -134,15 +134,19 @@ function calcRiskLevels(price, candles, signal) {
 // before, which caused the "generateReasoning is not a function" crash
 // whenever ai.service export names drifted, and added ~15s latency per
 // symbol during the batch scan.
+// ✅ M3EWED — nafs fix li dert f signalGenerator.service.js (confidence
+// kaحسب من الفارق المطلق bull-bear, machi النسبة — indicator وحيد ماشي
+// كافي بحال 5 indicators متفقين bqowa)
 function buildLocalSignal(display, price, indicators, bull, bear) {
+  const diff       = bull - bear;
   const total      = bull + bear;
-  const bullPct    = total > 0 ? bull / total : 0.5;
-  const confidence = Math.min(Math.round(50 + Math.abs(bullPct - 0.5) * 80), 95);
+  const strength   = total > 0 ? Math.min(Math.abs(diff) / 6, 1) : 0;
+  const confidence = Math.min(Math.round(50 + strength * 45), 95);
 
   let signal;
-  if      (bull > bear + 2) signal = 'BUY';
-  else if (bear > bull + 2) signal = 'SELL';
-  else                      signal = 'HOLD';
+  if      (diff > 2)  signal = 'BUY';
+  else if (diff < -2) signal = 'SELL';
+  else                 signal = 'HOLD';
 
   // Reasoning built from indicators — same pattern as signalGenerator.service.js
   const { rsi, macd, ema, bollinger, fibonacci } = indicators;

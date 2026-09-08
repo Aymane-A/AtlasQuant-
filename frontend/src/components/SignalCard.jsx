@@ -27,7 +27,7 @@ const smartPrice = (p) => {
   return '$' + n.toFixed(10);
 };
 
-export default function SignalCard({ signal: s }) {
+export default function SignalCard({ signal: s, onAddToWatchlist, isWatchlisted, onOpenDetail }) {
   if (!s) return null;
   const color = COLOR[s.signal] || 'var(--text-secondary)';
 
@@ -44,16 +44,33 @@ export default function SignalCard({ signal: s }) {
   const classLabel  = CLASS_LABEL[assetClass] || assetClass.toUpperCase();
 
   return (
-    <div style={{
-      background: 'var(--surface)', border: '1px solid var(--border)',
-      borderRadius: 12, padding: 16, transition: 'all .25s',
-      position: 'relative', overflow: 'hidden',
-      borderTop: `2px solid ${color}`,
-    }}>
+    <div
+      onClick={() => onOpenDetail && onOpenDetail()}
+      style={{
+        background: 'var(--surface)', border: '1px solid var(--border)',
+        borderRadius: 12, padding: 16, transition: 'all .25s',
+        position: 'relative', overflow: 'hidden',
+        borderTop: `2px solid ${color}`,
+        cursor: onOpenDetail ? 'pointer' : 'default',
+      }}
+    >
       {/* Header */}
       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:8 }}>
         <div style={{ display:'flex', alignItems:'center', gap:8 }}>
           <span style={{ fontSize:16, fontWeight:700, letterSpacing:'.05em' }}>{s.symbol}</span>
+          {onAddToWatchlist && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onAddToWatchlist(s.symbol); }}
+              title={isWatchlisted ? 'In watchlist' : 'Add to watchlist'}
+              style={{
+                background:'transparent', border:'none', cursor:'pointer',
+                color: isWatchlisted ? 'var(--amber)' : 'var(--text-muted)',
+                fontSize:14, padding:2, lineHeight:1,
+              }}
+            >
+              {isWatchlisted ? '★' : '☆'}
+            </button>
+          )}
         </div>
         <span style={{ fontSize:10, fontFamily:'JetBrains Mono,monospace', padding:'3px 8px', borderRadius:4, fontWeight:600, letterSpacing:'.1em', background: BG[s.signal], color }}>
           {s.signal}

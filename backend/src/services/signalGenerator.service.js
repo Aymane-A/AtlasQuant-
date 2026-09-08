@@ -80,14 +80,15 @@ function calcRiskLevels(price, candles, signal) {
 // ── Local reasoning (no Groq) ─────────────────────────────
 // Same shape as buildLocalSignal() in yahooFinance.service.js.
 function buildLocalSignal(display, price, indicators, bull, bear) {
+  const diff       = bull - bear;
   const total      = bull + bear;
-  const bullPct    = total > 0 ? bull / total : 0.5;
-  const confidence = Math.min(Math.round(50 + Math.abs(bullPct - 0.5) * 80), 95);
+  const strength   = total > 0 ? Math.min(Math.abs(diff) / 6, 1) : 0;
+  const confidence = Math.min(Math.round(50 + strength * 45), 95);
 
   let signal;
-  if      (bull > bear + 2) signal = 'BUY';
-  else if (bear > bull + 2) signal = 'SELL';
-  else                      signal = 'HOLD';
+  if      (diff > 2)  signal = 'BUY';
+  else if (diff < -2) signal = 'SELL';
+  else                 signal = 'HOLD';
 
   const { rsi, macd, ema, bollinger, fibonacci } = indicators;
   const parts = [];

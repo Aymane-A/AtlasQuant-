@@ -50,7 +50,7 @@
  */
 
 const logger = require('../utils/logger');
-const { getCandles } = require('./marketData.service');
+const { getCandlesRange } = require('./marketData.service');
 const { getStockCandles } = require('./yahooFinance.service');
 
 // Devises fiat connues — utilisées pour distinguer forex ("EUR/USD") de
@@ -317,35 +317,19 @@ async function fetchCandlesForBacktest(symbol, timeframe, startDate, endDate) {
     const binanceSymbol = toBinanceSymbol(symbol);
     logger.info(`[backtestMarketRouter] ${symbol} détecté comme crypto → Binance (${binanceSymbol})`);
 
-    const interval = toBinanceInterval(timeframe);
-    const candleCount = estimateCandleCount(timeframe, startDate, endDate);
-    const candles = await getCandles(binanceSymbol, interval, candleCount);
-
-    if (!candles || candles.length === 0) {
-      throw new Error(`Aucune donnée Binance pour ${symbol}`);
-    }
-
+        const interval = toBinanceInterval(timeframe);
     const start = new Date(startDate).getTime();
     const end = new Date(endDate).getTime();
-    const filtered = candles.filter(c => {
-      const t = new Date(c.date).getTime();
-      return t >= start && t <= end;
-    });
+    const candles = await getCandlesRange(binanceSymbol, interval, start, end);
 
-    // FIX : avant, on retombait silencieusement sur `candles` (non filtré)
-    // si `filtered` était vide, ce qui faisait tourner le backtest sur une
-    // période complètement différente de celle demandée sans prévenir
-    // l'utilisateur. Désormais on échoue explicitement — le symbole
-    // apparaît dans `skipped` avec la vraie raison.
-    if (filtered.length === 0) {
+    if (!candles || candles.length === 0) {
       throw new Error(
-        `Aucune donnée Binance pour ${symbol} sur la période demandée (${startDate} → ${endDate}). ` +
-        `Les ${candles.length} bougies récupérées ne couvrent pas cet intervalle.`
+        `Aucune donnée Binance pour ${symbol} sur la période demandée (${startDate} → ${endDate}).`
       );
     }
 
     return {
-      candles: filtered.map(normalizeCryptoCandle),
+      candles: candles.map(normalizeCryptoCandle),
       effectiveTimeframe: timeframe,
       fallbackApplied: false,
       assetClass,
