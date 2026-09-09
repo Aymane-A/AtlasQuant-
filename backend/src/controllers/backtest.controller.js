@@ -25,8 +25,29 @@
  *   Sauvegarde/chargement de presets de config (universe, dates,
  *   stratégie, sizing...) — ne lance pas de backtest, stocke juste les
  *   paramètres du formulaire pour un rechargement ultérieur.
+ *
+ * FIX (Auto-Trader gating) :
+ *   Chaque backtest calcule maintenant des métadonnées de "gating" utilisées
+ *   par autoTrader.service.js pour décider si un symbole/stratégie peut
+ *   passer en auto-trade :
+ *     - `params_hash` : hash canonique des paramètres RÉELLEMENT utilisés
+ *       par runSimulation (strategyId, maxPositions, position sizing). Un
+ *       auto_trade_config n'est valide que pour un backtest ayant le MÊME
+ *       hash — changer un paramètre de stratégie invalide le gate.
+ *     - `gate_eligible` : un backtest n'est éligible au gating QUE s'il
+ *       porte sur un SEUL symbole. Un backtest multi-symbole (portefeuille)
+ *       reste valide et consultable normalement, mais ne peut jamais
+ *       débloquer l'auto-trade — l'expectancy/Sharpe d'un portefeuille ne
+ *       reflète pas la performance d'un symbole individuel.
+ *     - `expires_at` = end_date + 30 jours. Passé ce délai, le backtest est
+ *       considéré périmé par le gate (le marché a pu changer de régime) —
+ *       voir isWithinFreshnessWindow() dans autoTrader.service.js.
+ *     - `expectancy` : espérance de gain par trade en devise de cotation,
+ *       calculée classiquement (winRate*avgWin - (1-winRate)*avgLoss) à
+ *       partir des metrics déjà produites par runSimulation.
  */
 
+const crypto = require('crypto');
 const db = require('../config/db');
 const logger = require('../utils/logger');
 const { fetchCandlesForBacktest, convertAmount } = require('../services/backtestMarketRouter.service');
@@ -34,6 +55,7 @@ const { runSimulation, aggregatePortfolio } = require('../services/backtestEngin
 const { listStrategies } = require('../services/backtestStrategies.service');
 
 const MAX_SYMBOLS = 8;
+const GATE_FRESHNESS_DAYS = 30;
 
 function parseCapital(raw) {
   if (typeof raw === 'number') return raw;
@@ -96,6 +118,45 @@ function buildWarningMessage(requestedTimeframe, succeeded, skipped) {
   }
 
   return messages.length > 0 ? messages.join(' ') : undefined;
+}
+
+/**
+ * Hash canonique des paramètres qui déterminent RÉELLEMENT le comportement
+ * de runSimulation pour ce backtest — pas tout req.body (des champs comme
+ * `capital` ou `capitalCurrency` sont des montants d'argent, pas des
+ * paramètres de stratégie ; deux backtests avec un capital différent mais
+ * les mêmes règles d'entrée/sortie doivent produire le MÊME hash).
+ *
+ * Utilisé par auto_trade_configs.params_hash : un config d'auto-trade n'est
+ * valide que pour un backtest ayant exactement ce hash — si l'utilisateur
+ * change strategyId, maxPositions, ou le mode/valeur de position sizing,
+ * le gate doit redemander un nouveau backtest.
+ */
+function computeParamsHash({ strategyId, maxPositions, positionSizeMode, positionSizeValue }) {
+  const canonical = {
+    strategyId: strategyId || 'rsi_momentum',
+    maxPositions: parseInt(maxPositions, 10) || 5,
+    positionSizeMode: positionSizeMode || 'fixed_pct',
+    // Valeur brute (avant conversion devise) — la conversion dépend de la
+    // devise de cotation du symbole tradé en LIVE, qui peut différer de
+    // celle utilisée pendant le backtest ; ce n'est pas un paramètre de
+    // stratégie, donc elle ne doit pas invalider le hash.
+    positionSizeValue: positionSizeValue != null ? String(positionSizeValue) : null,
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
+
+/**
+ * Espérance de gain par trade (devise de cotation), à partir des metrics
+ * déjà calculées par runSimulation/aggregatePortfolio. Retourne null si les
+ * champs nécessaires sont absents ou non numériques (ex: 0 trade exécuté).
+ */
+function computeExpectancy(metrics) {
+  const winRate = parseFloat(metrics.winRate) / 100;
+  const avgWin = parseFloat(metrics.avgWin);
+  const avgLoss = Math.abs(parseFloat(metrics.avgLoss));
+  if (!Number.isFinite(winRate) || !Number.isFinite(avgWin) || !Number.isFinite(avgLoss)) return null;
+  return parseFloat((winRate * avgWin - (1 - winRate) * avgLoss).toFixed(2));
 }
 
 async function runBacktest(req, res) {
@@ -230,15 +291,46 @@ async function runBacktest(req, res) {
       .filter(Boolean);
     const warning = warningParts.length > 0 ? warningParts.join(' ') : undefined;
 
+    // ── Auto-Trader gating metadata ──
+    // Éligible uniquement si le backtest porte sur UN SEUL symbole (voir
+    // commentaire en tête de fichier) — un backtest multi-symbole reste
+    // stocké et consultable normalement, mais gate_eligible=false.
+    const gateEligible = symbols.length === 1 && skipped.length === 0;
+    const paramsHash = computeParamsHash({
+      strategyId: requestedStrategyId,
+      maxPositions: maxPos,
+      positionSizeMode: req.body.positionSizeMode,
+      positionSizeValue: req.body.positionSizeValue,
+    });
+    const expiresAt = new Date(to);
+    expiresAt.setDate(expiresAt.getDate() + GATE_FRESHNESS_DAYS);
+    const totalTrades = parseInt(metrics.totalTrades, 10) || 0;
+    const expectancy = computeExpectancy(metrics);
+    const sharpe = parseFloat(metrics.sharpe);
+
     // `warning` et `skipped` sont inclus dans le blob stocké, sinon
     // relire un backtest via getBacktestById() perd ces infos (fallback
     // Daily appliqué, symboles skippés, univers tronqué...) — visibles
     // seulement au moment du run live sinon.
     const strategyName = name || strategyMeta.label;
     const { rows } = await db.query(
-      `INSERT INTO backtest_history (user_id, symbol, strategy, result, created_at)
-       VALUES ($1, $2, $3, $4, NOW()) RETURNING id`,
-      [userId, symbols.join(','), strategyName, JSON.stringify({ metrics, charts, trades, warning, skipped })]
+      `INSERT INTO backtest_history
+         (user_id, symbol, strategy, result, params, params_hash, start_date, end_date,
+          expires_at, total_trades, expectancy, sharpe, gate_eligible, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())
+       RETURNING id`,
+      [
+        userId, symbols.join(','), strategyName,
+        JSON.stringify({ metrics, charts, trades, warning, skipped }),
+        JSON.stringify({
+          strategyId: requestedStrategyId,
+          maxPositions: parseInt(maxPos) || 5,
+          positionSizeMode: req.body.positionSizeMode,
+          positionSizeValue: req.body.positionSizeValue,
+        }),
+        paramsHash, from, to, expiresAt.toISOString(),
+        totalTrades, expectancy, Number.isFinite(sharpe) ? sharpe : null, gateEligible,
+      ]
     );
 
     logger.info(`[Backtest] Terminé — ${trades.length} trades (last 10), return ${metrics.totalReturn}, ${skipped.length} symbole(s) skippé(s)`);
@@ -252,6 +344,7 @@ async function runBacktest(req, res) {
       trades,
       warning,
       skipped: skipped.length > 0 ? skipped : undefined,
+      gateEligible,
     });
 
   } catch (err) {
@@ -269,7 +362,8 @@ async function getBacktestById(req, res) {
     const { id } = req.params;
 
     const { rows } = await db.query(
-      `SELECT id, symbol, strategy, result, created_at
+      `SELECT id, symbol, strategy, result, params_hash, start_date, end_date,
+              expires_at, total_trades, expectancy, sharpe, gate_eligible, created_at
        FROM backtest_history WHERE id = $1 AND user_id = $2`,
       [id, userId]
     );
@@ -292,6 +386,10 @@ async function getBacktestById(req, res) {
       trades: result.trades,
       warning: result.warning,
       skipped: result.skipped,
+      gateEligible: record.gate_eligible,
+      expiresAt: record.expires_at,
+      expectancy: record.expectancy,
+      sharpe: record.sharpe,
     });
   } catch (err) {
     logger.error(`[backtest.controller] getBacktestById error: ${err.message}`);
@@ -301,8 +399,8 @@ async function getBacktestById(req, res) {
 
 /**
  * Sauvegarde un preset de config (universe, dates, stratégie, sizing...)
- * — ne lance PAS de backtest, stocke juste les paramètres tels quels
- * pour un rechargement ultérieur dans le formulaire.
+ * — ne lance PAS de backtest, stocke juste les paramètres du formulaire
+ * pour un rechargement ultérieur.
  */
 async function saveBacktestConfig(req, res) {
   try {

@@ -71,6 +71,12 @@ async function getDashboardData(req, res) {
       return sum + parseFloat(p.amount) * price;
     }, 0);
 
+    // ⚠️ NOT FIXED YET — possible double-count. If cash_balance is
+    // already credited/debited with realized P&L whenever a trade
+    // closes (need to confirm in the trade-close controller), then
+    // adding totalPnl again here double-counts every realized gain/loss
+    // into portfolioValue. Flagged, not changed, until trade-close flow
+    // is reviewed.
     const portfolioValue = cash + marketValue + totalPnl;
 
     // ── 2. Equity curve from real snapshots (last 30 days) ─
@@ -115,6 +121,7 @@ async function getDashboardData(req, res) {
     let volumeChart = volRows.map((r, i) => ({
       index:  i,
       day:    r.day,
+      dow:    r.dow,
       volume: parseInt(r.volume) || 0,
     }));
 
@@ -130,9 +137,15 @@ async function getDashboardData(req, res) {
         GROUP BY day, dow
         ORDER BY dow
       `);
+      // ✅ Fix #6 (fallback branch) — dow was missing here even though
+      // it was added to the trades branch above. Frontend keys off
+      // item.dow to pick the correct day label; without it, new users
+      // with no trades yet (who always hit this fallback) got mislabeled
+      // bars.
       volumeChart = sigVol.map((r, i) => ({
         index:  i,
         day:    r.day,
+        dow:    r.dow,
         volume: parseInt(r.volume) || 0,
       }));
     }

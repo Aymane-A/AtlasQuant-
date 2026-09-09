@@ -140,7 +140,31 @@ const DEFAULT_PARAMS = {
   quoteCurrency: 'USD',
 };
 
-function calculateSharpe(returns, periodsPerYear = 252) {
+/**
+ * Déduit periodsPerYear directement des dates réelles des candles
+ * (médiane de l'écart entre dates consécutives), au lieu d'une valeur
+ * fixe (252) ou d'une table de correspondance timeframe/assetClass —
+ * fonctionne correctement quel que soit le timeframe (Daily/4H/1H/15M)
+ * et quel que soit l'asset (crypto 24/7, equity avec weekends fermés,
+ * forex...), puisque le calcul part de l'espacement RÉEL des données,
+ * pas d'une hypothèse codée en dur.
+ */
+function inferPeriodsPerYear(dates) {
+  if (!dates || dates.length < 2) return 252; // fallback minimal, données insuffisantes pour inférer
+  const gaps = [];
+  for (let i = 1; i < dates.length; i++) {
+    const gap = new Date(dates[i]).getTime() - new Date(dates[i - 1]).getTime();
+    if (gap > 0) gaps.push(gap);
+  }
+  if (gaps.length === 0) return 252;
+  gaps.sort((a, b) => a - b);
+  const mid = Math.floor(gaps.length / 2);
+  const medianGapMs = gaps.length % 2 ? gaps[mid] : (gaps[mid - 1] + gaps[mid]) / 2;
+  const msPerYear = 365.25 * 24 * 60 * 60 * 1000;
+  return medianGapMs > 0 ? msPerYear / medianGapMs : 252;
+}
+
+function calculateSharpe(returns, periodsPerYear) {
   if (returns.length < 2) return 0;
   const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
   const variance = returns.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / returns.length;
@@ -428,7 +452,7 @@ function runSimulation(candles, initialCapital = 100000, userParams = {}, symbol
 
   const metrics = {
     totalReturn: `${totalReturnPct >= 0 ? '+' : ''}${totalReturnPct.toFixed(1)}%`,
-    sharpe: calculateSharpe(periodReturns).toFixed(2),
+    sharpe: calculateSharpe(periodReturns, inferPeriodsPerYear(equityDates)).toFixed(2),
     maxDrawdown: `-${calculateMaxDrawdown(equityCurve).toFixed(1)}%`,
     winRate: `${winRate.toFixed(1)}%`,
     avgRR: `1:${avgRRRatio.toFixed(1)}`,
@@ -590,7 +614,7 @@ async function aggregatePortfolio(perSymbolResults, initialCapitalTotal, targetC
   return {
     metrics: {
       totalReturn: `${totalReturnPct >= 0 ? '+' : ''}${totalReturnPct.toFixed(1)}%`,
-      sharpe: calculateSharpe(periodReturns).toFixed(2),
+      sharpe: calculateSharpe(periodReturns, inferPeriodsPerYear(mergedDates)).toFixed(2),
       maxDrawdown: `-${calculateMaxDrawdown(stratData).toFixed(1)}%`,
       winRate: `${winRate.toFixed(1)}%`,
       avgRR: `1:${avgRRRatio.toFixed(1)}`,

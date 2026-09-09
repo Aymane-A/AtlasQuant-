@@ -24,6 +24,11 @@ const CURRENCY_SYMBOLS = {
   CHF: 'CHF', CAD: 'CA$', AUD: 'A$', CNY: '¥', AED: 'AED',
 };
 
+// Fallback day labels — 7 slots (Sun→Sat) to match Postgres EXTRACT(DOW).
+// Crypto trades 24/7 so weekend buckets are real and must not collapse
+// into a 5-day Mon–Fri array.
+const FALLBACK_DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
 // ── Helper: extract numeric price from any shape ──────────
 const extractPrice = (p) => {
   if (!p) return 0;
@@ -103,11 +108,16 @@ export default function Dashboard() {
       .finally(() => setDashLoading(false));
   }, []);
 
+  // ✅ Fix #6 — use the real day-of-week (dow) returned by the backend
+  // instead of the array *position*, which silently mislabeled bars
+  // whenever trades skipped a day (common for a 24/7 crypto platform).
   const volume = useMemo(() => {
     const daysArray = t('dashboard.days', { returnObjects: true });
-    const safeDays  = Array.isArray(daysArray) ? daysArray : ['Mon','Tue','Wed','Thu','Fri'];
+    const safeDays  = Array.isArray(daysArray) && daysArray.length === 7
+      ? daysArray
+      : FALLBACK_DAYS;
     return dashData.volumeChart.map(item => ({
-      day:    safeDays[item.index % safeDays.length],
+      day:    item.dow != null ? (safeDays[item.dow] ?? item.day) : item.day,
       volume: item.volume,
     }));
   }, [dashData.volumeChart, t]);
@@ -115,36 +125,62 @@ export default function Dashboard() {
   const topSignals = signals ? signals.slice(0, 5) : [];
   const COLOR      = { BUY: 'var(--green)', SELL: 'var(--red)', HOLD: 'var(--amber)' };
 
-  const kpis = dashData.stats ? [
-    {
-      label: t('dashboard.portfolioValue'),
-      value: `${currencySymbol}${dashData.stats.portfolioValue.value.toLocaleString()}`,
-      delta: `▲ ${dashData.stats.portfolioValue.delta}`,
-      color: 'var(--cyan)',
-      sub:   t('dashboard.vsYesterday'),
-    },
-    {
-      label: t('dashboard.dailyPnl'),
-      value: `+${currencySymbol}${dashData.stats.dailyPnl.value.toLocaleString()}`,
-      delta: `▲ ${dashData.stats.dailyPnl.delta}`,
-      color: 'var(--green)',
-      sub:   t('dashboard.unrealized'),
-    },
-    {
-      label: t('dashboard.openPositions'),
-      value: dashData.stats.openPositions.value.toString(),
-      delta: `▼ ${dashData.stats.openPositions.delta}`,
-      color: 'var(--purple-bright)',
-      sub:   t('dashboard.closedToday'),
-    },
-    {
-      label: t('dashboard.winRate'),
-      value: dashData.stats.winRate.value,
-      delta: `▲ ${dashData.stats.winRate.delta}`,
-      color: 'var(--amber)',
-      sub:   t('dashboard.thisMonth'),
-    },
-  ] : [];
+  // ✅ Fix (CRITICAL) — pvUp/dpUp used to be computed unconditionally
+  // against dashData.stats before the null-check, which threw
+  // "Cannot read properties of null" on every first render (stats
+  // starts as null until /dashboard/summary resolves) and crashed the
+  // whole page. Everything now lives inside the same `stats ? … : []`
+  // guard as `kpis`.
+  const kpis = dashData.stats ? (() => {
+    const pvUp = dashData.stats.portfolioValue.value >= 0;
+    const dpUp = dashData.stats.dailyPnl.value >= 0;
+
+    return [
+      {
+        label: t('dashboard.portfolioValue'),
+        value: `${currencySymbol}${dashData.stats.portfolioValue.value.toLocaleString()}`,
+        // ✅ Fix #2 — arrow now reflects the actual sign instead of a
+        // hardcoded ▲.
+        delta: `${pvUp ? '▲' : '▼'} ${dashData.stats.portfolioValue.delta}`,
+        up:    pvUp,
+        color: 'var(--cyan)',
+        // ⚠️ Still not fully accurate — see note below kpis: this delta
+        // is cumulative totalPnl, not an actual day-over-day comparison
+        // against yesterday's portfolio_snapshots value.
+        sub:   t('dashboard.vsYesterday'),
+      },
+      {
+        label: t('dashboard.dailyPnl'),
+        // ✅ Fix #1 — '+' was hardcoded and produced "+$-45" on a
+        // negative day. Now conditional on the actual sign.
+        value: `${dpUp ? '+' : ''}${currencySymbol}${dashData.stats.dailyPnl.value.toLocaleString()}`,
+        delta: `${dpUp ? '▲' : '▼'} ${dashData.stats.dailyPnl.delta}`,
+        up:    dpUp,
+        color: dpUp ? 'var(--green)' : 'var(--red)',
+        // ✅ Fix #3 — this figure is realized P&L from trades closed
+        // today (status='closed'), not unrealized mark-to-market on
+        // open positions. Renamed the label key accordingly; add
+        // "realizedToday" to i18n.js across all 10 locales.
+        sub:   t('dashboard.realizedToday', 'Realized (Today)'),
+      },
+      {
+        label: t('dashboard.openPositions'),
+        value: dashData.stats.openPositions.value.toString(),
+        delta: `▼ ${dashData.stats.openPositions.delta}`,
+        up:    true, // neutral count metric, not a P&L figure
+        color: 'var(--purple-bright)',
+        sub:   t('dashboard.closedToday'),
+      },
+      {
+        label: t('dashboard.winRate'),
+        value: dashData.stats.winRate.value,
+        delta: `▲ ${dashData.stats.winRate.delta}`,
+        up:    true,
+        color: 'var(--amber)',
+        sub:   t('dashboard.thisMonth'),
+      },
+    ];
+  })() : [];
 
   return (
     <>
@@ -161,7 +197,15 @@ export default function Dashboard() {
                 <div style={labelStyle}>{k.label}</div>
                 <div style={{ fontSize:30, fontWeight:700, color:k.color, letterSpacing:'-.02em', marginBottom:10 }}>{k.value}</div>
                 <div style={{ display:'flex', alignItems:'center', gap:6, fontSize:12, fontFamily:'JetBrains Mono,monospace' }}>
-                  <span style={{ padding:'2px 6px', borderRadius:4, background:'rgba(52,211,153,0.12)', color:'var(--green)', fontSize:11 }}>{k.delta}</span>
+                  {/* ✅ Fix #2 — badge background/color now follow k.up
+                      instead of a hardcoded green, so a negative KPI no
+                      longer shows a green "up" badge around a negative
+                      number. */}
+                  <span style={{
+                    padding:'2px 6px', borderRadius:4, fontSize:11,
+                    background: k.up ? 'rgba(52,211,153,0.12)' : 'rgba(248,113,113,0.12)',
+                    color:      k.up ? 'var(--green)' : 'var(--red)',
+                  }}>{k.delta}</span>
                   <span style={{ color:'var(--text-secondary)' }}>{k.sub}</span>
                 </div>
               </div>
@@ -299,7 +343,7 @@ export default function Dashboard() {
             </div>
           ) : dashData.recentActivity.length === 0 ? (
             <div style={{ color:'var(--text-muted)', fontFamily:'JetBrains Mono,monospace', fontSize:11, padding:'20px 0', textAlign:'center' }}>
-              No trades yet
+              {t('dashboard.noTradesYet', 'No trades yet')}
             </div>
           ) : (
             <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
@@ -357,12 +401,12 @@ export default function Dashboard() {
                 <div style={{ display:'flex', alignItems:'center', gap:8, padding:'10px 12px', borderRadius:8, background:'rgba(251,191,36,0.08)', border:'1px solid rgba(251,191,36,0.2)' }}>
                   <span style={{ fontSize:13 }}>🔔</span>
                   <span style={{ fontSize:11, color:'var(--amber)', fontFamily:'JetBrains Mono,monospace' }}>
-                    {dashData.alertsSummary.triggeredToday} triggered today
+                    {t('dashboard.alertsTriggeredCount', '{{count}} triggered today', { count: dashData.alertsSummary.triggeredToday })}
                   </span>
                 </div>
               ) : (
                 <div style={{ fontSize:11, color:'var(--text-muted)', fontFamily:'JetBrains Mono,monospace' }}>
-                  No alerts triggered today
+                  {t('dashboard.noAlertsToday', 'No alerts triggered today')}
                 </div>
               )}
             </div>

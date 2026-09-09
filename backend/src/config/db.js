@@ -324,6 +324,7 @@ async function migrate() {
     ['trg_portfolio_updated_at',   'portfolio'],
     ['trg_accounts_updated_at',    'accounts'],
     ['trg_live_orders_updated_at', 'live_orders'],
+    ['trg_atc_updated_at', 'auto_trade_configs'],
   ]) {
     await pool.query(`
       DO $$ BEGIN
@@ -445,6 +446,56 @@ async function migrate() {
       created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     CREATE INDEX IF NOT EXISTS idx_audit_log_user ON audit_log(user_id, created_at DESC);
+
+    -- ── Auto-Trader: backtest gating metadata ──
+    ALTER TABLE backtest_history ADD COLUMN IF NOT EXISTS params        JSONB;
+    ALTER TABLE backtest_history ADD COLUMN IF NOT EXISTS params_hash   TEXT;
+    ALTER TABLE backtest_history ADD COLUMN IF NOT EXISTS start_date    DATE;
+    ALTER TABLE backtest_history ADD COLUMN IF NOT EXISTS end_date      DATE;
+    ALTER TABLE backtest_history ADD COLUMN IF NOT EXISTS expires_at    TIMESTAMPTZ;
+    ALTER TABLE backtest_history ADD COLUMN IF NOT EXISTS total_trades  INTEGER;
+    ALTER TABLE backtest_history ADD COLUMN IF NOT EXISTS expectancy    NUMERIC;
+    ALTER TABLE backtest_history ADD COLUMN IF NOT EXISTS sharpe        NUMERIC;
+    ALTER TABLE backtest_history ADD COLUMN IF NOT EXISTS gate_eligible BOOLEAN NOT NULL DEFAULT false;
+    CREATE INDEX IF NOT EXISTS idx_backtest_gate
+      ON backtest_history(user_id, symbol, strategy, params_hash, expires_at DESC)
+      WHERE gate_eligible = true;
+
+    -- ── auto_trade_configs ──
+    CREATE TABLE IF NOT EXISTS auto_trade_configs (
+      id                          SERIAL PRIMARY KEY,
+      user_id                     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      symbol                      TEXT    NOT NULL,
+      strategy_id                 TEXT    NOT NULL,
+      params_hash                 TEXT    NOT NULL,
+      exchange_id                 VARCHAR(32) NOT NULL,
+      backtest_id                 INTEGER REFERENCES backtest_history(id) ON DELETE SET NULL,
+      status                      VARCHAR(20) NOT NULL DEFAULT 'backtest_required'
+                                    CHECK (status IN (
+                                      'disabled','backtest_required','backtest_expired',
+                                      'backtest_rejected','probation','live','blocked'
+                                    )),
+      enabled                     BOOLEAN NOT NULL DEFAULT true,
+      probation_trades_required   INTEGER NOT NULL DEFAULT 5,
+      probation_trades_completed  INTEGER NOT NULL DEFAULT 0,
+      probation_wins              INTEGER NOT NULL DEFAULT 0,
+      probation_pnl               NUMERIC(20,8) NOT NULL DEFAULT 0,
+      max_position_size           NUMERIC(20,8),
+      max_daily_loss_pct          NUMERIC,
+      max_open_positions          INTEGER NOT NULL DEFAULT 1,
+      last_evaluated_at           TIMESTAMPTZ,
+      created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE(user_id, symbol, strategy_id, params_hash, exchange_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_atc_user   ON auto_trade_configs(user_id);
+    CREATE INDEX IF NOT EXISTS idx_atc_status ON auto_trade_configs(status) WHERE enabled = true;
+
+    -- ── Traceability: paper_trades → config + backtest ──
+    ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS auto_trade_config_id INTEGER
+      REFERENCES auto_trade_configs(id) ON DELETE SET NULL;
+    ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS backtest_id INTEGER
+      REFERENCES backtest_history(id) ON DELETE SET NULL;
   `);
 
   // ✅ Fix critique: 'notifications' était créée en BOOLEAN dans les

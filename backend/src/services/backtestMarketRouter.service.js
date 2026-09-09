@@ -425,8 +425,25 @@ async function getCachedFxRate(fromCurrency, toCurrency) {
  * silencieux. Paramètre optionnel : les appels existants qui ne le
  * passent pas continuent de fonctionner à l'identique.
  */
+// Stablecoins pégués au USD (rate réel ~1:1) — Yahoo Finance n'a aucun
+// ticker forex pour ces paires ("USDT=X" n'existe pas), donc tenter de
+// les résoudre via getCachedFxRate échoue systématiquement et déclenche
+// un warning "Conversion FX indisponible" trompeur alors que le
+// fallback 1:1 utilisé est en réalité correct (pas approximatif).
+const STABLE_USD_EQUIVALENTS = new Set(['USDT', 'USDC', 'BUSD']);
+
 async function convertAmount(amount, fromCurrency, toCurrency, warningsSink) {
   if (!fromCurrency || !toCurrency || fromCurrency === toCurrency) return amount;
+
+  // FIX (stablecoin false warning) : USD<->USDT/USDC/BUSD est traité en
+  // 1:1 directement, sans passer par Yahoo ni déclencher de warning —
+  // le taux réel est déjà ~1:1, ce n'est pas un fallback dégradé.
+  if (
+    (STABLE_USD_EQUIVALENTS.has(fromCurrency) && toCurrency === 'USD') ||
+    (fromCurrency === 'USD' && STABLE_USD_EQUIVALENTS.has(toCurrency))
+  ) {
+    return amount;
+  }
 
   try {
     const rate = await getCachedFxRate(fromCurrency, toCurrency);
