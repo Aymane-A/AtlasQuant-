@@ -119,7 +119,7 @@ const DEFAULT_PARAMS = {
   volumeMultiplier: 1.5,
   volumeLookback: 20,
   requireVolumeConfirmation: false,
-  emaTolerancePct: 12,
+  emaTolerancePct: 3,
 
   // Params MACD Crossover
   macdFast: 12,

@@ -491,6 +491,11 @@ async function migrate() {
     CREATE INDEX IF NOT EXISTS idx_atc_user   ON auto_trade_configs(user_id);
     CREATE INDEX IF NOT EXISTS idx_atc_status ON auto_trade_configs(status) WHERE enabled = true;
 
+    -- FIX: colonne manquante — nécessaire pour que autoTrader.service.js évite
+    -- de rouvrir un trade sur le même signal déjà traité (voir getFreshSignal()
+    -- dans autoTrader.service.js).
+    ALTER TABLE auto_trade_configs ADD COLUMN IF NOT EXISTS last_signal_at TIMESTAMPTZ;
+
     -- ── Traceability: paper_trades → config + backtest ──
     ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS auto_trade_config_id INTEGER
       REFERENCES auto_trade_configs(id) ON DELETE SET NULL;

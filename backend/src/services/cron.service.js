@@ -9,6 +9,7 @@ const { checkAlerts, runDailyDigest } = require('./alertChecker.service');
 const { checkSignalAlerts }         = require('./signalAlert.service');
 const { takePortfolioSnapshot }     = require('./portfolioSnapshot.service');
 const paperTradeMonitor             = require('./paperTradeMonitor.service');
+const autoTrader                    = require('./autoTrader.service');
 const db                            = require('../config/db');
 const logger                        = require('../utils/logger');
 const { healthCheckAllConnections } = require('./exchanges.service');
@@ -21,6 +22,17 @@ const initCronJobs = () => {
   // on hot reload). Runs inside cron.service so it shares the same process
   // and pool as the rest of the background engine.
   paperTradeMonitor.start(60_000);
+
+  // ── Auto-Trader (backtest-gated auto-trading) ─────────
+  // Checks every 60s — re-evaluates each user's auto_trade_configs gate
+  // (backtest freshness/expectancy) and opens a paper trade via
+  // exchangesSvc.openPaperTrade() when a fresh signal + passing gate +
+  // no already-open position line up. Exit logic is NOT duplicated here —
+  // paperTradeMonitor (started just above) closes these trades on SL/TP
+  // and notifies autoTrader.recordProbationResult() so probation configs
+  // can graduate to live. Started after paperTradeMonitor so the exit-side
+  // listener exists before any trade this cycle could need it.
+  autoTrader.start(60_000);
 
   // ── Market scan every 4 hours → Crypto + Forex/Commodity/Indices → AI signal alerts ───────
   cron.schedule('0 */4 * * *', async () => {
