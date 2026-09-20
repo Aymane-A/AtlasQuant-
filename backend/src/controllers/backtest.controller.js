@@ -33,7 +33,9 @@
  *     - `params_hash` : hash canonique des paramètres RÉELLEMENT utilisés
  *       par runSimulation (strategyId, maxPositions, position sizing). Un
  *       auto_trade_config n'est valide que pour un backtest ayant le MÊME
- *       hash — changer un paramètre de stratégie invalide le gate.
+ *       hash — changer un paramètre de stratégie invalide le gate. Calculé
+ *       via utils/paramsHash.js, PARTAGÉ avec auto_trade.controller.js —
+ *       les deux DOIVENT rester identiques, donc plus de copie locale ici.
  *     - `gate_eligible` : un backtest n'est éligible au gating QUE s'il
  *       porte sur un SEUL symbole. Un backtest multi-symbole (portefeuille)
  *       reste valide et consultable normalement, mais ne peut jamais
@@ -41,18 +43,18 @@
  *       reflète pas la performance d'un symbole individuel.
  *     - `expires_at` = end_date + 30 jours. Passé ce délai, le backtest est
  *       considéré périmé par le gate (le marché a pu changer de régime) —
- *       voir isWithinFreshnessWindow() dans autoTrader.service.js.
+ *       voir evaluateGate() dans autoTrader.service.js.
  *     - `expectancy` : espérance de gain par trade en devise de cotation,
  *       calculée classiquement (winRate*avgWin - (1-winRate)*avgLoss) à
  *       partir des metrics déjà produites par runSimulation.
  */
 
-const crypto = require('crypto');
 const db = require('../config/db');
 const logger = require('../utils/logger');
 const { fetchCandlesForBacktest, convertAmount } = require('../services/backtestMarketRouter.service');
 const { runSimulation, aggregatePortfolio } = require('../services/backtestEngine.service');
 const { listStrategies } = require('../services/backtestStrategies.service');
+const { computeParamsHash } = require('../utils/paramsHash');
 
 const MAX_SYMBOLS = 8;
 const GATE_FRESHNESS_DAYS = 30;
@@ -118,32 +120,6 @@ function buildWarningMessage(requestedTimeframe, succeeded, skipped) {
   }
 
   return messages.length > 0 ? messages.join(' ') : undefined;
-}
-
-/**
- * Hash canonique des paramètres qui déterminent RÉELLEMENT le comportement
- * de runSimulation pour ce backtest — pas tout req.body (des champs comme
- * `capital` ou `capitalCurrency` sont des montants d'argent, pas des
- * paramètres de stratégie ; deux backtests avec un capital différent mais
- * les mêmes règles d'entrée/sortie doivent produire le MÊME hash).
- *
- * Utilisé par auto_trade_configs.params_hash : un config d'auto-trade n'est
- * valide que pour un backtest ayant exactement ce hash — si l'utilisateur
- * change strategyId, maxPositions, ou le mode/valeur de position sizing,
- * le gate doit redemander un nouveau backtest.
- */
-function computeParamsHash({ strategyId, maxPositions, positionSizeMode, positionSizeValue }) {
-  const canonical = {
-    strategyId: strategyId || 'rsi_momentum',
-    maxPositions: parseInt(maxPositions, 10) || 5,
-    positionSizeMode: positionSizeMode || 'fixed_pct',
-    // Valeur brute (avant conversion devise) — la conversion dépend de la
-    // devise de cotation du symbole tradé en LIVE, qui peut différer de
-    // celle utilisée pendant le backtest ; ce n'est pas un paramètre de
-    // stratégie, donc elle ne doit pas invalider le hash.
-    positionSizeValue: positionSizeValue != null ? String(positionSizeValue) : null,
-  };
-  return crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }
 
 /**

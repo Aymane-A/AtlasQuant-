@@ -87,6 +87,7 @@ app.use('/api/auth',      require('./routes/auth.routes'));
 app.use('/api/prices',    require('./routes/prices.routes'));
 app.use('/api/exchanges',   require('./routes/exchanges.routes'));
 app.use('/api/backtest',  require('./routes/backtest.routes'));
+app.use('/api/auto-trade', require('./routes/auto_trade.routes'));
 app.use('/api/portfolio', require('./routes/portfolio.routes'));
 app.use('/api/risk',      require('./routes/risk.routes'));
 app.use('/api/settings',  require('./routes/settings.routes'));
