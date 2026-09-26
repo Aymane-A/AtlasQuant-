@@ -14,6 +14,26 @@
  * que l'utilisateur a explicitement choisis". Toute autre restriction
  * (backtest existe, frais, expectancy positive) est un problème de gating,
  * pas de validation d'entrée, et reste dans autoTrader.service.js.
+ *
+ * FIX (strategy mismatch) :
+ *   `findMatchingBacktest` et la liaison manuelle dans `updateConfig`
+ *   comparaient `backtest_history.strategy` (le LABEL affiché, ex: "RSI
+ *   Momentum Reversion", potentiellement renommé par l'utilisateur côté
+ *   Backtester) à `strategyId` (l'id technique, ex: "rsi_momentum") — ces
+ *   deux chaînes ne coïncident JAMAIS, donc aucun backtest ne se liait
+ *   automatiquement à un config nouvellement créé. Les deux requêtes
+ *   comparent maintenant `strategy_id` (colonne dédiée, voir config/db.js).
+ *
+ * FIX (upsert ne remettait jamais à jour backtest_id) :
+ *   Le `ON CONFLICT ... DO UPDATE` de createConfig ne touchait que
+ *   `enabled`/`updated_at` — recréer un config déjà existant (même
+ *   symbole/stratégie/params/exchange) après avoir lancé un NOUVEAU
+ *   backtest gate_eligible ne réactualisait donc jamais `backtest_id` :
+ *   la ligne existante gardait son ancien lien (souvent `null`), même si
+ *   `findMatchingBacktest` venait de retrouver un backtest valide. Le
+ *   conflit met désormais aussi à jour `backtest_id = EXCLUDED.backtest_id`,
+ *   pour que relancer createConfig avec un backtest plus récent le relie
+ *   effectivement.
  */
 
 const db = require('../config/db');
@@ -32,7 +52,7 @@ const { listStrategies } = require('../services/backtestStrategies.service');
 async function findMatchingBacktest(userId, symbol, strategyId, paramsHash) {
   const { rows } = await db.query(
     `SELECT id FROM backtest_history
-     WHERE user_id = $1 AND symbol = $2 AND strategy = $3
+     WHERE user_id = $1 AND symbol = $2 AND strategy_id = $3
        AND params_hash = $4 AND gate_eligible = true
      ORDER BY created_at DESC LIMIT 1`,
     [userId, symbol, strategyId, paramsHash]
@@ -96,7 +116,7 @@ async function createConfig(req, res) {
           status, probation_trades_required, max_position_size, max_daily_loss_pct)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
        ON CONFLICT (user_id, symbol, strategy_id, params_hash, exchange_id) DO UPDATE
-         SET enabled = true, updated_at = NOW()
+         SET enabled = true, backtest_id = EXCLUDED.backtest_id, updated_at = NOW()
        RETURNING *`,
       [
         userId, cleanSymbol, strategyId, paramsHash, exchangeId,
@@ -186,7 +206,7 @@ async function updateConfig(req, res) {
         // autre symbole) pour contourner le gate.
         const { rows: bt } = await db.query(
           `SELECT id FROM backtest_history
-           WHERE id = $1 AND user_id = $2 AND symbol = $3 AND strategy = $4
+           WHERE id = $1 AND user_id = $2 AND symbol = $3 AND strategy_id = $4
              AND params_hash = $5 AND gate_eligible = true`,
           [backtestId, userId, config.symbol, config.strategy_id, config.params_hash]
         );

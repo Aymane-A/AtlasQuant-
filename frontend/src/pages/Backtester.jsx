@@ -16,14 +16,8 @@ const label10  = { fontSize: 10, letterSpacing: '.15em', textTransform: 'upperca
 const panel    = { background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 14, padding: 22 };
 const baseOpts = { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } };
 
-// ── Formatage currency-aware ──────────────────────────────────────────
 const CURRENCY_SYMBOLS = { USD: '$', EUR: '€', GBP: '£', JPY: '¥', CHF: 'CHF ', AUD: 'A$', CAD: 'C$', MIXED: '' };
 
-// ✅ Feature: même table que Dashboard.jsx/RiskMatrix.jsx — devise de l'user
-// (Settings → Language & Region), utilisée pour le label "Capital" et le
-// mode de sizing "Fixed Amount", qui avaient un $ hardcodé (indépendant de
-// qc, qui lui reflète la devise du symbole tradé, connue seulement après
-// avoir lancé un backtest).
 const SETTINGS_CURRENCY_SYMBOLS = {
   USD: '$', EUR: '€', MAD: 'DH', GBP: '£', JPY: '¥',
   CHF: 'CHF', CAD: 'CA$', AUD: 'A$', CNY: '¥', AED: 'AED',
@@ -43,9 +37,6 @@ function fmtSigned(str, currency = 'USD') {
   return `${sign}${sym}${rest}`;
 }
 
-// ── Registry de stratégies (frontend) ─────────────────────────────────
-// Duplique intentionnellement backtestStrategies.service.js côté backend.
-// Si une nouvelle stratégie est ajoutée côté backend, l'ajouter ICI aussi (même id).
 const STRATEGY_OPTIONS = [
   {
     id: 'rsi_momentum',
@@ -74,6 +65,22 @@ const STRATEGY_OPTIONS = [
   },
 ];
 
+// ✅ Feature (Auto-Trade gating) : snapshot des paramètres qui déterminent
+// params_hash côté backend (strategyId, maxPos, posSizeMode, posSizeValue).
+// Sert à détecter un "drift" — si l'utilisateur modifie le form APRÈS un run
+// gate_eligible, le hash qu'enverrait createConfig ne matcherait plus celui
+// stocké sur ce backtest_id, et le lien automatique échouerait silencieusement
+// côté backend (findMatchingBacktest ne le retrouverait pas). On bloque donc
+// le bouton "Enable Auto-Trade" tant que le form a bougé depuis le dernier run.
+function paramsSnapshot(form) {
+  return JSON.stringify({
+    strategyId: form.strategyId,
+    maxPos: form.maxPos,
+    posSizeMode: form.posSizeMode,
+    posSizeValue: form.posSizeValue,
+  });
+}
+
 export default function Backtester() {
   const { t } = useTranslation();
   const location = useLocation();
@@ -84,25 +91,28 @@ export default function Backtester() {
   const [warning, setWarning]   = useState(null);
   const [skipped, setSkipped]   = useState(null);
   const [settingsCurrency, setSettingsCurrency] = useState('$');
-  // FIX (audit multi-asset) : on garde aussi le CODE devise (ex: 'MAD'),
-  // pas seulement le symbole d'affichage ('DH') — le backend en a besoin
-  // pour convertir le capital saisi vers la devise de cotation de chaque
-  // symbole avant de lancer la simulation. Avant ce fix, le capital
-  // saisi dans une devise ≠ USD était utilisé tel quel par le backend,
-  // comme s'il était déjà dans la bonne devise.
   const [settingsCurrencyCode, setSettingsCurrencyCode] = useState('USD');
-// FIX (race condition) : runBacktest() est appelé automatiquement au mount
-// (voir plus bas). Avant ce fix, cet appel initial capturait
-// settingsCurrencyCode='USD' (valeur par défaut du useState), car le fetch
-// /settings n'avait pas encore résolu — capitalCurrency était donc TOUJOURS
-// 'USD' sur le tout premier run, même si l'utilisateur a MAD/EUR en
-// settings. Un ref est lu à l'exécution (pas de closure figée sur un
-// ancien render), donc runBacktest() lit toujours la valeur la plus
-// récente, y compris lors de l'appel synchrone déclenché juste après le
-// fetch initial.
-const settingsCurrencyCodeRef = useRef('USD');
+  const settingsCurrencyCodeRef = useRef('USD');
 
-useEffect(() => {
+  // ✅ Feature (Auto-Trade gating) : état du dernier run réussi, nécessaire
+  // pour afficher/activer le bouton "Enable Auto-Trade" (gateEligible=true
+  // implique symbols.length===1 côté backend — voir backtest.controller.js).
+  const [gateEligible, setGateEligible] = useState(false);
+  const [lastBacktestId, setLastBacktestId] = useState(null);
+  const [lastRunSymbols, setLastRunSymbols] = useState([]);
+  const [paramsAtLastRun, setParamsAtLastRun] = useState(null);
+
+  const [showAutoTradeModal, setShowAutoTradeModal] = useState(false);
+  const [autoTradeForm, setAutoTradeForm] = useState({
+    exchangeId: '', probationTradesRequired: '5', maxPositionSize: '', maxDailyLossPct: '',
+  });
+  const [autoTradeSubmitting, setAutoTradeSubmitting] = useState(false);
+  const [autoTradeError, setAutoTradeError] = useState(null);
+  const [autoTradeSuccess, setAutoTradeSuccess] = useState(null);
+  const [needsWatchlistAdd, setNeedsWatchlistAdd] = useState(false);
+  const [addingToWatchlist, setAddingToWatchlist] = useState(false);
+
+  useEffect(() => {
     let cancelled = false;
     api.get('/settings')
       .then(res => {
@@ -114,9 +124,6 @@ useEffect(() => {
       })
       .catch(() => {})
       .finally(() => {
-        // Le premier backtest ne se lance qu'une fois /settings résolu
-        // (succès ou échec) — plus jamais avec 'USD' par défaut alors que
-        // l'utilisateur a une autre devise configurée.
         if (!cancelled) runBacktest();
       });
     return () => { cancelled = true; };
@@ -160,11 +167,14 @@ useEffect(() => {
     setWarning(null);
     setSkipped(null);
     setProgress(5);
-    // FIX (stale results on error) : sans ça, un backtest qui échoue
-    // (ex: connectionError) laisse les métriques et l'equity curve du
-    // run PRÉCÉDENT affichées à l'écran, comme si c'était le résultat
-    // du run actuel — trompeur. On réinitialise à l'état neutre avant
-    // de lancer le nouveau run.
+    // ✅ Reset état Auto-Trade à chaque nouveau run — un backtest précédent
+    // gate_eligible ne doit plus proposer "Enable Auto-Trade" tant que le
+    // nouveau run n'a pas confirmé son propre statut.
+    setGateEligible(false);
+    setLastBacktestId(null);
+    setLastRunSymbols([]);
+    setAutoTradeSuccess(null);
+    setAutoTradeError(null);
     setMetrics({
       totalReturn: '0.0%', sharpe: '0.00', maxDrawdown: '0.0%',
       winRate: '0.0%', avgRR: '1:0.0', totalTrades: '0',
@@ -189,10 +199,7 @@ useEffect(() => {
         endDate: form.to,
         to: form.to,
         capital: form.capital,
-        // FIX : le backend a besoin de savoir dans quelle devise `capital`
-        // et `positionSizeValue` (mode fixed_dollar) sont exprimés, pour
-        // pouvoir les convertir vers la devise de chaque symbole.
-        capitalCurrency: settingsCurrencyCodeRef.current,        
+        capitalCurrency: settingsCurrencyCodeRef.current,
         maxPos: form.maxPos,
         positionSizeMode: form.posSizeMode,
         positionSizeValue: form.posSizeValue,
@@ -215,6 +222,14 @@ useEffect(() => {
           annualReturns: result.charts?.annualReturns || [],
           trades: result.trades || []
         });
+        // ✅ Feature (Auto-Trade gating) : on capture backtestId/gateEligible/
+        // symbols du run, + un snapshot des params au moment de ce run précis
+        // (pour détecter un drift si le form change avant que l'user clique
+        // "Enable Auto-Trade").
+        setGateEligible(!!result.gateEligible);
+        setLastBacktestId(result.backtestId ?? null);
+        setLastRunSymbols(result.symbols || []);
+        setParamsAtLastRun(paramsSnapshot(form));
       } else {
         console.error('Backtest engine error:', result.error);
         setError(result.error || t('backtester.genericError'));
@@ -273,7 +288,80 @@ useEffect(() => {
     setShowConfigList(prev => !prev);
   };
 
-  
+  // ✅ Feature (Auto-Trade gating) : true si le form a changé depuis le run
+  // gate_eligible — le bouton reste visible mais désactivé, avec un message
+  // "re-run après modification" plutôt que de disparaître silencieusement.
+  const paramsDrifted = paramsAtLastRun !== null && paramsSnapshot(form) !== paramsAtLastRun;
+  const autoTradeSymbol = lastRunSymbols[0] || null;
+
+  const openAutoTradeModal = () => {
+    setAutoTradeError(null);
+    setNeedsWatchlistAdd(false);
+    setShowAutoTradeModal(true);
+  };
+
+  // ✅ POST /api/auto-trade/configs — payload construit pour matcher EXACTEMENT
+  // computeParamsHash côté backend : {strategyId, maxPositions, positionSizeMode,
+  // positionSizeValue}. Note le renommage maxPos → maxPositions (noms différents
+  // entre le form Backtester et le payload attendu par auto_trade.controller.js).
+  const submitAutoTradeConfig = async () => {
+    if (!autoTradeSymbol || !autoTradeForm.exchangeId) {
+      setAutoTradeError('exchangeId requis');
+      return;
+    }
+    setAutoTradeSubmitting(true);
+    setAutoTradeError(null);
+    try {
+      const res = await api.post('/auto-trade/configs', {
+        symbol: autoTradeSymbol,
+        strategyId: form.strategyId,
+        maxPositions: form.maxPos,
+        positionSizeMode: form.posSizeMode,
+        positionSizeValue: form.posSizeValue,
+        exchangeId: autoTradeForm.exchangeId,
+        probationTradesRequired: autoTradeForm.probationTradesRequired,
+        maxPositionSize: autoTradeForm.maxPositionSize || undefined,
+        maxDailyLossPct: autoTradeForm.maxDailyLossPct || undefined,
+      });
+      if (res.data.success) {
+        setAutoTradeSuccess(res.data.config);
+        setShowAutoTradeModal(false);
+      }
+    } catch (err) {
+      const msg = err.response?.data?.error || '';
+      // ✅ auto_trade.controller.js rejette si symbol pas dans la watchlist —
+      // message backend contient "watchlist" (voir createConfig). On propose
+      // alors d'ajouter le symbole directement plutôt qu'un échec sec.
+      if (/watchlist/i.test(msg)) {
+        setNeedsWatchlistAdd(true);
+        setAutoTradeError(msg);
+      } else {
+        setAutoTradeError(msg || t('backtester.genericError'));
+      }
+    } finally {
+      setAutoTradeSubmitting(false);
+    }
+  };
+
+  // ⚠️ ASSOMPTION à confirmer : endpoint POST /api/watchlist avec body
+  // { symbol } — déduit du schema (table watchlist: user_id, symbol).
+  // Corrige le path/body si le vrai endpoint (utilisé par Watchlist.jsx)
+  // est différent.
+  const addSymbolToWatchlist = async () => {
+    if (!autoTradeSymbol) return;
+    setAddingToWatchlist(true);
+    try {
+      await api.post('/watchlist', { symbol: autoTradeSymbol });
+      setNeedsWatchlistAdd(false);
+      setAutoTradeError(null);
+      // ✅ Réessaie automatiquement la création du config une fois le symbole ajouté
+      await submitAutoTradeConfig();
+    } catch (err) {
+      setAutoTradeError(err.response?.data?.error || t('backtester.genericError'));
+    } finally {
+      setAddingToWatchlist(false);
+    }
+  };
 
   const qc = metrics.quoteCurrency || 'USD';
   const selectedStrategy = STRATEGY_OPTIONS.find(s => s.id === form.strategyId) || STRATEGY_OPTIONS[0];
@@ -351,6 +439,18 @@ useEffect(() => {
         }}>
           <span>{warning}</span>
           <button onClick={() => setWarning(null)} style={{ background: 'transparent', border: 'none', color: 'var(--amber)', cursor: 'pointer', fontSize: 14, lineHeight: 1 }} aria-label="dismiss">×</button>
+        </div>
+      )}
+
+      {autoTradeSuccess && (
+        <div style={{
+          marginBottom: 16, padding: '12px 16px', borderRadius: 10,
+          background: 'rgba(52,211,153,0.08)', border: '1px solid rgba(52,211,153,0.25)',
+          color: 'var(--green)', fontSize: 12, fontFamily: 'JetBrains Mono,monospace',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+        }}>
+          <span>✅ Auto-Trade config créé pour {autoTradeSuccess.symbol} — status: {autoTradeSuccess.status}</span>
+          <button onClick={() => setAutoTradeSuccess(null)} style={{ background: 'transparent', border: 'none', color: 'var(--green)', cursor: 'pointer', fontSize: 14, lineHeight: 1 }} aria-label="dismiss">×</button>
         </div>
       )}
 
@@ -482,8 +582,6 @@ useEffect(() => {
             </div>
           )}
 
-          {/* FIX : le bouton "Run Backtest" était dupliqué deux fois de
-              suite (copy-paste) — un seul bouton ici, même onClick. */}
           <button
             onClick={runBacktest}
             disabled={running}
@@ -531,9 +629,30 @@ useEffect(() => {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
 
           <div style={panel}>
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 18, display: 'flex', alignItems: 'center', gap: 8 }}>
-              <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--green)' }} />
-              {t('backtester.resultsSummary')}
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 18, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--green)' }} />
+                {t('backtester.resultsSummary')}
+              </div>
+              {/* ✅ Feature (Auto-Trade gating) : visible uniquement si le dernier
+                  run est gate_eligible (single-symbol, aucun skip). Désactivé +
+                  tooltip si le form a dérivé depuis ce run. */}
+              {gateEligible && autoTradeSymbol && (
+                <button
+                  onClick={openAutoTradeModal}
+                  disabled={paramsDrifted}
+                  title={paramsDrifted ? 'Paramètres modifiés depuis ce run — relancez le backtest' : ''}
+                  style={{
+                    padding: '7px 12px', borderRadius: 8, fontSize: 11, fontWeight: 700,
+                    fontFamily: 'Syne,sans-serif', letterSpacing: '.05em', cursor: paramsDrifted ? 'not-allowed' : 'pointer',
+                    background: paramsDrifted ? 'rgba(255,255,255,0.03)' : 'rgba(52,211,153,0.12)',
+                    border: `1px solid ${paramsDrifted ? 'var(--border)' : 'rgba(52,211,153,0.3)'}`,
+                    color: paramsDrifted ? 'var(--text-muted)' : 'var(--green)',
+                  }}
+                >
+                  🤖 Enable Auto-Trade — {autoTradeSymbol}
+                </button>
+              )}
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 10 }}>
               {METRICS_LIST.map(m => (
@@ -645,6 +764,91 @@ useEffect(() => {
 
         </div>
       </div>
+
+      {/* ✅ Feature (Auto-Trade gating) : modal minimal — exchangeId (⚠️ input texte
+          libre pour l'instant, à remplacer par un select branché sur
+          user_exchange_connections si un endpoint GET existe déjà) +
+          probation/risk params optionnels. */}
+      {showAutoTradeModal && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }}>
+          <div style={{ ...panel, width: 380 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 16 }}>
+              🤖 Enable Auto-Trade — {autoTradeSymbol}
+            </div>
+
+            {autoTradeError && (
+              <div style={{ marginBottom: 12, padding: '10px 12px', borderRadius: 8, background: 'rgba(248,113,113,0.08)', border: '1px solid rgba(248,113,113,0.25)', color: 'var(--red)', fontSize: 11 }}>
+                {autoTradeError}
+                {needsWatchlistAdd && (
+                  <button
+                    onClick={addSymbolToWatchlist}
+                    disabled={addingToWatchlist}
+                    style={{ display: 'block', marginTop: 8, padding: '6px 10px', borderRadius: 6, background: 'rgba(0,245,212,0.1)', border: '1px solid var(--cyan-dim)', color: 'var(--cyan)', fontSize: 11, cursor: 'pointer' }}
+                  >
+                    {addingToWatchlist ? '...' : `+ Add ${autoTradeSymbol} to Watchlist`}
+                  </button>
+                )}
+              </div>
+            )}
+
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ ...label10, marginBottom: 5 }}>Exchange</div>
+              <input
+                style={inpStyle}
+                placeholder="binance, kraken..."
+                value={autoTradeForm.exchangeId}
+                onChange={e => setAutoTradeForm(f => ({ ...f, exchangeId: e.target.value }))}
+              />
+            </div>
+
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ ...label10, marginBottom: 5 }}>Probation Trades Required</div>
+              <input
+                style={inpStyle}
+                value={autoTradeForm.probationTradesRequired}
+                onChange={e => setAutoTradeForm(f => ({ ...f, probationTradesRequired: e.target.value }))}
+              />
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 16 }}>
+              <div>
+                <div style={{ ...label10, marginBottom: 5 }}>Max Position Size</div>
+                <input
+                  style={inpStyle}
+                  placeholder="optional"
+                  value={autoTradeForm.maxPositionSize}
+                  onChange={e => setAutoTradeForm(f => ({ ...f, maxPositionSize: e.target.value }))}
+                />
+              </div>
+              <div>
+                <div style={{ ...label10, marginBottom: 5 }}>Max Daily Loss %</div>
+                <input
+                  style={inpStyle}
+                  placeholder="optional"
+                  value={autoTradeForm.maxDailyLossPct}
+                  onChange={e => setAutoTradeForm(f => ({ ...f, maxDailyLossPct: e.target.value }))}
+                />
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                onClick={() => setShowAutoTradeModal(false)}
+                style={{ flex: 1, padding: 10, background: 'transparent', border: '1px solid var(--border)', color: 'var(--text-muted)', borderRadius: 8, cursor: 'pointer', fontSize: 12 }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submitAutoTradeConfig}
+                disabled={autoTradeSubmitting}
+                style={{ flex: 1, padding: 10, background: 'rgba(52,211,153,0.15)', border: '1px solid rgba(52,211,153,0.3)', color: 'var(--green)', borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: 700, opacity: autoTradeSubmitting ? .6 : 1 }}
+              >
+                {autoTradeSubmitting ? '...' : 'Enable'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

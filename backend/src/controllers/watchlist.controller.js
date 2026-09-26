@@ -5,15 +5,11 @@ const db     = require('../config/db');
 const logger = require('../utils/logger');
 const axios  = require('axios');
 
-// yahoo-finance2 v3+ requires explicit instantiation — the old
-// `require('yahoo-finance2').default` singleton pattern (v2) no
-// longer works and throws "Call `new YahooFinance()` first."
-// Still needed here for getSparklineData() (historical chart data,
-// which lives outside the live-price service — see note below).
 const YahooFinance = require('yahoo-finance2').default;
 const yahooFinance = new YahooFinance({ suppressNotices: ['yahooSurvey'] });
 
 const { getLivePrices } = require('../services/livePrices.service');
+const { resolveSymbol } = require('../services/symbolResolver.service');
 
 // ── Symbol mapping (Binance → Display) ────────────────────
 function toDisplaySymbol(sym) {
@@ -28,23 +24,17 @@ function toDisplaySymbol(sym) {
     return MAP[sym] || sym;
 }
 
-// ── Normalize forex/commodity symbols ──────────────────────
-// Handles cases where symbol was stored without a slash
-// (e.g. "EURUSD" instead of "EUR/USD"), so lookups
-// don't silently fail and fall through to a raw invalid ticker.
 function normalizeForexSymbol(sym) {
     if (!sym) return sym;
     const clean = sym.toUpperCase().trim();
 
     if (clean.includes('/')) return clean;
 
-    // Known 6-letter forex pairs without slash (EURUSD → EUR/USD)
     const KNOWN_PAIRS = ['EURUSD', 'GBPUSD', 'USDJPY', 'USDCHF', 'AUDUSD'];
     if (KNOWN_PAIRS.includes(clean)) {
         return clean.slice(0, 3) + '/' + clean.slice(3);
     }
 
-    // Known commodity aliases without slash
     const COMMODITY_ALIASES = {
         'XAUUSD': 'XAU/USD',
         'XAGUSD': 'XAG/USD',
@@ -57,10 +47,6 @@ function normalizeForexSymbol(sym) {
     return clean;
 }
 
-// ── Forex/Commodity symbol → Yahoo Finance ticker map ───────
-// Kept at module scope — still used by getSparklineData() to resolve
-// chart tickers (Yahoo's chart() endpoint needs its own ticker format,
-// same as before).
 const YF_MAP = {
     'XAU/USD': 'GC=F',     'XAG/USD': 'SI=F',
     'OIL/USD': 'CL=F',     'EUR/USD':  'EURUSD=X',
@@ -70,21 +56,14 @@ const YF_MAP = {
     'NGAS':    'NG=F',
 };
 
-// ── DB symbol format → livePrices.service bare-symbol format ──
-// Watchlist stores symbols the way each source naturally names them
-// ("BTCUSDT" for crypto pairs, "EUR/USD" for forex/commodities,
-// "SPY" for ETFs). livePrices.service works with bare tickers
-// ("BTC", "EURUSD", "SPY") and does its own asset-type detection —
-// this bridges the two formats in both directions.
 function toBaseSymbol(dbSymbol) {
     if (!dbSymbol) return dbSymbol;
     const s = dbSymbol.toUpperCase().trim();
-    if (s.includes('/')) return s.replace('/', '');   // EUR/USD  -> EURUSD
-    if (s.endsWith('USDT')) return s.slice(0, -4);     // BTCUSDT  -> BTC
-    return s;                                          // SPY, AAPL, etc — already bare
+    if (s.includes('/')) return s.replace('/', '');
+    if (s.endsWith('USDT')) return s.slice(0, -4);
+    return s;
 }
 
-// ── Format volume ──────────────────────────────────────────
 function fmtVolume(v) {
     if (v >= 1e9) return (v / 1e9).toFixed(1) + 'B';
     if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
@@ -92,25 +71,16 @@ function fmtVolume(v) {
     return v?.toString() || '—';
 }
 
-// ── Sparkline data (last ~24 points for mini chart) ─────────
-// NOTE: intentionally NOT part of livePrices.service — that service
-// is a single current price/change snapshot per symbol (5min cache),
-// while this needs a short historical series per symbol. Different
-// shape, different caching needs (chart candles shouldn't be cached
-// the same way a live quote is). Kept here, calling Binance/Yahoo
-// directly as before.
 async function getSparklineData(symbol) {
     try {
-        // Crypto (Binance) — hourly closes over the last 24h
         if (!symbol.includes('/') && (symbol.endsWith('USDT') || symbol.endsWith('BTC'))) {
             const { data } = await axios.get(
                 `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1h&limit=24`,
                 { timeout: 5000 }
             );
-            return data.map(k => parseFloat(k[4])); // close price is index 4
+            return data.map(k => parseFloat(k[4]));
         }
 
-        // Forex / Commodities (Yahoo Finance) — 15m closes over the last day
         const normalizedSymbol = normalizeForexSymbol(symbol);
         const yfSym = YF_MAP[normalizedSymbol] || YF_MAP[symbol] || normalizedSymbol;
 
@@ -132,11 +102,10 @@ async function getSparklineData(symbol) {
             .map(q => q.close);
     } catch (err) {
         logger.error(`[watchlist] getSparklineData(${symbol}): ${err.message}`);
-        return []; // frontend already handles empty sparkline gracefully
+        return [];
     }
 }
 
-// ── GET /api/watchlist ─────────────────────────────────────
 async function getWatchlist(req, res) {
     try {
         const { rows } = await db.query(
@@ -148,12 +117,6 @@ async function getWatchlist(req, res) {
             return res.json({ success: true, stocks: [] });
         }
 
-        // ── Single batched call for ALL watchlist symbols ──
-        // Before: one Binance/Yahoo request PER symbol PER row (via
-        // Promise.all -> getLivePrice). Now: one call to the shared
-        // service, which itself batches per-provider and uses its
-        // 5min cache — so a watchlist shared across pages (Watchlist,
-        // Dashboard, Screener...) hits Binance/Yahoo far less often.
         const dbSymbols   = rows.map(r => r.symbol);
         const baseSymbols = dbSymbols.map(toBaseSymbol);
         const livePrices  = await getLivePrices(baseSymbols);
@@ -202,17 +165,25 @@ async function addSymbol(req, res) {
         const { symbol } = req.body;
         if (!symbol) return res.status(400).json({ success: false, error: 'Symbol required' });
 
-        const cleanSymbol = normalizeForexSymbol(symbol.toUpperCase().trim());
+        // ✅ Fix — 2026-09-26: résolution fuzzy AVANT normalizeForexSymbol.
+        // Corrige les fautes de frappe (crypto/forex/commodity/indices/
+        // equities) avant que le symbole n'entre dans le pipeline existant.
+        // Si resolveSymbol ne trouve rien d'assez proche (matchType
+        // 'unresolved'), on garde le comportement d'origine tel quel —
+        // aucune régression sur les symboles déjà corrects.
+        const resolution   = await resolveSymbol(symbol);
+        const symbolToUse  = resolution.matchType !== 'unresolved' ? resolution.resolved : symbol;
+
+        const cleanSymbol = normalizeForexSymbol(symbolToUse.toUpperCase().trim());
         const baseSymbol   = toBaseSymbol(cleanSymbol);
 
-        // ── Validate the symbol actually resolves to a real quote ──
         const livePrices = await getLivePrices([baseSymbol]);
         const priceData  = livePrices[baseSymbol];
 
         if (!priceData || !priceData.price) {
             return res.status(400).json({
                 success: false,
-                error: `"${symbol}" n'est pas un symbole reconnu (Crypto/Forex/Commodity)`,
+                error: `"${symbol}" n'est pas un symbole reconnu (Crypto/Forex/Commodity/Equity)`,
             });
         }
 
@@ -220,14 +191,20 @@ async function addSymbol(req, res) {
             'INSERT INTO watchlist (user_id, symbol) VALUES ($1, $2) ON CONFLICT DO NOTHING',
             [req.user.id, cleanSymbol]
         );
-        res.json({ success: true, message: 'Symbole ajouté' });
+
+        const wasCorrected = resolution.matchType === 'fuzzy' || resolution.matchType === 'search';
+
+        res.json({
+            success: true,
+            message: wasCorrected ? `Symbole ajouté (corrigé : "${symbol}" → "${cleanSymbol}")` : 'Symbole ajouté',
+            suggestion: wasCorrected ? { from: symbol.toUpperCase().trim(), to: cleanSymbol } : null,
+        });
     } catch (err) {
         logger.error(`[watchlist] addSymbol: ${err.message}`);
         res.status(500).json({ success: false, error: err.message });
     }
 }
 
-// ── DELETE /api/watchlist/:sym ─────────────────────────────
 async function removeSymbol(req, res) {
     try {
         const symbol = decodeURIComponent(req.params.sym).toUpperCase();

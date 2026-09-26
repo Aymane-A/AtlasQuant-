@@ -291,12 +291,12 @@ async function runBacktest(req, res) {
     const strategyName = name || strategyMeta.label;
     const { rows } = await db.query(
       `INSERT INTO backtest_history
-         (user_id, symbol, strategy, result, params, params_hash, start_date, end_date,
+         (user_id, symbol, strategy, strategy_id, result, params, params_hash, start_date, end_date,
           expires_at, total_trades, expectancy, sharpe, gate_eligible, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
        RETURNING id`,
       [
-        userId, symbols.join(','), strategyName,
+        userId, symbols.join(','), strategyName, requestedStrategyId,
         JSON.stringify({ metrics, charts, trades, warning, skipped }),
         JSON.stringify({
           strategyId: requestedStrategyId,

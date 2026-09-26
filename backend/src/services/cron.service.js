@@ -1,10 +1,6 @@
-/**
- * src/services/cron.service.js — AtlasQuant AI
- */
-
 const cron                          = require('node-cron');
-const { scanAll }                   = require('./signalGenerator.service');
-const { scanAllYF }                 = require('./yahooFinance.service');
+const { scanAll, CRYPTO_SYMBOLS }   = require('./signalGenerator.service');
+const { scanAllYF, scanEquities, YF_SYMBOLS } = require('./yahooFinance.service');
 const { checkAlerts, runDailyDigest } = require('./alertChecker.service');
 const { checkSignalAlerts }         = require('./signalAlert.service');
 const { takePortfolioSnapshot }     = require('./portfolioSnapshot.service');
@@ -14,45 +10,74 @@ const db                            = require('../config/db');
 const logger                        = require('../utils/logger');
 const { healthCheckAllConnections } = require('./exchanges.service');
 
+// Symboles déjà couverts par YF_SYMBOLS (forex/commo/indices, display
+// names) — à exclure de l'univers equity pour éviter les doublons.
+const NON_EQUITY_DISPLAYS = new Set(Object.values(YF_SYMBOLS).map(m => m.display));
+
+// Exclut les paires crypto — via la vraie liste exportée par
+// signalGenerator.service.js (CRYPTO_SYMBOLS, ex: 'BTCUSDT'), pas une
+// heuristique par suffixe. Couvre aussi le format avec slash (BTC/USDT)
+// au cas où un user l'aurait ajouté à sa watchlist sous cette forme.
+const CRYPTO_SYMBOLS_SET = new Set(CRYPTO_SYMBOLS);
+
+function looksLikeCrypto(symbol) {
+  if (CRYPTO_SYMBOLS_SET.has(symbol)) return true;
+  if (symbol.includes('/')) {
+    const noSlash = symbol.replace('/', '');
+    if (CRYPTO_SYMBOLS_SET.has(noSlash)) return true;
+  }
+  return false;
+}
+
+/**
+ * Construit dynamiquement la liste des tickers equity à scanner : tout
+ * symbole présent dans la watchlist d'un user OU configuré en auto-trade
+ * (enabled), qui n'est ni un pair crypto (CRYPTO_SYMBOLS) ni déjà couvert
+ * par YF_SYMBOLS (forex/commo/indices). C'est ce qui évite le bug —
+ * n'importe quel ticker qu'un user ajoute est automatiquement inclus,
+ * sans modification de code.
+ */
+async function getTrackedEquitySymbols() {
+  const { rows } = await db.query(`
+    SELECT DISTINCT symbol FROM (
+      SELECT symbol FROM watchlist
+      UNION
+      SELECT symbol FROM auto_trade_configs WHERE enabled = true
+    ) s
+  `);
+
+  return rows
+    .map(r => r.symbol)
+    .filter(sym => sym && !looksLikeCrypto(sym) && !NON_EQUITY_DISPLAYS.has(sym));
+}
+
 const initCronJobs = () => {
 
   // ── Paper trade SL/TP monitor ─────────────────────────
-  // Checks every 60s — auto-closes paper trades when stop_loss or
-  // take_profit price is hit. start() is idempotent (won't double-schedule
-  // on hot reload). Runs inside cron.service so it shares the same process
-  // and pool as the rest of the background engine.
   paperTradeMonitor.start(60_000);
 
   // ── Auto-Trader (backtest-gated auto-trading) ─────────
-  // Checks every 60s — re-evaluates each user's auto_trade_configs gate
-  // (backtest freshness/expectancy) and opens a paper trade via
-  // exchangesSvc.openPaperTrade() when a fresh signal + passing gate +
-  // no already-open position line up. Exit logic is NOT duplicated here —
-  // paperTradeMonitor (started just above) closes these trades on SL/TP
-  // and notifies autoTrader.recordProbationResult() so probation configs
-  // can graduate to live. Started after paperTradeMonitor so the exit-side
-  // listener exists before any trade this cycle could need it.
   autoTrader.start(60_000);
 
-  // ── Market scan every 4 hours → Crypto + Forex/Commodity/Indices → AI signal alerts ───────
+  // ── Market scan every 4 hours → Crypto + Forex/Commodity/Indices + Equities → AI signal alerts ───────
   cron.schedule('0 */4 * * *', async () => {
     logger.info('[cron] Starting scheduled market scan...');
     try {
-      const [cryptoResult, yfSignals] = await Promise.all([
+      const equitySymbols = await getTrackedEquitySymbols();
+
+      const [cryptoResult, yfSignals, equitySignals] = await Promise.all([
         scanAll('4h'),
         scanAllYF('4h'),
+        scanEquities(equitySymbols, '4h'),
       ]);
 
-      const allSignals = [
-        ...cryptoResult.signals,
-        ...yfSignals,
-      ];
-
-      // ✅ Fix Bug 4: scanAllYF() ne persiste pas en DB elle-même (contrairement à
-      // scanAll côté crypto) — sans cet insert, les signaux Forex/Commodity/Indices
-      // générés par le cron étaient calculés mais jamais sauvegardés, donc jamais
-      // visibles ni utilisés dans Analytics.
-      for (const sig of yfSignals) {
+      // ✅ Fix Bug 4 (existant): scanAllYF() ne persiste pas elle-même.
+      // ✅ Fix — 2026-09-26: scanEquities() non plus. Sans cet insert,
+      // AUCUN equity (AAPL et tout ticker ajouté par un user) ne recevait
+      // jamais de ligne dans `signals` — bloquait silencieusement tout
+      // auto-trade sur action, pour n'importe quel user.
+      const toInsert = [...yfSignals, ...equitySignals];
+      for (const sig of toInsert) {
         await db.query(`
           INSERT INTO signals (symbol, interval, signal, confidence, price, entry, stop_loss, take_profit, risk_reward, reasoning, indicators, asset_class)
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
@@ -70,7 +95,7 @@ const initCronJobs = () => {
         ]);
       }
 
-      logger.info(`[cron] Scan finished. ${cryptoResult.signals.length} crypto + ${yfSignals.length} forex/commo/indices signals generated.`);
+      logger.info(`[cron] Scan finished. ${cryptoResult.signals.length} crypto + ${yfSignals.length} forex/commo/indices + ${equitySignals.length} equity signals generated.`);
       await checkSignalAlerts();
     } catch (err) {
       logger.error(`[cron] Scan error: ${err.message}`);
@@ -83,10 +108,6 @@ const initCronJobs = () => {
   });
 
   // ── Daily email digest at 08:00 ────────────────────────
-  // ✅ Feature: flush alert_digest_queue vers un email récapitulatif par
-  // utilisateur, pour les alertes en mode email_frequency='digest'
-  // (voir alertChecker.service.js + alerts.controller.js/setEmailFrequency).
-  // Heure serveur — adapte le cron pattern si le serveur ne tourne pas en UTC.
   cron.schedule('0 8 * * *', async () => {
     logger.info('[cron] Running daily alert digest...');
     try {
@@ -108,33 +129,23 @@ const initCronJobs = () => {
     }
   });
 
-  // ── Exchange API health check every 15 minutes ─────────────────────────
-  // Vérifie la santé de toutes les connexions exchange de tous les
-  // utilisateurs. Détecte les clés API expirées/invalides avant
-  // qu'un ordre réel ou paper trading échoue.
+  // ── Exchange API health check every 15 minutes ─────────
   cron.schedule('*/15 * * * *', async () => {
     logger.info('[cron] Running exchange health check...');
-
     try {
       const results = await healthCheckAllConnections();
-
       const failed = results.filter(r => r.healthStatus === 'failed');
-
       if (failed.length > 0) {
-        logger.warn(
-          `[cron] Exchange health check: ${failed.length} failed connection(s)`
-        );
+        logger.warn(`[cron] Exchange health check: ${failed.length} failed connection(s)`);
       } else {
         logger.info('[cron] ✅ All exchange connections are healthy.');
       }
     } catch (err) {
-      logger.error(
-        `[cron] Exchange health check crashed: ${err.message}`
-      );
+      logger.error(`[cron] Exchange health check crashed: ${err.message}`);
     }
   });
 
   logger.info('[cron] AtlasQuant Background Engine initialized.');
 };
 
-module.exports = { initCronJobs };
+module.exports = { initCronJobs, getTrackedEquitySymbols };

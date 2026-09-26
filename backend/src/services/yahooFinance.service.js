@@ -349,4 +349,106 @@ async function getStockCandles(symbol, timeframe, startDate, endDate) {
   }
 }
 
-module.exports = { generateYFSignal, scanAllYF, YF_SYMBOLS, getStockCandles };
+// ── EXTENSION: Equity scanning (symboles dynamiques) ──────
+// Contrairement à YF_SYMBOLS (forex/commodities/indices — univers fixe,
+// hardcodé), les equities n'ont PAS de whitelist statique ici. Raison :
+// un bug réel — AAPL était backtesté + configuré en auto-trade, mais
+// n'était dans AUCUN univers de scan live (ni YF_SYMBOLS, ni crypto),
+// donc getFreshSignal() ne trouvait jamais rien, silencieusement, pour
+// n'importe quel user qui activerait l'auto-trade sur une action.
+// Fix : scanEquities() prend la liste de symboles en paramètre — c'est
+// cron.service.js qui la construit dynamiquement depuis la DB (watchlist
+// + auto_trade_configs actifs), donc TOUT ticker qu'un user ajoute est
+// automatiquement couvert, sans modif de code.
+async function generateEquitySignal(symbol, interval = '4h') {
+  logger.info(`[yahooFinance] Processing equity ${symbol} (${interval})...`);
+
+  const { computeAllIndicators } = require('./indicators.service');
+
+  const { candles, price } = await getYFData(symbol, interval, 100);
+  const indicators = computeAllIndicators(candles);
+
+  const { rsi, macd, ema, bollinger, volume } = indicators;
+  let bull = 0, bear = 0;
+  if (rsi.value <= 35)                    bull += 2;
+  if (rsi.value >= 65)                    bear += 2;
+  if (macd.trend === 'BUY')               bull++;
+  if (macd.trend === 'SELL')              bear++;
+  if (macd.crossover === 'BULLISH_CROSS') bull += 2;
+  if (macd.crossover === 'BEARISH_CROSS') bear += 2;
+  if (ema.signal === 'BUY')               bull++;
+  if (ema.signal === 'SELL')              bear++;
+  if (ema.crossover === 'GOLDEN_CROSS')   bull += 2;
+  if (ema.crossover === 'DEATH_CROSS')    bear += 2;
+  if (bollinger.signal === 'OVERSOLD')    bull++;
+  if (bollinger.signal === 'OVERBOUGHT')  bear++;
+  if (volume.ratio >= 1.5) { bull > bear ? bull++ : bear++; }
+
+  // Même buildLocalSignal que YF_SYMBOLS — pas de duplication de logique.
+  const { signal, confidence, reasoning } = buildLocalSignal(symbol, price, indicators, bull, bear);
+
+  logger.info(`[yahooFinance] equity ${symbol} → ${signal} (${confidence}%)`);
+
+  const { entry, stop_loss, take_profit } = calcRiskLevels(price, candles, signal);
+
+  return {
+    id:          `${symbol}_${Date.now()}`,
+    symbol,
+    rawSymbol:   symbol,
+    asset_class: 'Equity',
+    category:    'Equity',
+    timestamp:   new Date().toISOString(),
+    price,
+    signal,
+    confidence,
+    reasoning,
+    score:       { bullish: bull, bearish: bear },
+    indicators,
+    entry,
+    stop_loss,
+    take_profit,
+    risk_reward: signal !== 'HOLD' ? `1:${RR_MULTIPLE}` : null,
+  };
+}
+
+const EQUITY_BATCH_SIZE = 4;
+
+// symbols: array de tickers plain (ex: ['AAPL','MSFT']) — fourni par l'appelant.
+async function scanEquities(symbols, interval = '4h', onProgress = () => {}) {
+  if (!symbols || !symbols.length) return [];
+  logger.info(`[yahooFinance] Scanning ${symbols.length} equities...`);
+  const results = [];
+
+  for (let i = 0; i < symbols.length; i += EQUITY_BATCH_SIZE) {
+    const batch   = symbols.slice(i, i + EQUITY_BATCH_SIZE);
+    const settled = await Promise.allSettled(batch.map(symbol => generateEquitySignal(symbol, interval)));
+
+    settled.forEach((outcome, idx) => {
+      const symbol = batch[idx];
+      if (outcome.status === 'fulfilled') {
+        results.push(outcome.value);
+      } else {
+        logger.error(`[yahooFinance] equity ${symbol} error: ${outcome.reason?.message}`);
+      }
+      try { onProgress(symbol); } catch { /* never let progress reporting break the scan */ }
+    });
+
+    if (i + EQUITY_BATCH_SIZE < symbols.length) {
+      await new Promise(r => setTimeout(r, 300));
+    }
+  }
+
+  return results;
+}
+
+async function searchYahoo(query) {
+  try {
+    const results = await yahooFinance.search(query, { quotesCount: 5, newsCount: 0 });
+    return results?.quotes || [];
+  } catch (err) {
+    logger.error(`[yahooFinance] search error for "${query}": ${err.message}`);
+    return [];
+  }
+}
+
+module.exports = { generateYFSignal, scanAllYF, YF_SYMBOLS, getStockCandles, generateEquitySignal, scanEquities, searchYahoo };

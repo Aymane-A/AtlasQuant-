@@ -6,6 +6,7 @@
 
 const db     = require('../config/db');
 const logger = require('../utils/logger');
+const { resolveSymbol } = require('../services/symbolResolver.service');
 
 const YahooFinance = require('yahoo-finance2').default;
 const yahooFinance  = new YahooFinance({ suppressNotices: ['yahooSurvey'] });
@@ -325,19 +326,31 @@ async function createAlert(req, res) {
       return res.status(400).json({ success: false, error: 'symbol, type, and value are required' });
     }
 
+    // ✅ Fix — 2026-09-26: résout les fautes de frappe avant sauvegarde —
+    // sans ça une alerte sur un symbole introuvable ne se déclenche jamais
+    // (fetchPrice échoue silencieusement en boucle côté alertChecker.service.js).
+    const resolution = await resolveSymbol(symbol);
+    const finalSymbol = resolution.matchType !== 'unresolved'
+      ? resolution.resolved
+      : symbol.toUpperCase().trim();
+
     const notifyEmail    = channels.includes('email');
     const notifyTelegram = channels.includes('telegram');
-    // ✅ Feature: whitelist stricte, même pattern que SNOOZE_ALLOWED_HOURS —
-    // évite qu'une valeur non gérée par alertChecker.service.js se glisse en base.
     const freq = EMAIL_FREQUENCY_ALLOWED.includes(emailFrequency) ? emailFrequency : 'instant';
 
     const { rows } = await db.query(`
       INSERT INTO alerts (user_id, symbol, type, condition, target, notify_email, notify_telegram, email_frequency)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
       RETURNING id, symbol, type, condition, target, notify_email, notify_telegram, email_frequency, triggered, created_at
-    `, [userId, symbol.toUpperCase(), dbType, condition || 'above', value, notifyEmail, notifyTelegram, freq]);
+    `, [userId, finalSymbol, dbType, condition || 'above', value, notifyEmail, notifyTelegram, freq]);
 
-    res.status(201).json({ success: true, alert: rows[0] });
+    const wasCorrected = resolution.matchType === 'fuzzy' || resolution.matchType === 'search';
+
+    res.status(201).json({
+      success: true,
+      alert: rows[0],
+      suggestion: wasCorrected ? { from: symbol.toUpperCase().trim(), to: finalSymbol } : null,
+    });
   } catch (err) {
     logger.error(`[alerts.controller] Create Error: ${err.message}`);
     res.status(500).json({ success: false, error: 'Failed to create alert' });
@@ -360,12 +373,17 @@ async function updateAlert(req, res) {
       return res.status(400).json({ success: false, error: 'symbol, type, and value are required' });
     }
 
+    const resolution = await resolveSymbol(symbol);
+    const finalSymbol = resolution.matchType !== 'unresolved'
+      ? resolution.resolved
+      : symbol.toUpperCase().trim();
+
     const { rows, rowCount } = await db.query(`
       UPDATE alerts
       SET symbol = $1, type = $2, condition = $3, target = $4
       WHERE id = $5 AND user_id = $6
       RETURNING id, symbol, type, condition, target, notify_email, notify_telegram, email_frequency, triggered, created_at
-    `, [symbol.toUpperCase(), dbType, condition || 'above', value, alertId, userId]);
+    `, [finalSymbol, dbType, condition || 'above', value, alertId, userId]);
 
     if (rowCount === 0) return res.status(404).json({ success: false, error: 'Alert not found' });
     res.json({ success: true, alert: rows[0] });

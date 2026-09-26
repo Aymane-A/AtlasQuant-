@@ -1,5 +1,18 @@
 /**
  * config/db.js — AtlasQuant AI · PostgreSQL v2
+ *
+ * FIX (auto-trade gating — strategy mismatch) :
+ *   `backtest_history.strategy` stocke le LABEL affiché de la stratégie
+ *   (ex: "RSI Momentum Reversion", ou un nom custom saisi par l'utilisateur
+ *   type "RSI Momentum Reversion v2") — PAS son id technique
+ *   (`strategyId`, ex: "rsi_momentum"). `auto_trade.controller.js#
+ *   findMatchingBacktest` comparait `strategy = <strategyId>`, ce qui ne
+ *   matchait JAMAIS ("RSI Momentum Reversion" !== "rsi_momentum") — un
+ *   backtest gate_eligible ne se liait donc jamais automatiquement à un
+ *   config nouvellement créé, qui restait bloqué en 'backtest_required'
+ *   indéfiniment. On ajoute une colonne `strategy_id` dédiée, distincte du
+ *   label affiché, utilisée pour tout matching programmatique (création de
+ *   config ET liaison manuelle via updateConfig).
  */
 
 const { Pool } = require('pg');
@@ -457,8 +470,28 @@ async function migrate() {
     ALTER TABLE backtest_history ADD COLUMN IF NOT EXISTS expectancy    NUMERIC;
     ALTER TABLE backtest_history ADD COLUMN IF NOT EXISTS sharpe        NUMERIC;
     ALTER TABLE backtest_history ADD COLUMN IF NOT EXISTS gate_eligible BOOLEAN NOT NULL DEFAULT false;
+
+    -- ✅ FIX (auto-trade gating — strategy mismatch) : colonne distincte de
+    -- strategy (qui reste le LABEL affiché, potentiellement personnalisé
+    -- par l'utilisateur). strategy_id est l'id technique STABLE
+    -- ("rsi_momentum", "macd_crossover") utilisé pour tout matching
+    -- programmatique (auto_trade.controller.js#findMatchingBacktest et
+    -- #updateConfig). Backfill best-effort pour les lignes existantes à
+    -- partir du préfixe du label — les lignes non reconnues restent NULL
+    -- (elles ne seront simplement jamais retrouvées par le matching auto,
+    -- ce qui est déjà le comportement actuel de toute façon).
+    ALTER TABLE backtest_history ADD COLUMN IF NOT EXISTS strategy_id TEXT;
+    UPDATE backtest_history SET strategy_id = 'rsi_momentum'
+      WHERE strategy_id IS NULL AND strategy ILIKE 'RSI Momentum Reversion%';
+    UPDATE backtest_history SET strategy_id = 'macd_crossover'
+      WHERE strategy_id IS NULL AND strategy ILIKE 'MACD Crossover%';
+
+    -- Ancien index basé sur strategy (label) — remplacé plus bas par un
+    -- index équivalent sur strategy_id, qui est la colonne réellement
+    -- utilisée par les requêtes de matching désormais.
+    DROP INDEX IF EXISTS idx_backtest_gate;
     CREATE INDEX IF NOT EXISTS idx_backtest_gate
-      ON backtest_history(user_id, symbol, strategy, params_hash, expires_at DESC)
+      ON backtest_history(user_id, symbol, strategy_id, params_hash, expires_at DESC)
       WHERE gate_eligible = true;
 
     -- ── auto_trade_configs ──
@@ -501,6 +534,15 @@ async function migrate() {
       REFERENCES auto_trade_configs(id) ON DELETE SET NULL;
     ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS backtest_id INTEGER
       REFERENCES backtest_history(id) ON DELETE SET NULL;
+
+    -- ── Bracket orders (SL/TP) — manquaient sur paper_trades et live_orders,
+    -- bloquant openPaperTrade()/placeLiveOrder() avec stopLoss/takeProfit
+    -- (trading.controller.js, autoTrader.service.js) et le monitoring
+    -- (paperTradeMonitor.service.js#getOpenBracketTrades/checkTrigger).
+    ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS stop_loss   NUMERIC(20,8);
+    ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS take_profit NUMERIC(20,8);
+    ALTER TABLE live_orders  ADD COLUMN IF NOT EXISTS stop_loss   NUMERIC(20,8);
+    ALTER TABLE live_orders  ADD COLUMN IF NOT EXISTS take_profit NUMERIC(20,8);
   `);
 
   // ✅ Fix critique: 'notifications' était créée en BOOLEAN dans les

@@ -1331,6 +1331,53 @@ export default function Trading() {
     setSymbol(first); setSymbolInput(first);
   };
 
+    const [symbolNotice, setSymbolNotice] = useState(null);
+
+  // Résout la saisie via /api/symbols/resolve avant de fixer `symbol` —
+  // corrige les fautes de frappe (crypto/forex/commodity/indices/equity)
+  // AVANT d'appeler le ticker/TradingView, au lieu de laisser un symbole
+  // invalide échouer silencieusement côté widget.
+  const submitSymbol = useCallback(async () => {
+    const raw = symbolInput.trim();
+    if (!raw) return;
+    setSymbolNotice(null);
+
+    try {
+      const res = await api.get(`/symbols/resolve?q=${encodeURIComponent(raw)}`);
+      const { resolved, assetClass, matchType } = res.data || {};
+
+      if (matchType === 'unresolved' || !resolved) {
+        // Rien trouvé d'assez proche — comportement d'origine (nettoyage
+        // brut, laisse le ticker endpoint retourner "not found").
+        const s = isOandaAccount ? raw.toUpperCase().replace(/[^A-Z0-9_]/g,'') : raw.toUpperCase().replace(/[^A-Z0-9]/g,'');
+        if (s) { setSymbol(s); setSymbolInput(s); }
+        return;
+      }
+
+      // Convertit le format DISPLAY résolu (ex: "BTC/USDT", "EUR/USD",
+      // "AAPL") vers ce que ce composant attend selon le compte actif.
+      let finalSymbol;
+      if (assetClass === 'Crypto') {
+        finalSymbol = resolved.split('/')[0]; // "BTC/USDT" → "BTC"
+      } else if (['Forex', 'Commodity', 'Indices'].includes(assetClass)) {
+        finalSymbol = resolved.replace('/', '_'); // "EUR/USD" → "EUR_USD"
+      } else {
+        finalSymbol = resolved; // Equity — déjà bare (ex: "AAPL")
+      }
+
+      if (matchType === 'fuzzy' || matchType === 'search') {
+        setSymbolNotice(`"${raw}" → ${finalSymbol.replace('_','/')}`);
+      }
+
+      setSymbol(finalSymbol);
+      setSymbolInput(finalSymbol);
+    } catch {
+      // Endpoint down/erreur réseau — fallback sur l'ancien comportement.
+      const s = isOandaAccount ? raw.toUpperCase().replace(/[^A-Z0-9_]/g,'') : raw.toUpperCase().replace(/[^A-Z0-9]/g,'');
+      if (s) { setSymbol(s); setSymbolInput(s); }
+    }
+  }, [symbolInput, isOandaAccount]);
+
   useEffect(() => {
     // A specific exchange may be requested via URL (e.g. Quick Trade from
     // Watchlist for a forex/commodity symbol → ?exchangeId=oanda). Prefer
@@ -1488,15 +1535,20 @@ export default function Trading() {
             <div style={{ position:'relative' }}>
               <input className="aq-t-input" value={symbolInput}
                 onChange={e => setSymbolInput(e.target.value.toUpperCase())}
-                onKeyDown={e => { if (e.key==='Enter') { const s = isOandaAccount ? symbolInput.toUpperCase().replace(/[^A-Z0-9_]/g,'') : symbolInput.toUpperCase().replace(/[^A-Z0-9]/g,''); if(s){setSymbol(s);} }}}
+                onKeyDown={e => { if (e.key==='Enter') submitSymbol(); }}
                 placeholder={isCommodity ? 'XAU_USD, XAG_USD...' : isForex ? 'EUR_USD, GBP_USD...' : 'BTC, ETH, SOL...'}
                 style={{ width:'100%', boxSizing:'border-box', background:'rgba(255,255,255,0.03)', border:'1px solid var(--border)', borderRadius:8, padding:'9px 50px 9px 36px', color:'var(--text)', ...mono, fontSize:13 }}
               />
               <span style={{ position:'absolute', left:12, top:'50%', transform:'translateY(-50%)', ...mono, fontSize:12, color:T.slate }}>⌕</span>
-              <button onClick={() => { const s = isOandaAccount ? symbolInput.toUpperCase().replace(/[^A-Z0-9_]/g,'') : symbolInput.toUpperCase().replace(/[^A-Z0-9]/g,''); if(s) setSymbol(s); }}
+              <button onClick={submitSymbol}
                 style={{ position:'absolute', right:8, top:'50%', transform:'translateY(-50%)', ...mono, fontSize:9, padding:'3px 8px', borderRadius:5, border:'1px solid rgba(0,245,212,0.2)', background:'rgba(0,245,212,0.06)', color:T.cyan, cursor:'pointer' }}>
                 GO
               </button>
+              {symbolNotice && (
+                <div style={{ position:'absolute', top:'calc(100% + 4px)', left:0, ...mono, fontSize:9, color:T.amber }}>
+                  ✓ {symbolNotice}
+                </div>
+              )}
             </div>
             <div style={{ display:'flex', flexWrap:'wrap', gap:5, marginTop:8 }}>
               {(isOandaAccount ? (instrumentTab === 'forex' ? FOREX_SYMBOLS : COMMODITY_SYMBOLS) : POPULAR_SYMBOLS).slice(0,10).map(s => (
