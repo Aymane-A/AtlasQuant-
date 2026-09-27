@@ -24,6 +24,8 @@ import AlphaEngine from './pages/AlphaEngine';
 import Settings    from './pages/Settings';
 import Exchanges   from './pages/Exchanges.jsx';
 import Trading     from './pages/Trading.jsx';
+import AutoTradeDashboard from './pages/AutoTradeDashboard';
+
 
 export default function App() {
   const { user } = useAuth();
@@ -67,6 +69,7 @@ export default function App() {
           <Route path="settings"    element={<Settings />}    />
           <Route path="exchanges"   element={<Exchanges />}   />
           <Route path="trading"     element={<Trading />}     />
+          <Route path="/paper-trading"  element={<AutoTradeDashboard />} />
         </Route>
 
         {/* Fallback */}

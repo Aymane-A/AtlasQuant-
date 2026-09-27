@@ -47,6 +47,21 @@
  *     Yahoo Finance et convertit ; en cas d'échec (devise inconnue,
  *     service indisponible), il retombe sur le montant NON converti
  *     plutôt que de faire échouer tout le backtest.
+ *   - INDEX_TICKERS (nouveau) : les indices affichés partout ailleurs
+ *     (signals, UI, auto_trade_configs) sous un nom "humain" (SPX500,
+ *     NAS100, US30, VIX) n'ont pas de ticker Yahoo identique — Yahoo
+ *     attend "^GSPC", "^NDX", "^DJI", "^VIX". Avant ce fix, ces noms
+ *     étaient envoyés tels quels à Yahoo (aucun mapping dédié aux
+ *     indices, seulement aux commodities), qui répondait
+ *     "No data found, symbol may be delisted" — alors même que ce
+ *     symbole existe et génère des signals valides ailleurs dans
+ *     l'app. Ce mismatch cassait aussi le lien backtest ↔ auto-trade
+ *     configs : un config créé avec symbol="^GSPC" (seul moyen de
+ *     faire passer le backtest) ne matchait plus jamais aucun signal
+ *     stocké sous "SPX500". Avec ce mapping, le symbole "affiché"
+ *     (SPX500) reste la valeur stockée partout (signals, config,
+ *     backtest_history.symbol) — seul l'appel réseau interne à Yahoo
+ *     utilise le ticker traduit.
  */
 
 const logger = require('../utils/logger');
@@ -84,6 +99,20 @@ const COMMODITY_TICKERS = {
   COFFEE: 'KC=F', SUGAR: 'SB=F', COTTON: 'CT=F',
 };
 const KNOWN_COMMODITY_KEYS = new Set(Object.keys(COMMODITY_TICKERS));
+
+// Indices : nom affiché (utilisé partout ailleurs — signals, UI, configs,
+// backtest_history.symbol) → ticker Yahoo Finance réel. Voir note FIX
+// en tête de fichier — c'est le mismatch SPX500/^GSPC qui cassait le
+// lien backtest ↔ auto-trade.
+const INDEX_TICKERS = {
+  SPX500: '^GSPC',
+  'S&P500': '^GSPC',
+  'S&P 500': '^GSPC',
+  NAS100: '^NDX',
+  US30: '^DJI',
+  VIX: '^VIX',
+};
+const KNOWN_INDEX_KEYS = new Set(Object.keys(INDEX_TICKERS));
 
 // Suffixes/format qui indiquent un symbole crypto
 const CRYPTO_QUOTE_SUFFIXES = ['USDT', 'USDC', 'BUSD', 'BTC', 'ETH'];
@@ -190,6 +219,10 @@ function isCryptoSymbol(symbol) {
 /**
  * Classifie le symbole : 'crypto' | 'forex' | 'commodity' | 'equity'.
  * Utilisé pour choisir la source de données et pour l'affichage (devise).
+ * Les indices (SPX500, NAS100, US30, VIX) sont classés 'equity' — ils
+ * sont cotés en USD comme une action classique et n'ont pas besoin
+ * d'une classe dédiée pour le moment ; seul toYahooTicker() a besoin de
+ * connaître leur ticker réel.
  */
 function detectAssetClass(symbol) {
   const clean = insertSlash(symbol);
@@ -206,6 +239,7 @@ function detectAssetClass(symbol) {
 /**
  * Convertit un symbole d'affichage → ticker Yahoo Finance.
  * - Commodity connue → ticker futures (ex: GOLD → "GC=F", XAUUSD → "GC=F")
+ * - Indice connu     → ticker indice Yahoo (ex: SPX500 → "^GSPC")
  * - Forex générique  → convention Yahoo "BASEQUOTE=X", avec USD-base qui
  *   se contracte en "QUOTE=X" (ex: USD/JPY → "JPY=X", EUR/GBP → "EURGBP=X")
  * - Sinon (action/ETF) → symbole inchangé
@@ -214,6 +248,7 @@ function toYahooTicker(symbol) {
   const clean = insertSlash(symbol);
 
   if (COMMODITY_TICKERS[clean]) return COMMODITY_TICKERS[clean];
+  if (INDEX_TICKERS[clean]) return INDEX_TICKERS[clean];
 
   if (clean.includes('/')) {
     const [base, quote] = clean.split('/');
@@ -253,7 +288,9 @@ function getQuoteCurrency(symbol, assetClass) {
   if (assetClass === 'equity') {
     // FIX : détecte la devise via le suffixe de place boursière du
     // ticker (ex: "VOD.L" → GBP, "MC.PA" → EUR) au lieu de forcer USD
-    // pour toute action, même listée hors des États-Unis.
+    // pour toute action, même listée hors des États-Unis. Les indices
+    // (SPX500, NAS100...) tombent dans le défaut USD ci-dessous, ce qui
+    // est correct pour tous les indices mappés dans INDEX_TICKERS.
     const raw = symbol.trim().toUpperCase();
     const dotIdx = raw.lastIndexOf('.');
     if (dotIdx > -1) {
@@ -337,7 +374,7 @@ async function fetchCandlesForBacktest(symbol, timeframe, startDate, endDate) {
     };
   }
 
-  // Forex / commodity / equity → toutes via Yahoo Finance
+  // Forex / commodity / index / equity → toutes via Yahoo Finance
   let effectiveTimeframe = timeframe;
   let fallbackApplied = false;
 

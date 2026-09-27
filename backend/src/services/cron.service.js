@@ -60,7 +60,7 @@ const initCronJobs = () => {
   autoTrader.start(60_000);
 
   // ── Market scan every 4 hours → Crypto + Forex/Commodity/Indices + Equities → AI signal alerts ───────
-  cron.schedule('0 */4 * * *', async () => {
+  cron.schedule('* */4 * * *', async () => {
     logger.info('[cron] Starting scheduled market scan...');
     try {
       const equitySymbols = await getTrackedEquitySymbols();
@@ -76,7 +76,13 @@ const initCronJobs = () => {
       // AUCUN equity (AAPL et tout ticker ajouté par un user) ne recevait
       // jamais de ligne dans `signals` — bloquait silencieusement tout
       // auto-trade sur action, pour n'importe quel user.
-      const toInsert = [...yfSignals, ...equitySignals];
+      // ✅ Fix — 2026-09-27: cryptoResult.signals manquait dans toInsert.
+      // scanAll() (crypto) tournait bien et était compté dans le log
+      // ("X crypto + ..."), mais ses résultats n'étaient JAMAIS persistés
+      // dans `signals` — d'où les paires crypto figées depuis leur dernier
+      // insert manuel (2026-09-08), alertChecker en "No price for X" en
+      // continu, et autoTrader sans signal frais possible sur crypto.
+      const toInsert = [...cryptoResult.signals, ...yfSignals, ...equitySignals];
       for (const sig of toInsert) {
         await db.query(`
           INSERT INTO signals (symbol, interval, signal, confidence, price, entry, stop_loss, take_profit, risk_reward, reasoning, indicators, asset_class)

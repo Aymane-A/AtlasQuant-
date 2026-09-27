@@ -37,10 +37,17 @@ function withTimeout(promise, ms, label) {
 }
 
 async function fetchPrice(symbol) {
+  // Détecte les paires crypto du type "ETH/USDT" et en extrait la base
+  // (ex: "ETH") — nécessaire pour Yahoo (format "ETH-USD") et pour
+  // Binance (endpoint attend "ETHUSDT", sans slash).
+  const isCryptoPair = symbol.includes('/');
+  const base = isCryptoPair ? symbol.split('/')[0] : symbol;
+
   try {
     const YahooFinance = require('yahoo-finance2').default;
-    const yf    = new YahooFinance({ suppressNotices: ['yahooSurvey'] });
-    const quote = await withTimeout(yf.quote(symbol), PRICE_FETCH_TIMEOUT_MS, 'yahoo');
+    const yf = new YahooFinance({ suppressNotices: ['yahooSurvey'] });
+    const yfSymbol = isCryptoPair ? `${base}-USD` : symbol;
+    const quote = await withTimeout(yf.quote(yfSymbol), PRICE_FETCH_TIMEOUT_MS, 'yahoo');
     if (quote?.regularMarketPrice) return quote.regularMarketPrice;
   } catch (e) {
     logger.warn(`[alertChecker] Yahoo fetch failed for ${symbol}: ${e.message}`);
@@ -48,7 +55,8 @@ async function fetchPrice(symbol) {
   try {
     const controller = new AbortController();
     const t = setTimeout(() => controller.abort(), PRICE_FETCH_TIMEOUT_MS);
-    const res  = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}USDT`, {
+    const binanceSymbol = isCryptoPair ? symbol.replace('/', '') : `${symbol}USDT`;
+    const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${binanceSymbol}`, {
       signal: controller.signal,
     });
     clearTimeout(t);

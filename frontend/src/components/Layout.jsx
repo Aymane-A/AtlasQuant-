@@ -17,6 +17,7 @@ const INTEL = [
   { label: 'Alpha Engine', path: '/alpha_engine',  icon: '⬙' },
   { label: 'Backtester',   path: '/backtester',    icon: '◈' },
   { label: 'Risk Matrix',  path: '/risk_matrix',   icon: '◪' },
+  { label: 'Paper Trading',   path: '/paper-trading',    icon: '◉' },
 ];
 const SYS = [
   { label: 'Settings',     path: '/settings',      icon: '⬡' },

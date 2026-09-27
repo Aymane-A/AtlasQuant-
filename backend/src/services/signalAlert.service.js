@@ -150,13 +150,13 @@ async function checkSignalAlerts() {
     // défaut DB déjà à 75, ce COALESCE est une deuxième sécurité).
     const { rows: users } = await db.query(`
       SELECT u.id, u.email, u.name,
-             COALESCE(us.notifications, true)              AS notifications,
-             COALESCE(us.signal_alert_mode, 'all')          AS alert_mode,
-             COALESCE(us.signal_alert_symbols, '[]'::jsonb) AS alert_symbols,
-             COALESCE(us.signal_alert_min_confidence, ${DEFAULT_MIN_CONFIDENCE}) AS min_confidence
+       COALESCE((us.notifications->>'email_alerts')::boolean, true)  AS notifications,
+       COALESCE(us.signal_alert_mode, 'all')          AS alert_mode,
+       COALESCE(us.signal_alert_symbols, '[]'::jsonb) AS alert_symbols,
+       COALESCE(us.signal_alert_min_confidence, ${DEFAULT_MIN_CONFIDENCE}) AS min_confidence
       FROM users u
       LEFT JOIN user_settings us ON us.user_id = u.id
-      WHERE COALESCE(us.notifications, true) = true
+      WHERE COALESCE((us.notifications->>'email_alerts')::boolean, true) = true
     `);
 
     if (users.length === 0) return;
