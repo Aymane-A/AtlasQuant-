@@ -1,6 +1,5 @@
 const svc = require('../services/exchanges.service');
 
-// GET /api/exchanges/connections
 async function getConnections(req, res) {
   try {
     res.json(await svc.getUserConnections(req.user.id));
@@ -10,7 +9,6 @@ async function getConnections(req, res) {
   }
 }
 
-// POST /api/exchanges/connect
 async function connect(req, res) {
   const { exchange, credentials, mode = 'readonly' } = req.body;
   if (!exchange || !credentials)
@@ -24,7 +22,6 @@ async function connect(req, res) {
   }
 }
 
-// PATCH /api/exchanges/:exchangeId/mode
 async function changeMode(req, res) {
   const { mode } = req.body;
   if (!mode) return res.status(400).json({ message: 'mode required' });
@@ -37,7 +34,6 @@ async function changeMode(req, res) {
   }
 }
 
-// DELETE /api/exchanges/:exchangeId
 async function disconnect(req, res) {
   try {
     await svc.disconnectExchange(req.user.id, req.params.exchangeId);
@@ -48,7 +44,6 @@ async function disconnect(req, res) {
   }
 }
 
-// POST /api/exchanges/:exchangeId/test
 async function testConnection(req, res) {
   try {
     res.json(await svc.testConnection(req.user.id, req.params.exchangeId));
@@ -58,9 +53,6 @@ async function testConnection(req, res) {
   }
 }
 
-// POST /api/exchanges/:exchangeId/health-check
-// Vérification manuelle à la demande (met à jour health_status/consecutive_failures
-// exactement comme le ferait le cron, mais déclenchée immédiatement par l'utilisateur).
 async function healthCheckOne(req, res) {
   try {
     const result = await svc.healthCheckConnection(req.user.id, req.params.exchangeId);
@@ -72,8 +64,6 @@ async function healthCheckOne(req, res) {
   }
 }
 
-// GET /api/exchanges/portfolio/all
-// Portfolio agrégé de toutes les exchanges connectées de l'utilisateur.
 async function getAggregatedPortfolio(req, res) {
   try {
     const result = await svc.getAggregatedPortfolio(req.user.id);
@@ -84,7 +74,6 @@ async function getAggregatedPortfolio(req, res) {
   }
 }
 
-// GET /api/exchanges/:exchangeId/portfolio
 async function getPortfolio(req, res) {
   try {
     const creds = await svc.getDecryptedCredentials(req.user.id, req.params.exchangeId);
@@ -101,7 +90,6 @@ async function getPortfolio(req, res) {
   }
 }
 
-// POST /api/exchanges/:exchangeId/order
 async function placeOrder(req, res) {
   const { exchangeId } = req.params;
   const { symbol, side, type = 'market', quantity, price } = req.body;
@@ -119,8 +107,11 @@ async function placeOrder(req, res) {
     if (creds.mode === 'paper') {
       const numericPrice = parseFloat(price);
       if (!Number.isFinite(numericPrice) || numericPrice <= 0) {
+        // ✅ Fix — was hardcoded French on an otherwise-English interface
+        // (same pattern already fixed on Backtester.jsx). Translated to
+        // match the rest of the UI.
         return res.status(400).json({
-          message: 'Un prix de marché valide (price > 0) est requis pour ouvrir un paper trade — le prix courant doit être transmis par le client.',
+          message: 'A valid market price (price > 0) is required to open a paper trade — the current price must be sent by the client.',
         });
       }
 
@@ -150,7 +141,6 @@ async function placeOrder(req, res) {
   }
 }
 
-// POST /api/exchanges/:exchangeId/paper-trades/:tradeId/close
 async function closePaperTrade(req, res) {
   const { tradeId } = req.params;
   const { closePrice } = req.body;
@@ -164,7 +154,6 @@ async function closePaperTrade(req, res) {
   }
 }
 
-// GET /api/exchanges/:exchangeId/paper-trades?status=open|closed
 async function getPaperTrades(req, res) {
   const status = req.query.status || 'open';
   try {

@@ -16,7 +16,9 @@ const logger = require('./utils/logger');
 const db     = require('./config/db');
 const { initCronJobs }      = require('./services/cron.service');
 const { startMarketSocket } = require('./ws/marketSocket.server');
-
+// ✅ Feature: per-user live Dashboard WebSocket (see ws/dashboardSocket.server.js)
+const { startDashboardSocket } = require('./ws/dashboardSocket.server');
+const { attachUpgradeRouter } = require('./ws/upgradeRouter');
 const app = express();
 
 // ── 1. Security & Middlewares ─────────────────────────────
@@ -135,7 +137,14 @@ const server = app.listen(env.PORT, async () => {
         initCronJobs();
         logger.info(' Cron Engine: ✅ Initialized & Active');
 
-        startMarketSocket(server);
+        // ✅ Fix — one shared 'upgrade' router instead of two competing
+        // `new WebSocketServer({ server, path })` (see ws/upgradeRouter.js).
+        const marketUpgrade    = startMarketSocket();
+        const dashboardUpgrade = startDashboardSocket();
+        attachUpgradeRouter(server, {
+          '/ws/market':    marketUpgrade,
+          '/ws/dashboard': dashboardUpgrade,
+        });
 
     } catch (err) {
         logger.error(' Initialization Failed:', err.message);

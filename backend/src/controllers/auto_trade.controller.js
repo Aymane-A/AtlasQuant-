@@ -4,36 +4,21 @@
  * CRUD pour auto_trade_configs. La création ne fait AUCUN appel réseau
  * ni ne lance de backtest — elle enregistre juste l'intention (symbole +
  * stratégie + exchange), calcule params_hash, et laisse autoTrader.service.js
- * (cron) faire tout le travail de gating au prochain cycle. C'est
- * intentionnel : create() doit répondre vite, et le status
- * 'backtest_required' par défaut communique déjà clairement à l'utilisateur
- * qu'il doit lancer un backtest avant que ça s'active.
+ * (cron) faire tout le travail de gating au prochain cycle.
  *
- * Le champ `symbol` est validé contre la watchlist de l'utilisateur — voir
- * la discussion produit : "auto-trade ne doit tourner que sur les symboles
- * que l'utilisateur a explicitement choisis". Toute autre restriction
- * (backtest existe, frais, expectancy positive) est un problème de gating,
- * pas de validation d'entrée, et reste dans autoTrader.service.js.
+ * Le champ `symbol` est validé contre la watchlist de l'utilisateur —
+ * "auto-trade ne doit tourner que sur les symboles que l'utilisateur a
+ * explicitement choisis".
  *
- * FIX (strategy mismatch) :
- *   `findMatchingBacktest` et la liaison manuelle dans `updateConfig`
- *   comparaient `backtest_history.strategy` (le LABEL affiché, ex: "RSI
- *   Momentum Reversion", potentiellement renommé par l'utilisateur côté
- *   Backtester) à `strategyId` (l'id technique, ex: "rsi_momentum") — ces
- *   deux chaînes ne coïncident JAMAIS, donc aucun backtest ne se liait
- *   automatiquement à un config nouvellement créé. Les deux requêtes
- *   comparent maintenant `strategy_id` (colonne dédiée, voir config/db.js).
+ * FIX (strategy mismatch) : findMatchingBacktest et updateConfig comparent
+ * `strategy_id` (id technique) et non le label affiché.
  *
- * FIX (upsert ne remettait jamais à jour backtest_id) :
- *   Le `ON CONFLICT ... DO UPDATE` de createConfig ne touchait que
- *   `enabled`/`updated_at` — recréer un config déjà existant (même
- *   symbole/stratégie/params/exchange) après avoir lancé un NOUVEAU
- *   backtest gate_eligible ne réactualisait donc jamais `backtest_id` :
- *   la ligne existante gardait son ancien lien (souvent `null`), même si
- *   `findMatchingBacktest` venait de retrouver un backtest valide. Le
- *   conflit met désormais aussi à jour `backtest_id = EXCLUDED.backtest_id`,
- *   pour que relancer createConfig avec un backtest plus récent le relie
- *   effectivement.
+ * FIX (upsert) : ON CONFLICT met aussi à jour backtest_id.
+ *
+ * ✅ Feature (2026-09-27): pauseAll / resumeAll — kill switch. Un seul
+ * appel désactive (ou réactive) TOUS les configs de l'utilisateur, au lieu
+ * de devoir les basculer un par un. Ne touche pas aux trades déjà ouverts :
+ * paperTradeMonitor continue de gérer leur SL/TP normalement.
  */
 
 const db = require('../config/db');
@@ -41,14 +26,6 @@ const logger = require('../utils/logger');
 const { computeParamsHash } = require('../utils/paramsHash');
 const { listStrategies } = require('../services/backtestStrategies.service');
 
-/**
- * Trouve le backtest le plus récent, single-symbol, gate_eligible,
- * correspondant exactement à symbol + strategyId + paramsHash — utilisé
- * pour pré-remplir backtest_id à la création si un backtest valide existe
- * déjà. Ne fait AUCUN jugement sur fraîcheur/expectancy ici (c'est le rôle
- * exclusif de autoTrader.service.js#evaluateGate, pour n'avoir qu'un seul
- * endroit où cette logique peut diverger).
- */
 async function findMatchingBacktest(userId, symbol, strategyId, paramsHash) {
   const { rows } = await db.query(
     `SELECT id FROM backtest_history
@@ -90,8 +67,6 @@ async function createConfig(req, res) {
       });
     }
 
-    // Le symbole doit être dans la watchlist de l'utilisateur — auto-trade
-    // opt-in par symbole, pas un scan global de signaux (voir doc produit).
     const cleanSymbol = String(symbol).toUpperCase().trim();
     const { rows: wl } = await db.query(
       `SELECT 1 FROM watchlist WHERE user_id = $1 AND symbol = $2`,
@@ -120,7 +95,7 @@ async function createConfig(req, res) {
        RETURNING *`,
       [
         userId, cleanSymbol, strategyId, paramsHash, exchangeId,
-        backtestId, backtestId ? 'backtest_required' : 'backtest_required', // status réel décidé par le prochain cycle autoTrader
+        backtestId, 'backtest_required', // status réel décidé par le prochain cycle autoTrader
         parseInt(probationTradesRequired, 10) || 5,
         maxPositionSize ? parseFloat(maxPositionSize) : null,
         maxDailyLossPct ? parseFloat(maxDailyLossPct) : null,
@@ -138,8 +113,6 @@ async function createConfig(req, res) {
 
 /**
  * GET /api/auto-trade/configs
- * Liste tous les configs de l'utilisateur, avec un résumé du backtest lié
- * (si présent) pour que le frontend affiche le statut sans requête séparée.
  */
 async function listConfigs(req, res) {
   try {
@@ -169,16 +142,6 @@ async function listConfigs(req, res) {
  * PATCH /api/auto-trade/configs/:id
  * body: { enabled?, backtestId?, probationTradesRequired?, maxPositionSize?,
  *         maxDailyLossPct? }
- *
- * Ne permet PAS de modifier symbol/strategyId/exchangeId directement — ça
- * changerait params_hash et casserait l'UNIQUE constraint / le lien au
- * backtest existant. Pour changer la stratégie d'un symbole, l'utilisateur
- * crée un nouveau config (createConfig gère déjà le upsert par hash).
- *
- * Repasser `backtestId` permet de lier manuellement un backtest différent
- * (ex: l'utilisateur vient de relancer un backtest plus récent) — sans ça,
- * il faudrait attendre que createConfig retrouve automatiquement le plus
- * récent, ce qui ne se reproduit qu'à la création.
  */
 async function updateConfig(req, res) {
   try {
@@ -200,10 +163,6 @@ async function updateConfig(req, res) {
       if (backtestId === null) {
         newBacktestId = null;
       } else {
-        // Vérifie que le backtest appartient bien à l'utilisateur et matche
-        // symbole + stratégie + params_hash de CE config — sinon un
-        // utilisateur pourrait lier n'importe quel backtest (même sur un
-        // autre symbole) pour contourner le gate.
         const { rows: bt } = await db.query(
           `SELECT id FROM backtest_history
            WHERE id = $1 AND user_id = $2 AND symbol = $3 AND strategy_id = $4
@@ -250,10 +209,6 @@ async function updateConfig(req, res) {
 
 /**
  * DELETE /api/auto-trade/configs/:id
- * Ne ferme PAS les trades ouverts liés à ce config — un trade en cours
- * garde son exit logic normale (SL/TP via paperTradeMonitor) même après
- * suppression du config. auto_trade_config_id passe à NULL (ON DELETE SET
- * NULL sur paper_trades) plutôt que de bloquer la suppression.
  */
 async function deleteConfig(req, res) {
   try {
@@ -275,4 +230,46 @@ async function deleteConfig(req, res) {
   }
 }
 
-module.exports = { createConfig, listConfigs, updateConfig, deleteConfig };
+/**
+ * POST /api/auto-trade/configs/pause-all
+ * Kill switch : désactive tous les configs actifs de l'utilisateur.
+ */
+async function pauseAll(req, res) {
+  try {
+    const userId = req.user.id;
+    const { rowCount } = await db.query(
+      `UPDATE auto_trade_configs SET enabled = false, updated_at = NOW()
+       WHERE user_id = $1 AND enabled = true`,
+      [userId]
+    );
+    logger.info(`[autoTrade] pause-all — user ${userId}, ${rowCount} config(s) désactivé(s)`);
+    return res.status(200).json({ success: true, affected: rowCount });
+  } catch (err) {
+    logger.error(`[autoTrade.pauseAll] ${err.message}`);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/**
+ * POST /api/auto-trade/configs/resume-all
+ * Réactive tous les configs désactivés de l'utilisateur. Le statut
+ * (probation/live/blocked...) n'est pas touché : autoTrader réévalue le
+ * gate normalement au prochain cycle.
+ */
+async function resumeAll(req, res) {
+  try {
+    const userId = req.user.id;
+    const { rowCount } = await db.query(
+      `UPDATE auto_trade_configs SET enabled = true, updated_at = NOW()
+       WHERE user_id = $1 AND enabled = false`,
+      [userId]
+    );
+    logger.info(`[autoTrade] resume-all — user ${userId}, ${rowCount} config(s) réactivé(s)`);
+    return res.status(200).json({ success: true, affected: rowCount });
+  } catch (err) {
+    logger.error(`[autoTrade.resumeAll] ${err.message}`);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+module.exports = { createConfig, listConfigs, updateConfig, deleteConfig, pauseAll, resumeAll };

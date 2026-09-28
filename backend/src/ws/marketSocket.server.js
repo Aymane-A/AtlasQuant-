@@ -2,10 +2,12 @@
  * src/ws/marketSocket.server.js
  *
  * RÔLE DE CE FICHIER :
- * Serveur WebSocket attaché au même serveur HTTP qu'Express (pas de
- * port séparé — important pour le déploiement où un seul port est
- * généralement exposé). Diffuse un snapshot du marché à tous les
+ * Serveur WebSocket de marché. Diffuse un snapshot du marché à tous les
  * clients connectés toutes les BROADCAST_INTERVAL_MS millisecondes.
+ *
+ * ✅ Fix — passe en `noServer: true` : l'upgrade HTTP est maintenant
+ * routé par ws/upgradeRouter.js (voir la note là-bas). startMarketSocket()
+ * renvoie le handler d'upgrade à enregistrer pour '/ws/market'.
  *
  * Le frontend (useMarketData.js) attend des messages JSON de la forme :
  *   { ticks, indices, sectors, comms, forex, cryptos, sp500Intraday }
@@ -22,12 +24,8 @@ let wss = null;
 let broadcastTimer = null;
 let lastSnapshot = null;
 
-/**
- * Démarre le serveur WebSocket sur le serveur HTTP fourni (celui créé
- * par app.listen() dans app.js — on ne crée pas de nouveau port).
- */
-function startMarketSocket(httpServer) {
-  wss = new WebSocketServer({ server: httpServer });
+function startMarketSocket() {
+  wss = new WebSocketServer({ noServer: true });
 
   wss.on('connection', (socket) => {
     logger.info(`[marketSocket] Client connecté (${wss.clients.size} actifs)`);
@@ -51,7 +49,11 @@ function startMarketSocket(httpServer) {
   refreshAndBroadcast();
   broadcastTimer = setInterval(refreshAndBroadcast, BROADCAST_INTERVAL_MS);
 
-  logger.info('[marketSocket] ✅ WebSocket de marché actif (attaché au serveur HTTP)');
+  logger.info('[marketSocket] ✅ WebSocket de marché actif (/ws/market)');
+
+  return (req, socket, head) => {
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+  };
 }
 
 /**

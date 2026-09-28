@@ -1,6 +1,7 @@
 // frontend/src/pages/AutoTradeDashboard.jsx
 import { useState, useEffect, useCallback } from 'react';
 import api from '../services/api';
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, CartesianGrid } from 'recharts';
 
 /**
  * "Proof floor" page — shows the user, in one place, whether auto-trading
@@ -62,6 +63,7 @@ export default function AutoTradeDashboard() {
   const [error, setError]               = useState(null);
   const [refreshedAt, setRefreshedAt]   = useState(null);
   const [tab, setTab]                   = useState('open');
+  const [toggling, setToggling]         = useState(false);
 
   const load = useCallback(async () => {
     setError(null);
@@ -87,6 +89,33 @@ export default function AutoTradeDashboard() {
     const id = setInterval(load, 30000);
     return () => clearInterval(id);
   }, [load]);
+
+  // Kill switch: pause/resume EVERY config in one call. Open trades keep
+  // being managed (SL/TP) — this only stops new ones from being opened.
+  const anyEnabled = configs.some(c => c.enabled);
+  const toggleAll = async () => {
+    const pausing = anyEnabled;
+    if (pausing && !window.confirm('Pause ALL auto-trade configs? No new trades will be opened (open trades keep their SL/TP).')) return;
+    setToggling(true);
+    try {
+      await api.post(`/auto-trade/configs/${pausing ? 'pause-all' : 'resume-all'}`);
+      await load();
+    } catch (e) {
+      setError(e.response?.data?.error || e.message || 'Failed');
+    } finally {
+      setToggling(false);
+    }
+  };
+
+  // Cumulative P&L over closed trades, oldest → newest.
+  let running = 0;
+  const equityCurve = [...closedTrades]
+    .filter(t => Number.isFinite(Number(t.pnl)) && t.closed_at)
+    .sort((a, b) => new Date(a.closed_at) - new Date(b.closed_at))
+    .map(t => {
+      running += Number(t.pnl);
+      return { date: fmtDate(t.closed_at), pnl: parseFloat(running.toFixed(2)) };
+    });
 
   const liveCount      = configs.filter(c => c.status === 'live').length;
   const probationCount = configs.filter(c => c.status === 'probation').length;
@@ -115,6 +144,22 @@ export default function AutoTradeDashboard() {
             Everything below is simulated — no real money moves. Watch it work before you connect a live exchange.
           </p>
         </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+        {configs.length > 0 && (
+          <button
+            onClick={toggleAll}
+            disabled={toggling}
+            style={{
+              background: anyEnabled ? 'rgba(248,113,113,0.1)' : 'var(--cyan-glow)',
+              border: `1px solid ${anyEnabled ? 'rgba(248,113,113,0.4)' : 'var(--border-accent)'}`,
+              color: anyEnabled ? 'var(--red)' : 'var(--cyan)',
+              padding: '8px 14px', borderRadius: 8, fontSize: 12, fontWeight: 700, ...mono,
+              cursor: toggling ? 'wait' : 'pointer',
+            }}
+          >
+            {anyEnabled ? '⏸ Pause all' : '▶ Resume all'}
+          </button>
+        )}
         <button
           onClick={load}
           style={{
@@ -124,6 +169,7 @@ export default function AutoTradeDashboard() {
         >
           Refresh{refreshedAt ? ` · ${refreshedAt.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}` : ''}
         </button>
+        </div>
       </div>
 
       {error && (
@@ -152,6 +198,29 @@ export default function AutoTradeDashboard() {
         />
       </div>
 
+      {/* ── Equity curve ── */}
+      {equityCurve.length >= 2 && (
+        <div>
+          <h2 style={sectionTitle}>Cumulative P&amp;L</h2>
+          <div className="glass-panel" style={{ borderRadius: 14, padding: '16px 12px 8px' }}>
+            <ResponsiveContainer width="100%" height={200}>
+              <LineChart data={equityCurve} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+                <XAxis dataKey="date" hide />
+                <YAxis tick={{ fontSize: 10, fill: '#64748b', fontFamily: 'JetBrains Mono,monospace' }}
+                  tickFormatter={v => `$${v}`} width={56} />
+                <Tooltip
+                  contentStyle={{ background: 'rgba(3,7,18,0.97)', border: '1px solid rgba(0,245,212,0.3)', borderRadius: 8, fontFamily: 'JetBrains Mono,monospace', fontSize: 11 }}
+                  formatter={v => [`$${v}`, 'Cumulative P&L']}
+                />
+                <ReferenceLine y={0} stroke="rgba(255,255,255,0.15)" />
+                <Line type="monotone" dataKey="pnl" stroke={totalPnl >= 0 ? '#34d399' : '#f87171'} strokeWidth={2} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      )}
+
       {/* ── Auto-trade configs ── */}
       <div>
         <h2 style={sectionTitle}>Auto-trade configs</h2>
@@ -167,7 +236,10 @@ export default function AutoTradeDashboard() {
               rows={configs.map(c => [
                 <span style={mono}>{c.symbol}</span>,
                 c.strategy_id,
-                <StatusPill status={c.status} />,
+                <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                  <StatusPill status={c.status} />
+                  {!c.enabled && <span style={{ ...mono, fontSize: 10, color: 'var(--amber)' }}>paused</span>}
+                </span>,
                 c.status === 'probation'
                   ? <ProgressCell done={c.probation_trades_completed} total={c.probation_trades_required} />
                   : <span style={{ color: 'var(--text-muted)' }}>—</span>,

@@ -5,7 +5,7 @@ import { useEffect, useState, useRef } from 'react';
 // port que l'API REST (attaché au serveur HTTP Express), plutôt qu'un
 // port 8080 séparé — nécessaire pour les hébergeurs qui n'exposent
 // qu'un seul port en production.
-const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:5000';
+const WS_URL = (import.meta.env.VITE_WS_URL || 'ws://localhost:5000') + '/ws/market';
 
 export function useMarketData() {
   const [data, setData] = useState({

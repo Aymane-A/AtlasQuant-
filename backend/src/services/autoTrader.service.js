@@ -9,6 +9,14 @@
  * le passage en live. Voir auto_trade_configs (config/db.js) pour le schéma
  * et statuts.
  *
+ * ⚠️ SAFETY NOTE: ce service n'ouvre et ne ferme JAMAIS que des paper
+ * trades (exchangesSvc.openPaperTrade) — que le status soit 'probation'
+ * OU 'live'. 'live' ici signifie "a gradué la probation", pas "envoie des
+ * ordres réels" : aucun chemin de ce fichier n'appelle placeLiveOrder() ou
+ * un équivalent exchange réel. Un passage à du trading avec de l'argent
+ * réel serait un changement délibéré et distinct, pas un effet de bord de
+ * ce service.
+ *
  * Lifecycle d'un config :
  *   disabled → backtest_required → (backtest_expired | backtest_rejected) → probation → live
  *   `blocked` est atteignable depuis n'importe quel état si la probation échoue
@@ -20,15 +28,31 @@
  * s'occupe uniquement de la décision "faut-il ouvrir un trade" et du
  * lifecycle des configs.
  *
+ * ✅ Feature (2026-09-27): trois garde-fous ajoutés à processConfig() :
+ *   1. dailyLossBreached() — si max_daily_loss_pct est défini sur le config
+ *      et que les trades clôturés AUJOURD'HUI sur ce config cumulent une
+ *      perte qui dépasse ce seuil, le config passe à 'blocked' et aucun
+ *      nouveau trade n'est ouvert tant qu'il n'est pas réactivé
+ *      manuellement. Avant ce fix, max_daily_loss_pct existait en base
+ *      (et dans l'UI de création) mais n'était lu nulle part.
+ *   2. hasOpposingOpenPosition() — empêche deux configs différents sur le
+ *      MÊME symbole (ex: AAPL/rsi_momentum et AAPL/macd_crossover) de finir
+ *      avec une position BUY et une position SELL ouvertes en même temps,
+ *      ce qui n'aurait aucun sens économiquement pour l'utilisateur.
+ *   3. notifyTradeOpened() (tradeNotify.service.js) — envoie un email/
+ *      Telegram dès qu'un trade est réellement ouvert, pas seulement quand
+ *      le signal brut est détecté (déjà couvert par signalAlert.service.js).
+ *
  * Wiring: dans le cron bootstrap (là où checkAlerts / paperTradeMonitor sont
  * démarrés), ajouter :
  *   const autoTrader = require('./services/autoTrader.service');
  *   autoTrader.start(); // vérifie toutes les 60s par défaut
  */
 
-const db           = require('../config/db');
-const logger       = require('../utils/logger');
-const exchangesSvc = require('./exchanges.service');
+const db              = require('../config/db');
+const logger          = require('../utils/logger');
+const exchangesSvc    = require('./exchanges.service');
+const { notifyTradeOpened } = require('./tradeNotify.service');
 
 const GATE_FRESHNESS_DAYS   = 30; // doit rester cohérent avec backtest.controller.js
 const MIN_BACKTEST_TRADES   = 20; // en dessous, l'expectancy n'est pas statistiquement fiable
@@ -38,6 +62,11 @@ const SIGNAL_MAX_AGE_MS     = 15 * 60 * 1000; // un signal de plus de 15 min est
 // Un seul trade ouvert à la fois par config — évite le pyramiding non
 // contrôlé pendant la probation, qui fausserait le calcul du win rate.
 const MAX_OPEN_PER_CONFIG = 1;
+
+// Baseline utilisée pour convertir max_daily_loss_pct (un %) en montant —
+// même valeur que le solde paper simulé par défaut ailleurs dans l'app
+// (voir trading.controller.js#getBalance, mode paper, fallback $10,000).
+const PAPER_ACCOUNT_BASELINE = 10000;
 
 /**
  * Charge tous les configs actifs (enabled=true, status pas 'disabled' ni
@@ -112,6 +141,48 @@ function evaluateGraduation(config) {
 }
 
 /**
+ * ✅ Feature: garde-fou de perte quotidienne. Compare la somme des `pnl`
+ * clôturés AUJOURD'HUI sur CE config à max_daily_loss_pct (exprimé en %
+ * de PAPER_ACCOUNT_BASELINE). Retourne false si max_daily_loss_pct n'est
+ * pas défini sur le config (opt-in, pas de limite par défaut).
+ */
+async function dailyLossBreached(config) {
+  if (!config.max_daily_loss_pct) return false;
+
+  const { rows } = await db.query(
+    `SELECT COALESCE(SUM(pnl), 0) AS total
+     FROM paper_trades
+     WHERE auto_trade_config_id = $1
+       AND status = 'closed'
+       AND closed_at >= date_trunc('day', NOW())`,
+    [config.id]
+  );
+
+  const todayPnl = parseFloat(rows[0].total) || 0;
+  if (todayPnl >= 0) return false;
+
+  const lossPct = (Math.abs(todayPnl) / PAPER_ACCOUNT_BASELINE) * 100;
+  return lossPct >= parseFloat(config.max_daily_loss_pct);
+}
+
+/**
+ * ✅ Feature: empêche deux configs différents sur le même utilisateur et
+ * le même symbole d'ouvrir des positions opposées (ex: un config BUY sur
+ * AAPL pendant qu'un autre config a déjà une position SELL ouverte sur
+ * AAPL) — situation qui n'a pas de sens économique et complique le calcul
+ * du P&L affiché à l'utilisateur.
+ */
+async function hasOpposingOpenPosition(userId, symbol, side) {
+  const { rows } = await db.query(
+    `SELECT 1 FROM paper_trades
+     WHERE user_id = $1 AND symbol = $2 AND status = 'open' AND side != $3
+     LIMIT 1`,
+    [userId, symbol, side]
+  );
+  return rows.length > 0;
+}
+
+/**
  * Trouve le signal le plus récent pour ce symbole, pas plus vieux que
  * SIGNAL_MAX_AGE_MS, et pas déjà consommé par ce config (on track via
  * paper_trades.opened_at > signal.created_at n'est pas fiable — on stocke
@@ -156,7 +227,7 @@ async function computeQuantity(userId, exchangeId, symbol, price, config) {
   // Fallback si exchangesSvc n'expose pas de lecture directe de balance
   // (selon la version de exchanges.service.js) — on relit via le même
   // chemin que trading.controller.js (paper mode → solde simulé).
-  let quoteBalance = 10000;
+  let quoteBalance = PAPER_ACCOUNT_BASELINE;
   if (balance) {
     const quoteSymbol = symbol.includes('/') ? symbol.split('/')[1] : 'USDT';
     const b = balance.find(x => x.symbol === quoteSymbol);
@@ -189,6 +260,17 @@ async function processConfig(config) {
 
   if (!['probation', 'live'].includes(config.status)) return;
 
+  // ✅ Feature: garde-fou de perte quotidienne — bloque le config avant
+  // d'ouvrir quoi que ce soit de nouveau si la limite est dépassée.
+  if (await dailyLossBreached(config)) {
+    await db.query(
+      `UPDATE auto_trade_configs SET status = 'blocked', last_evaluated_at = NOW(), updated_at = NOW() WHERE id = $1`,
+      [config.id]
+    );
+    logger.warn(`[autoTrader] config #${config.id} (${config.symbol}) — daily loss limit reached (${config.max_daily_loss_pct}%), blocking`);
+    return;
+  }
+
   const openCount = await countOpenTradesForConfig(config.id);
   if (openCount >= MAX_OPEN_PER_CONFIG) return;
 
@@ -198,6 +280,13 @@ async function processConfig(config) {
   const side  = signal.signal === 'BUY' ? 'buy' : 'sell';
   const price = parseFloat(signal.entry) || null;
   if (!price) return;
+
+  // ✅ Feature: évite qu'un autre config sur le même symbole ait déjà une
+  // position ouverte dans le sens opposé.
+  if (await hasOpposingOpenPosition(config.user_id, config.symbol, side)) {
+    logger.warn(`[autoTrader] config #${config.id} — skipping ${side} on ${config.symbol}: opposing open position exists`);
+    return;
+  }
 
   const quantity = await computeQuantity(config.user_id, config.exchange_id, config.symbol, price, config);
   if (!quantity || quantity <= 0) return;
@@ -228,6 +317,10 @@ async function processConfig(config) {
     );
 
     logger.info(`[autoTrader] config #${config.id} — opened ${side} ${config.symbol} @ ${price} (${config.status})`);
+
+    // ✅ Feature: notifie l'utilisateur — jamais bloquant sur l'exécution.
+    notifyTradeOpened(config.user_id, { symbol: config.symbol, side, price })
+      .catch(e => logger.error(`[autoTrader] notify failed: ${e.message}`));
   } catch (err) {
     logger.error(`[autoTrader] config #${config.id} — trade failed: ${err.message}`);
   }
@@ -238,12 +331,15 @@ async function processConfig(config) {
  * équivalent) quand un paper_trade lié à un auto_trade_config se ferme.
  * Incrémente les compteurs et déclenche evaluateGraduation().
  */
+// ✅ Fix: $2 est utilisé deux fois (CASE + addition). Sans cast explicite,
+// Postgres l'inférait en INTEGER via le `> 0` et rejetait tout pnl décimal
+// ("invalid input syntax for type integer: \"25.5\"").
 async function recordProbationResult(configId, pnl) {
   const { rows } = await db.query(
     `UPDATE auto_trade_configs
      SET probation_trades_completed = probation_trades_completed + 1,
-         probation_wins  = probation_wins + CASE WHEN $2 > 0 THEN 1 ELSE 0 END,
-         probation_pnl   = probation_pnl + $2,
+         probation_wins  = probation_wins + CASE WHEN $2::numeric > 0 THEN 1 ELSE 0 END,
+         probation_pnl   = probation_pnl + $2::numeric,
          updated_at      = NOW()
      WHERE id = $1 AND status = 'probation'
      RETURNING *`,

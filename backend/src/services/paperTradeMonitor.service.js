@@ -2,30 +2,41 @@
  * services/paperTradeMonitor.service.js — AtlasQuant AI
  * Watches open paper trades that have a stop_loss / take_profit set and
  * auto-closes them once price crosses the target. Crypto uses Binance's
- * public ticker (no auth needed); OANDA needs the user's own credentials
- * since pricing is account-scoped there.
+ * public ticker (no auth needed); equities/indices/forex/commodities use
+ * Yahoo Finance; OANDA needs the user's own credentials since pricing is
+ * account-scoped there.
  *
  * ✅ Fix: garde anti-chevauchement (isRunning) — sans ça, si un cycle
- * traîne plus longtemps que l'intervalle (ex: Binance/OANDA lent), le
- * setInterval relance un nouveau cycle par-dessus l'ancien. Plusieurs
- * cycles simultanés = plusieurs connexions pg ouvertes en même temps =
- * pool épuisé pour tout le reste de l'app ("Connection terminated due
- * to connection timeout" sur /api/alerts etc.)
+ * traîne plus longtemps que l'intervalle, le setInterval relance un
+ * nouveau cycle par-dessus l'ancien = pool pg épuisé.
  *
- * Wiring: in your existing cron bootstrap file (wherever the screener /
- * checkAlerts crons are started), add:
+ * ✅ Fix (2026-09-27): getCurrentPrice() envoyait TOUT symbole non-OANDA
+ * vers Binance (ex: "^GSPC" → "GSPCUSDT" → 400). On route maintenant sur
+ * la NATURE du symbole (crypto vs reste), pas sur exchange_id : un config
+ * auto-trade sur une action peut très bien avoir exchange_id='binance'.
  *
- *   const paperTradeMonitor = require('./services/paperTradeMonitor.service');
- *   paperTradeMonitor.start(); // checks every 60s by default
+ * ✅ Feature (2026-09-27): notifyTradeClosed() — email/Telegram quand un
+ * trade ouvert par l'auto-trader est clôturé par SL/TP. Limité aux trades
+ * qui ont un auto_trade_config_id (les trades manuels ne déclenchent pas
+ * de notification "Auto-trade closed").
  */
 
-const axios         = require('axios');
-const logger        = require('../utils/logger');
-const exchangesSvc  = require('./exchanges.service');
+const axios          = require('axios');
+const logger         = require('../utils/logger');
+const db             = require('../config/db');
+const exchangesSvc   = require('./exchanges.service');
+const autoTrader     = require('./autoTrader.service');
+const { CRYPTO_SYMBOLS }     = require('./signalGenerator.service');
+const { notifyTradeClosed }  = require('./tradeNotify.service');
 
 const PRICE_FETCH_TIMEOUT_MS = 6000;
 
-// Fetches the current price for a trade's symbol on its exchange.
+const CRYPTO_SYMBOLS_SET = new Set(CRYPTO_SYMBOLS);
+function isCryptoSymbol(symbol) {
+  const noSlash = symbol.toUpperCase().replace('/', '');
+  return CRYPTO_SYMBOLS_SET.has(noSlash) || CRYPTO_SYMBOLS_SET.has(`${noSlash}USDT`);
+}
+
 // Returns null (not throws) on failure so one bad symbol doesn't stop
 // the rest of the batch from being checked.
 async function getCurrentPrice(trade) {
@@ -34,8 +45,6 @@ async function getCurrentPrice(trade) {
       const creds = await exchangesSvc.getDecryptedCredentials(trade.user_id, 'oanda');
       if (!creds) return null;
 
-      // ✅ Fix: getOandaPrice() n'a pas de timeout garanti côté exchanges.service —
-      // on le borne ici en dernier recours pour ne jamais bloquer le cycle entier.
       const { mid } = await Promise.race([
         exchangesSvc.getOandaPrice(creds.apiKey, creds.apiSecret, creds.mode, trade.symbol.toUpperCase()),
         new Promise((_, reject) =>
@@ -43,6 +52,18 @@ async function getCurrentPrice(trade) {
         ),
       ]);
       return mid;
+    }
+
+    if (!isCryptoSymbol(trade.symbol)) {
+      const YahooFinance = require('yahoo-finance2').default;
+      const yf = new YahooFinance({ suppressNotices: ['yahooSurvey'] });
+      const quote = await Promise.race([
+        yf.quote(trade.symbol),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Yahoo price fetch timeout')), PRICE_FETCH_TIMEOUT_MS)
+        ),
+      ]);
+      return quote?.regularMarketPrice ?? null;
     }
 
     const sym  = trade.symbol.toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -73,15 +94,10 @@ function checkTrigger(trade, price) {
   return null;
 }
 
-// Runs one full pass over every open bracketed trade across all users.
-// Exported standalone (not just via start()) so it can also be triggered
-// manually — e.g. from an admin endpoint or a test script.
 async function checkAndCloseTriggeredTrades() {
   const trades = await exchangesSvc.getOpenBracketTrades();
   if (!trades.length) return { checked: 0, closed: 0 };
 
-  // Multiple trades often share the same symbol/exchange — one price
-  // fetch per unique pair per run instead of one per trade.
   const priceCache = {};
   let closed = 0;
 
@@ -99,6 +115,41 @@ async function checkAndCloseTriggeredTrades() {
         await exchangesSvc.closePaperTrade(trade.user_id, trade.id, price, reason);
         closed++;
         logger.info(`[paperTradeMonitor] closed trade #${trade.id} (${trade.symbol}) via ${reason} @ ${price}`);
+
+        // ✅ Fix + Feature: seulement pour les trades de l'auto-trader.
+        if (trade.auto_trade_config_id) {
+          // pnl réel écrit par closePaperTrade ; fallback sur un calcul local.
+          let pnl = null, pnlPct = null;
+          try {
+            const { rows } = await db.query('SELECT pnl, pnl_pct FROM paper_trades WHERE id = $1', [trade.id]);
+            if (rows[0] && rows[0].pnl != null) {
+              pnl    = parseFloat(rows[0].pnl);
+              pnlPct = rows[0].pnl_pct != null ? parseFloat(rows[0].pnl_pct) : null;
+            }
+          } catch (e) {
+            logger.error(`[paperTradeMonitor] pnl read failed for trade #${trade.id}: ${e.message}`);
+          }
+          const entry = parseFloat(trade.price);
+          const qty   = parseFloat(trade.quantity);
+          if (!Number.isFinite(pnl)) {
+            pnl    = trade.side === 'buy' ? (price - entry) * qty : (entry - price) * qty;
+            pnlPct = entry && qty ? (pnl / (entry * qty)) * 100 : null;
+          }
+
+          // Ferme la boucle de probation : sans cet appel, probation_trades_completed
+          // restait à 0 et aucun config ne pouvait passer 'live'.
+          if (Number.isFinite(pnl)) {
+            try {
+              await autoTrader.recordProbationResult(trade.auto_trade_config_id, pnl);
+            } catch (e) {
+              logger.error(`[paperTradeMonitor] recordProbationResult failed (config #${trade.auto_trade_config_id}): ${e.message}`);
+            }
+          }
+
+          notifyTradeClosed(trade.user_id, {
+            symbol: trade.symbol, side: trade.side, price: entry, reason, pnl, pnlPct,
+          }).catch(e => logger.error(`[paperTradeMonitor] notify failed: ${e.message}`));
+        }
       }
     } catch (err) {
       logger.error(`[paperTradeMonitor] trade #${trade.id}: ${err.message}`);
@@ -109,10 +160,10 @@ async function checkAndCloseTriggeredTrades() {
 }
 
 let intervalHandle = null;
-let isRunning       = false; // ✅ Fix: empêche deux cycles de tourner en parallèle
+let isRunning       = false;
 
 function start(intervalMs = 60000) {
-  if (intervalHandle) return; // already running — avoid double-scheduling on hot reload
+  if (intervalHandle) return;
   intervalHandle = setInterval(() => {
     if (isRunning) {
       logger.warn('[paperTradeMonitor] previous run still in progress — skipping this tick');
