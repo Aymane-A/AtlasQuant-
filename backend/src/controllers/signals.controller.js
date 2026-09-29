@@ -4,18 +4,6 @@
 const db     = require('../config/db');
 const logger = require('../utils/logger');
 
-function parseRR(val) {
-    if (!val) return 0;
-    if (typeof val === 'number') return val;
-    const str = String(val);
-    if (str.includes(':')) {
-        const parts = str.split(':');
-        const ratio = parseFloat(parts[1]);
-        return isNaN(ratio) ? 0 : ratio;
-    }
-    return parseFloat(str) || 0;
-}
-
 // ── getAllSignals ──────────────────────────────────────────
 // refresh=true no longer blocks the request for 25-160s. It creates a
 // background job, returns { jobId } immediately, and the frontend polls
@@ -185,10 +173,29 @@ async function getAlphaEngineData(req, res) {
     }
 }
 
-// ── helpers ───────────────────────────────────────────────
+// ── analytics helpers ─────────────────────────────────────
 const PERIOD_DAYS = { '1M': 30, '3M': 90, '6M': 180, '1Y': 365 };
+const WEEK_MS     = 7 * 86400000;
+const DOW_LABELS  = ['Dim','Lun','Mar','Mer','Jeu','Ven','Sam'];
+const DOW_ORDER   = ['Lun','Mar','Mer','Jeu','Ven','Sam','Dim'];
+const COLORS = {
+    Crypto:    'var(--cyan)',
+    Forex:     'var(--purple-bright)',
+    Commodity: 'var(--amber)',
+    Indices:   'var(--green)',
+    Equity:    'var(--red)',
+};
 
-// Fallback uniquement si une vieille ligne n'a pas de asset_class (avant migration)
+// Un même indice peut avoir été stocké sous 2 noms (GSPC / SPX500)
+const SYMBOL_ALIASES = {
+    GSPC: 'SPX500', '^GSPC': 'SPX500', SPX: 'SPX500',
+    NDX:  'NAS100', '^NDX':  'NAS100',
+    DJI:  'US30',   '^DJI':  'US30',
+    '^VIX': 'VIX',
+};
+const normSymbol = s => SYMBOL_ALIASES[s] || s;
+
+// Fallback uniquement si une vieille ligne n'a pas de asset_class
 function classifyAsset(symbol, fallbackClass) {
     if (fallbackClass) return fallbackClass;
     const s = symbol.toUpperCase();
@@ -201,368 +208,280 @@ function classifyAsset(symbol, fallbackClass) {
     return 'Crypto';
 }
 
-function getDow(dateStr) {
-    const days = ['Dim','Lun','Mar','Mer','Jeu','Ven','Sam'];
-    return days[new Date(dateStr).getDay()];
+// Tout en UTC: journal, heatmap DoW, labels — plus de décalage de timezone
+const dayLabel   = d => new Date(d).toLocaleDateString('fr-FR', { timeZone: 'UTC', day: '2-digit', month: 'short' });
+const monthLabel = d => new Date(d).toLocaleString('fr-FR',      { timeZone: 'UTC', month: 'short', year: 'numeric' });
+const getDow     = d => DOW_LABELS[new Date(d).getUTCDay()];
+
+const avg   = a => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
+const r2    = n => Math.round(n * 100) / 100;
+const clamp = (n, lo = 0, hi = 100) => Math.max(lo, Math.min(hi, n));
+
+const isResolved = t => t.pnl_pct != null && ['TP', 'SL', 'EXPIRED'].includes(t.outcome);
+
+function realizedRR(list) {
+    const wins   = list.filter(t => t.pnl_pct > 0).map(t => t.pnl_pct);
+    const losses = list.filter(t => t.pnl_pct < 0).map(t => Math.abs(t.pnl_pct));
+    return wins.length && losses.length ? avg(wins) / avg(losses) : 0;
 }
 
+// Un scan toutes les 4h ré-insère le même BUY tant que la position serait
+// encore ouverte. On ne compte qu'UN trade par (symbole, interval, direction)
+// tant que le précédent n'est pas clos.  rows doit être trié par created_at ASC.
+function dedupeTrades(rows) {
+    const busyUntil = new Map();
+    const kept = [];
+    for (const t of rows) {
+        const key  = `${t.symbol}|${t.interval}|${t.signal}`;
+        const busy = busyUntil.get(key);
+        if (busy !== undefined && t.created_at.getTime() < busy) continue; // doublon
+        kept.push(t);
+        busyUntil.set(key, isResolved(t) && t.closed_at ? t.closed_at.getTime() : Infinity);
+    }
+    return kept;
+}
+
+function pearsonCorrelation(points) {
+    const n = points.length;
+    if (n < 2) return 0;
+    const xs = points.map(p => p.confidence);
+    const ys = points.map(p => p.pnl);
+    const mx = avg(xs), my = avg(ys);
+    let num = 0, dx2 = 0, dy2 = 0;
+    for (let i = 0; i < n; i++) {
+        const dx = xs[i] - mx, dy = ys[i] - my;
+        num += dx * dy; dx2 += dx * dx; dy2 += dy * dy;
+    }
+    const den = Math.sqrt(dx2 * dy2);
+    return den > 0 ? num / den : 0;
+}
+
+const emptyAnalytics = filterClass => ({
+    success: true, kpis: [], equity: [], monthly: [], trades: [],
+    attribution: [], byDow: [], rolling: [], fingerprint: [],
+    distribution: { buy: 0, sell: 0, hold: 0, total: 0 },
+    confidenceOutcome: [], confidenceCorrelation: 0,
+    selectedClass: filterClass || null,
+});
+
 // ── getAnalyticsData ──────────────────────────────────────
+// Perf: les HOLD (~90% des lignes) ne sont JAMAIS chargés en JS — on les
+// compte via un GROUP BY SQL. Seuls les BUY/SELL sont lus ligne par ligne.
+// P&L: vient de signals.pnl_pct (rempli par outcomeResolver.service.js),
+// plus aucune formule basée sur la confidence.
 async function getAnalyticsData(req, res) {
     try {
         const { period, class: filterClass } = req.query;
-        const days = PERIOD_DAYS[period];
+        const days   = PERIOD_DAYS[period];
+        const where  = days ? `WHERE created_at >= NOW() - make_interval(days => $1::int)` : '';
+        const params = days ? [days] : [];
 
-        const query = days
-            ? `SELECT symbol, signal, confidence, price, entry,
-                      stop_loss, take_profit, risk_reward, created_at, asset_class
-               FROM signals
-               WHERE created_at >= NOW() - ($1 || ' days')::INTERVAL
-               ORDER BY created_at DESC`
-            : `SELECT symbol, signal, confidence, price, entry,
-                      stop_loss, take_profit, risk_reward, created_at, asset_class
-               FROM signals ORDER BY created_at DESC`;
+        const [aggRes, tradeRes] = await Promise.all([
+            db.query(`
+                SELECT symbol, asset_class, signal,
+                       COUNT(*)::int AS n,
+                       COALESCE(SUM(confidence), 0)::float AS conf_sum
+                FROM signals ${where}
+                GROUP BY symbol, asset_class, signal
+            `, params),
+            db.query(`
+                SELECT id, symbol, interval, signal, confidence, entry, stop_loss, take_profit,
+                       created_at, asset_class, outcome, closed_at, exit_price, pnl_pct
+                FROM signals
+                ${where ? where + ' AND' : 'WHERE'} signal IN ('BUY','SELL')
+                  AND COALESCE(outcome, '') <> 'INVALID'
+                ORDER BY created_at ASC
+            `, params),
+        ]);
 
-        const { rows: allSignals } = days
-            ? await db.query(query, [days])
-            : await db.query(query);
+        // ── Comptes globaux (tous signaux, HOLD inclus) ──
+        const groups = aggRes.rows.map(g => {
+            const symbol = normSymbol(g.symbol);
+            return { symbol, cls: classifyAsset(symbol, g.asset_class), signal: g.signal, n: g.n, confSum: g.conf_sum };
+        });
+        if (!groups.length) return res.json(emptyAnalytics(filterClass));
 
-        if (!allSignals.length) {
-            return res.json({
-                success: true, kpis: [], equity: [], monthly: [], trades: [],
-                attribution: [], byDow: [], rolling: [], fingerprint: [],
-                distribution: { buy: 0, sell: 0, hold: 0, total: 0 },
-                confidenceOutcome: [], confidenceCorrelation: 0,
-                selectedClass: filterClass || null,
-            });
-        }
+        // ── Trades BUY/SELL, dédupliqués ──
+        const allTrades = dedupeTrades(tradeRes.rows.map(r => {
+            const symbol = normSymbol(r.symbol);
+            return {
+                ...r,
+                symbol,
+                cls:        classifyAsset(symbol, r.asset_class),
+                confidence: r.confidence || 0,
+                pnl_pct:    r.pnl_pct != null ? parseFloat(r.pnl_pct) : null,
+                created_at: new Date(r.created_at),
+                closed_at:  r.closed_at ? new Date(r.closed_at) : null,
+            };
+        }));
 
-        // ✅ Drill-down: si une classe est sélectionnée (clic sur une ligne Attribution
-        // côté frontend), on filtre le jeu de données utilisé pour TOUTES les métriques
-        // principales (KPIs, equity, journal, fingerprint, etc). L'Attribution elle-même
-        // reste calculée sur `allSignals` (voir plus bas) pour rester utilisable comme
-        // "menu" de navigation même quand un filtre est actif.
-        const signals = filterClass
-            ? allSignals.filter(s => classifyAsset(s.symbol, s.asset_class) === filterClass)
-            : allSignals;
+        // ── Drill-down: tout sauf Attribution suit la classe choisie ──
+        const fg     = filterClass ? groups.filter(g => g.cls === filterClass) : groups;
+        const trades = filterClass ? allTrades.filter(t => t.cls === filterClass) : allTrades;
+        if (!fg.length) return res.json(emptyAnalytics(filterClass));
 
-        if (!signals.length) {
-            return res.json({
-                success: true, kpis: [], equity: [], monthly: [], trades: [],
-                attribution: [], byDow: [], rolling: [], fingerprint: [],
-                distribution: { buy: 0, sell: 0, hold: 0, total: 0 },
-                confidenceOutcome: [], confidenceCorrelation: 0,
-                selectedClass: filterClass || null,
-            });
-        }
+        const total = fg.reduce((a, g) => a + g.n, 0);
+        const buys  = fg.filter(g => g.signal === 'BUY').reduce((a, g) => a + g.n, 0);
+        const sells = fg.filter(g => g.signal === 'SELL').reduce((a, g) => a + g.n, 0);
+        const holds = total - buys - sells;
+        const avgConf = Math.round(fg.reduce((a, g) => a + g.confSum, 0) / total);
+        const uniqueSymbols = new Set(fg.map(g => g.symbol)).size;
 
-        const total = signals.length;
-        const buys  = signals.filter(s => s.signal === 'BUY');
-        const sells = signals.filter(s => s.signal === 'SELL');
-        const holds = total - buys.length - sells.length;
-
-        const avgConf = (signals.reduce((a, s) => a + (s.confidence || 0), 0) / total).toFixed(0);
-
-        const rrValues = signals
-            .map(s => {
-                const entry  = parseFloat(s.entry)       || 0;
-                const sl     = parseFloat(s.stop_loss)   || 0;
-                const tp     = parseFloat(s.take_profit) || 0;
-                if (entry && sl && tp) {
-                    const risk   = Math.abs(entry - sl);
-                    const reward = Math.abs(tp - entry);
-                    return risk > 0 ? reward / risk : 0;
-                }
-                return parseRR(s.risk_reward);
-            })
-            .filter(v => v > 0);
-
-        const avgRR = rrValues.length > 0
-            ? (rrValues.reduce((a, b) => a + b, 0) / rrValues.length).toFixed(2)
-            : '0.00';
-
-        const uniqueSymbols = [...new Set(signals.map(s => s.symbol))];
-
-        function calcPnlPct(s) {
-            const entry  = parseFloat(s.entry)       || parseFloat(s.price) || 0;
-            const sl     = parseFloat(s.stop_loss)   || 0;
-            const tp     = parseFloat(s.take_profit) || 0;
-            if (entry && sl && tp) {
-                const riskPct   = Math.abs((entry - sl) / entry) * 100;
-                const rewardPct = Math.abs((tp - entry) / entry) * 100;
-                const conf = s.confidence || 50;
-                if (s.signal === 'BUY')  return conf >= 55 ?  rewardPct : -riskPct;
-                if (s.signal === 'SELL') return conf >= 55 ?  rewardPct : -riskPct;
-                return 0;
-            }
-            const rr   = parseRR(s.risk_reward);
-            const conf = s.confidence || 50;
-            if (s.signal === 'HOLD') return 0;
-            if (rr > 0) return conf >= 55 ? rr * 0.5 : -0.5;
-            return conf >= 55 ? 0.3 : -0.3;
-        }
-
-        // ── Win Rate réel : basé sur le P&L calculé par signal, pas sur le nombre de BUY ──
-        const pnlPerSignal = signals.map(s => calcPnlPct(s));
-        const winningTrades = pnlPerSignal.filter(p => p > 0).length;
-        const winRate = ((winningTrades / total) * 100).toFixed(1);
+        // ── Stats sur trades CLOS uniquement ──
+        const resolved        = trades.filter(isResolved);
+        const resolvedByClose = resolved.slice().sort((a, b) => a.closed_at - b.closed_at);
+        const openCount       = trades.length - resolved.length;
+        const wins            = resolved.filter(t => t.pnl_pct > 0).length;
+        const winRate         = resolved.length ? (wins / resolved.length) * 100 : 0;
+        const rrReal          = realizedRR(resolved);
 
         const kpis = [
-            { label:'Total Signals',  v: total.toString(),               sub:`${buys.length} BUY · ${sells.length} SELL · ${holds} HOLD`, color:'var(--cyan)'          },
-            { label:'Win Rate',       v: winRate + '%',                   sub:`▲ ${winningTrades} trades gagnants`,                        color:'var(--green)'         },
-            { label:'Avg Confidence', v: avgConf + '%',                   sub:'Moyenne IA',                                                color:'var(--amber)'         },
-            { label:'Avg R:R',        v: `1:${avgRR}`,                    sub:'Risk/Reward moyen',                                         color:'var(--cyan)'          },
-            { label:'Actifs',         v: uniqueSymbols.length.toString(), sub:'Crypto · Forex · Commo · Indices',                          color:'var(--purple-bright)' },
+            { label: 'Total Signals',  v: total.toString(),
+              sub: `${buys} BUY · ${sells} SELL · ${holds} HOLD`, color: 'var(--cyan)' },
+            { label: 'Win Rate',       v: resolved.length ? winRate.toFixed(1) + '%' : '—',
+              sub: `${wins}/${resolved.length} clos · ${openCount} ouverts`, color: 'var(--green)' },
+            { label: 'Avg Confidence', v: avgConf + '%',
+              sub: 'Moyenne IA', color: 'var(--amber)' },
+            { label: 'Avg R:R',        v: rrReal > 0 ? `1:${rrReal.toFixed(2)}` : '—',
+              sub: 'R:R réalisé (TP/SL)', color: 'var(--cyan)' },
+            { label: 'Actifs',         v: uniqueSymbols.toString(),
+              sub: 'Crypto · Forex · Commo · Indices', color: 'var(--purple-bright)' },
         ];
 
-        // ── Distribution — source de vérité unique, plus de parsing de string côté frontend ──
-        const distribution = { buy: buys.length, sell: sells.length, hold: holds, total };
+        const distribution = { buy: buys, sell: sells, hold: holds, total };
 
-        const sortedAscAll = signals.slice().sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-        let cumPnl = 0, cumBench = 0;
-        const equity = sortedAscAll.map(s => {
-            const pnl = calcPnlPct(s);
-            cumPnl   += pnl;
-            cumBench += 0.03;
-            return {
-                day:       new Date(s.created_at).toLocaleDateString('fr-FR', { day:'2-digit', month:'short' }),
-                portfolio: parseFloat((100 + cumPnl).toFixed(2)),
-                benchmark: parseFloat((100 + cumBench).toFixed(2)),
-                pnl:       parseFloat(pnl.toFixed(2)),
-            };
+        // ── Equity: somme des P&L par trade, classée par date de CLÔTURE ──
+        let cum = 0;
+        const equity = resolvedByClose.map(t => {
+            cum += t.pnl_pct;
+            return { day: dayLabel(t.closed_at), portfolio: r2(100 + cum), pnl: r2(t.pnl_pct) };
         });
 
+        // ── Rendements mensuels (par date de clôture) ──
         const monthMap = {};
-        sortedAscAll.forEach(s => {
-            const d   = new Date(s.created_at);
-            const key = d.toLocaleString('fr-FR', { month: 'short', year: 'numeric' });
-            if (!monthMap[key]) monthMap[key] = { pnlSum: 0, count: 0, wins: 0 };
-            const pnl = calcPnlPct(s);
-            monthMap[key].pnlSum += pnl;
-            monthMap[key].count++;
-            if (pnl > 0) monthMap[key].wins++;
+        resolvedByClose.forEach(t => {
+            const key = monthLabel(t.closed_at);
+            const m = monthMap[key] || (monthMap[key] = { sum: 0, count: 0, wins: 0 });
+            m.sum += t.pnl_pct; m.count++; if (t.pnl_pct > 0) m.wins++;
         });
-
         const monthly = Object.entries(monthMap).map(([month, v]) => ({
-            month,
-            ret:     parseFloat(v.pnlSum.toFixed(2)),
-            count:   v.count,
-            winRate: parseFloat(((v.wins / v.count) * 100).toFixed(0)),
+            month, ret: r2(v.sum), count: v.count, winRate: Math.round((v.wins / v.count) * 100),
         }));
 
-        const trades = signals.slice(0, 10).map(s => {
-            const entry  = parseFloat(s.entry)       || parseFloat(s.price) || 0;
-            const sl     = parseFloat(s.stop_loss)   || 0;
-            const tp     = parseFloat(s.take_profit) || 0;
-            const rrRaw  = parseRR(s.risk_reward);
-
-            let rrDisplay = '—', pnlDisplay;
-
-            // ✅ Fix Bug 5: un signal HOLD ne correspond à aucune position ouverte —
-            // son P&L doit être 0, cohérent avec calcPnlPct() plus haut qui fait déjà
-            // ce check. Avant ce fix, cette fonction dupliquait la logique de calcul
-            // sans ce garde-fou et traitait HOLD comme un SELL (pnlPts = -risk),
-            // affichant des pertes fictives pour des signaux qui n'ont pris aucun trade.
-            if (s.signal === 'HOLD') {
-                pnlDisplay = '0.0 pts';
-            } else if (entry && sl && tp) {
-                const risk   = Math.abs(entry - sl);
-                const reward = Math.abs(tp - entry);
-                const rrCalc = risk > 0 ? reward / risk : 0;
-                rrDisplay    = `1:${rrCalc.toFixed(1)}`;
-                const pnlPts = s.signal === 'BUY' ? reward : -risk;
-                pnlDisplay   = pnlPts >= 0 ? `+${pnlPts.toFixed(2)} pts` : `${pnlPts.toFixed(2)} pts`;
-            } else if (rrRaw > 0) {
-                rrDisplay  = `1:${rrRaw.toFixed(1)}`;
-                pnlDisplay = rrRaw >= 1 ? `+${(rrRaw * 100).toFixed(0)} pts` : `-${(100 / rrRaw).toFixed(0)} pts`;
-            } else {
-                // NOTE (Bug 3 — indices identiques) : cette branche fallback ne dépend que de
-                // `confidence`. Si plusieurs signaux (ex. indices) ont la même confidence,
-                // ils produiront le même pnlPts affiché ici. La vraie cause est en amont :
-                // entry/stop_loss/take_profit ou risk_reward ne sont pas renseignés pour ces
-                // symboles au moment de l'insertion (voir yahooFinance.service.js). Cette
-                // branche reste un fallback volontaire, pas un fix — à corriger à la source.
-                const conf   = s.confidence || 60;
-                const pnlPts = s.signal === 'BUY' ? (conf - 50) * 0.5 : -(conf - 50) * 0.3;
-                pnlDisplay = pnlPts >= 0 ? `+${pnlPts.toFixed(1)} pts` : `${pnlPts.toFixed(1)} pts`;
-            }
-
+        // ── Journal: 10 derniers trades BUY/SELL (les HOLD n'en sont pas) ──
+        const journal = trades.slice().reverse().slice(0, 10).map(t => {
+            const done = isResolved(t);
+            const entry = parseFloat(t.entry), sl = parseFloat(t.stop_loss), tp = parseFloat(t.take_profit);
+            const risk = Math.abs(entry - sl), reward = Math.abs(tp - entry);
             return {
-                date:        new Date(s.created_at).toISOString().split('T')[0],
-                sym:         s.symbol,
-                asset_class: classifyAsset(s.symbol, s.asset_class),
-                side:        s.signal === 'BUY' ? 'Long' : s.signal === 'SELL' ? 'Short' : 'Hold',
-                pnl:         pnlDisplay,
-                rr:          rrDisplay,
+                date:        t.created_at.toISOString().slice(0, 10),
+                sym:         t.symbol,
+                asset_class: t.cls,
+                side:        t.signal === 'BUY' ? 'Long' : 'Short',
+                pnl:         done ? `${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%` : 'OPEN',
+                rr:          risk > 0 ? `1:${(reward / risk).toFixed(1)}` : '—',
+                outcome:     done ? t.outcome : 'OPEN',
             };
         });
 
-        // ── P&L Attribution by asset class (utilise asset_class réel, fallback si null) ──
-        // ✅ Drill-down: calculée sur allSignals (jamais filtrée) pour que la table reste
-        // un menu de navigation complet, même quand `signals` est restreint à une classe.
-        const allTotal = allSignals.length;
-        const classMap = {};
-        allSignals.forEach(s => {
-            const cls = classifyAsset(s.symbol, s.asset_class);
-            if (!classMap[cls]) classMap[cls] = { total: 0, win: 0, buy: 0, sell: 0, confSum: 0, rrSum: 0, rrCount: 0 };
-            classMap[cls].total++;
-            // ✅ Fix Bug 9: même correction que le KPI Win Rate — basé sur le P&L réel
-            // (calcPnlPct), pas sur le nombre de BUY. Avant ce fix, une classe avec
-            // beaucoup de HOLD (ex. Crypto) affichait un "win rate" artificiellement
-            // bas, alors qu'un HOLD n'est ni une perte ni un gain.
-            if (calcPnlPct(s) > 0) classMap[cls].win++;
-            if (s.signal === 'BUY')  classMap[cls].buy++;
-            if (s.signal === 'SELL') classMap[cls].sell++;
-            classMap[cls].confSum += (s.confidence || 0);
-            const entry = parseFloat(s.entry) || 0;
-            const sl    = parseFloat(s.stop_loss) || 0;
-            const tp    = parseFloat(s.take_profit) || 0;
-            let rr = 0;
-            if (entry && sl && tp) {
-                const risk = Math.abs(entry - sl);
-                const reward = Math.abs(tp - entry);
-                rr = risk > 0 ? reward / risk : 0;
-            } else {
-                rr = parseRR(s.risk_reward);
-            }
-            if (rr > 0) { classMap[cls].rrSum += rr; classMap[cls].rrCount++; }
+        // ── Attribution: toujours sur TOUTES les classes (menu de navigation) ──
+        const classAgg = {};
+        groups.forEach(g => {
+            const c = classAgg[g.cls] || (classAgg[g.cls] = { total: 0, confSum: 0 });
+            c.total += g.n; c.confSum += g.confSum;
+        });
+        const allTotal    = groups.reduce((a, g) => a + g.n, 0);
+        const allResolved = allTrades.filter(isResolved);
+        const attribution = Object.entries(classAgg).map(([name, v]) => {
+            const rs = allResolved.filter(t => t.cls === name);
+            const w  = rs.filter(t => t.pnl_pct > 0).length;
+            return {
+                name,
+                total:   v.total,
+                pct:     parseFloat(((v.total / allTotal) * 100).toFixed(1)),
+                closed:  rs.length,
+                winRate: rs.length ? parseFloat(((w / rs.length) * 100).toFixed(1)) : null,
+                avgConf: Math.round(v.confSum / v.total),
+                avgRR:   parseFloat(realizedRR(rs).toFixed(2)),
+                color:   COLORS[name] || 'var(--cyan)',
+            };
+        }).sort((a, b) => b.total - a.total);
+
+        // ── Win rate par jour de la semaine (jour d'ENTRÉE, UTC) ──
+        const dowMap = Object.fromEntries(DOW_ORDER.map(d => [d, { win: 0, total: 0, sell: 0 }]));
+        resolved.forEach(t => {
+            const m = dowMap[getDow(t.created_at)];
+            m.total++;
+            if (t.pnl_pct > 0) m.win++;
+            if (t.signal === 'SELL') m.sell++;
+        });
+        const byDow = DOW_ORDER.map(day => {
+            const m = dowMap[day];
+            return {
+                day, total: m.total,
+                winRate: m.total ? parseFloat(((m.win / m.total) * 100).toFixed(1)) : 0,
+                buy: m.total - m.sell, sell: m.sell,
+            };
         });
 
-        const COLORS = { 'Crypto':'var(--cyan)', 'Forex':'var(--purple-bright)', 'Commodity':'var(--amber)', 'Indices':'var(--green)' };
-        const attribution = Object.entries(classMap).map(([name, v]) => ({
-            name,
-            total:   v.total,
-            pct:     parseFloat(((v.total / allTotal) * 100).toFixed(1)),
-            winRate: parseFloat(((v.win / v.total) * 100).toFixed(1)),
-            avgConf: parseFloat((v.confSum / v.total).toFixed(0)),
-            avgRR:   v.rrCount > 0 ? parseFloat((v.rrSum / v.rrCount).toFixed(2)) : 0,
-            color:   COLORS[name] || 'var(--cyan)',
-        })).sort((a, b) => b.total - a.total);
-
-        const DOW_ORDER = ['Lun','Mar','Mer','Jeu','Ven','Sam','Dim'];
-        const dowMap = {};
-        DOW_ORDER.forEach(d => { dowMap[d] = { win: 0, sell: 0, hold: 0, total: 0 }; });
-        signals.forEach(s => {
-            const d = getDow(s.created_at);
-            if (!dowMap[d]) return;
-            dowMap[d].total++;
-            if (calcPnlPct(s) > 0)         dowMap[d].win++;
-            if (s.signal === 'SELL')      dowMap[d].sell++;
-            else if (s.signal === 'HOLD') dowMap[d].hold++;
-        });
-        const byDow = DOW_ORDER.map(day => ({
-            day,
-            total:   dowMap[day].total,
-            // ✅ Fix Bug 7: même correction que le KPI Win Rate — basé sur le P&L réel
-            // (calcPnlPct), pas sur le nombre de BUY. Cohérent avec Win Rate Glissant.
-            winRate: dowMap[day].total > 0
-                ? parseFloat(((dowMap[day].win / dowMap[day].total) * 100).toFixed(1))
-                : 0,
-            buy:  dowMap[day].total - dowMap[day].sell - dowMap[day].hold,
-            sell: dowMap[day].sell,
-        }));
-
-        const sortedAsc = signals.slice().sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+        // ── Win rate glissant: fenêtre de 30 TRADES clos ──
         const WINDOW = 30;
-        const rolling = [];
-        for (let i = 0; i < sortedAsc.length; i++) {
-            const windowSlice = sortedAsc.slice(Math.max(0, i - WINDOW + 1), i + 1);
-            // ✅ Fix Bug 6: win rate glissant basé sur le P&L réel (calcPnlPct), pas
-            // sur le nombre de BUY — cohérent avec le KPI "Win Rate" déjà corrigé.
-            const windowWins = windowSlice.filter(s => calcPnlPct(s) > 0).length;
-            const wRate = windowSlice.length > 0 ? parseFloat(((windowWins / windowSlice.length) * 100).toFixed(1)) : 0;
-            rolling.push({
-                day:     new Date(sortedAsc[i].created_at).toLocaleDateString('fr-FR', { day:'2-digit', month:'short' }),
-                winRate: wRate,
-                count:   windowSlice.length,
-            });
-        }
-        const rollingDeduped = Object.values(
-            rolling.reduce((acc, r) => { acc[r.day] = r; return acc; }, {})
-        );
-
-        const rrScore = Math.min(100, parseFloat(avgRR) / 3 * 100);
-
-        const weekMap = {};
-        sortedAsc.forEach(s => {
-            const d = new Date(s.created_at);
-            const startOfYear = new Date(d.getFullYear(), 0, 1);
-            const week = Math.ceil(((d - startOfYear) / 86400000 + startOfYear.getDay() + 1) / 7);
-            const key = `${d.getFullYear()}-W${week}`;
-            if (!weekMap[key]) weekMap[key] = { buy: 0, total: 0 };
-            weekMap[key].total++;
-            if (s.signal === 'BUY') weekMap[key].buy++;
+        const rollingRaw = resolvedByClose.map((t, i) => {
+            const w = resolvedByClose.slice(Math.max(0, i - WINDOW + 1), i + 1);
+            const ww = w.filter(x => x.pnl_pct > 0).length;
+            return { day: dayLabel(t.closed_at), winRate: parseFloat(((ww / w.length) * 100).toFixed(1)), count: w.length };
         });
-        const weekRates = Object.values(weekMap).map(w => w.total > 0 ? (w.buy / w.total) * 100 : 0);
-        let consistencyScore = 50;
-        if (weekRates.length > 1) {
-            const mean = weekRates.reduce((a, b) => a + b, 0) / weekRates.length;
-            const variance = weekRates.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / weekRates.length;
-            const stdDev = Math.sqrt(variance);
-            consistencyScore = Math.max(0, Math.min(100, 100 - (stdDev / 30) * 100));
-        } else if (weekRates.length === 1) {
-            consistencyScore = 60;
+        const rolling = Object.values(rollingRaw.reduce((acc, r) => { acc[r.day] = r; return acc; }, {}));
+
+        // ── Fingerprint: 6 métriques toutes calculées sur des trades clos/réels ──
+        // Consistance = stabilité du win rate d'une semaine à l'autre (>=3 trades/semaine)
+        const weekMap = {};
+        resolved.forEach(t => {
+            const k = Math.floor(t.closed_at.getTime() / WEEK_MS);
+            const w = weekMap[k] || (weekMap[k] = { n: 0, win: 0 });
+            w.n++; if (t.pnl_pct > 0) w.win++;
+        });
+        const weekRates = Object.values(weekMap).filter(w => w.n >= 3).map(w => (w.win / w.n) * 100);
+        let consistency = 0;
+        if (weekRates.length >= 2) {
+            const m = avg(weekRates);
+            const sd = Math.sqrt(avg(weekRates.map(x => (x - m) ** 2)));
+            consistency = clamp(100 - (sd / 30) * 100);
         }
 
-        const classCount = Object.keys(classMap).length;
-        const diversificationScore = Math.min(100, (classCount / 4) * 100);
+        // Diversification = 1 - HHI, normalisé sur 5 classes
+        const clsCount = {};
+        trades.forEach(t => { clsCount[t.cls] = (clsCount[t.cls] || 0) + 1; });
+        const hhi = trades.length ? Object.values(clsCount).reduce((a, n) => a + (n / trades.length) ** 2, 0) : 1;
+        const diversification = trades.length ? clamp(((1 - hhi) / (1 - 1 / 5)) * 100) : 0;
 
-        let activityScore = 50;
-        if (signals.length > 0) {
-            const oldest = new Date(sortedAsc[0]?.created_at);
-            const newest = new Date(sortedAsc[sortedAsc.length - 1]?.created_at);
-            const daySpan = Math.max(1, (newest - oldest) / 86400000);
-            const sigPerDay = total / daySpan;
-            if (sigPerDay >= 3 && sigPerDay <= 5)      activityScore = 100;
-            else if (sigPerDay >= 1 && sigPerDay < 3)  activityScore = 60 + (sigPerDay - 1) / 2 * 40;
-            else if (sigPerDay > 5 && sigPerDay <= 10) activityScore = 100 - (sigPerDay - 5) / 5 * 30;
-            else if (sigPerDay > 10)                   activityScore = 70 - Math.min(30, (sigPerDay - 10) * 2);
-            else                                       activityScore = Math.max(10, sigPerDay * 40);
-        }
+        // Activité = trades (dédupliqués) par jour
+        const span = trades.length > 1
+            ? Math.max(1, (trades[trades.length - 1].created_at - trades[0].created_at) / 86400000) : 1;
+        const tpd = trades.length / span;
+        const activity = tpd < 1 ? tpd * 100 : tpd <= 6 ? 100 : Math.max(30, 100 - (tpd - 6) * 10);
 
         const fingerprint = [
-            { metric: 'Win Rate',        value: parseFloat(parseFloat(winRate).toFixed(1)),          max: 100 },
-            { metric: 'Avg Confidence',  value: parseFloat(parseFloat(avgConf).toFixed(1)),          max: 100 },
-            { metric: 'Risk/Reward',     value: parseFloat(rrScore.toFixed(1)),                      max: 100 },
-            { metric: 'Consistance',     value: parseFloat(consistencyScore.toFixed(1)),             max: 100 },
-            { metric: 'Diversification', value: parseFloat(diversificationScore.toFixed(1)),         max: 100 },
-            { metric: 'Activité',        value: parseFloat(Math.min(100, activityScore).toFixed(1)), max: 100 },
+            { metric: 'Win Rate',        value: r2(winRate),                         max: 100 },
+            { metric: 'Avg Confidence',  value: r2(avgConf),                         max: 100 },
+            { metric: 'Risk/Reward',     value: r2(clamp((rrReal / 3) * 100)),       max: 100 },
+            { metric: 'Consistance',     value: r2(consistency),                     max: 100 },
+            { metric: 'Diversification', value: r2(diversification),                 max: 100 },
+            { metric: 'Activité',        value: r2(clamp(activity)),                 max: 100 },
         ];
 
-        // ── Confidence vs Outcome — l'IA a-t-elle raison d'être confiante ? ──
-        // On exclut les HOLD : calcPnlPct() renvoie toujours 0 pour un HOLD (pas de
-        // position prise), donc les inclure écraserait le nuage de points sur une
-        // ligne plate à y=0 sans rien dire sur la fiabilité de la confidence.
-        const confidenceOutcome = signals
-            .filter(s => s.signal !== 'HOLD')
-            .map(s => ({
-                confidence: s.confidence || 0,
-                pnl:        parseFloat(calcPnlPct(s).toFixed(2)),
-                signal:     s.signal,
-                symbol:     s.symbol,
-            }));
-
-        function pearsonCorrelation(points) {
-            const n = points.length;
-            if (n < 2) return 0;
-            const xs = points.map(p => p.confidence);
-            const ys = points.map(p => p.pnl);
-            const meanX = xs.reduce((a, b) => a + b, 0) / n;
-            const meanY = ys.reduce((a, b) => a + b, 0) / n;
-            let num = 0, denX = 0, denY = 0;
-            for (let i = 0; i < n; i++) {
-                const dx = xs[i] - meanX, dy = ys[i] - meanY;
-                num  += dx * dy;
-                denX += dx * dx;
-                denY += dy * dy;
-            }
-            const den = Math.sqrt(denX * denY);
-            return den > 0 ? num / den : 0;
-        }
+        // ── Confidence vs Outcome (maintenant vraiment informatif) ──
+        const confidenceOutcome = resolved.map(t => ({
+            confidence: t.confidence,
+            pnl:        r2(t.pnl_pct),
+            signal:     t.signal,
+            symbol:     t.symbol,
+        }));
         const confidenceCorrelation = parseFloat(pearsonCorrelation(confidenceOutcome).toFixed(2));
 
         res.json({
-            success: true, kpis, equity, monthly, trades, attribution, byDow,
-            rolling: rollingDeduped, fingerprint, distribution,
+            success: true, kpis, equity, monthly, trades: journal, attribution, byDow,
+            rolling, fingerprint, distribution,
             confidenceOutcome, confidenceCorrelation,
             selectedClass: filterClass || null,
         });

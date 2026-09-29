@@ -130,6 +130,48 @@ function timeAgo(iso) {
   return `${Math.floor(hr / 24)}d ago`;
 }
 
+// ── Market session status — computed live from each exchange's local time ──
+// Simplifié : ne gère pas les jours fériés (nécessiterait un calendrier par
+// bourse) — juste le week-end + horaires d'ouverture standards.
+const MARKET_SESSIONS = [
+  { name: 'NYSE',   tz: 'America/New_York', open: [9, 30],  close: [16, 0]  },
+  { name: 'NASDAQ', tz: 'America/New_York', open: [9, 30],  close: [16, 0]  },
+  { name: 'LSE',    tz: 'Europe/London',    open: [8, 0],   close: [16, 30] },
+  { name: 'TSE',    tz: 'Asia/Tokyo',       open: [9, 0],   close: [15, 0]  },
+];
+
+function getZonedParts(tz) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(new Date());
+  const get = (type) => parts.find(p => p.type === type)?.value;
+  return {
+    weekday: get('weekday'),               // 'Mon'..'Sun'
+    hour:    parseInt(get('hour'), 10),
+    minute:  parseInt(get('minute'), 10),
+  };
+}
+
+function getMarketStatus(session) {
+  const { weekday, hour, minute } = getZonedParts(session.tz);
+  const isWeekday = !['Sat', 'Sun'].includes(weekday);
+  const minutesNow   = hour * 60 + minute;
+  const minutesOpen  = session.open[0]  * 60 + session.open[1];
+  const minutesClose = session.close[0] * 60 + session.close[1];
+  const isOpen = isWeekday && minutesNow >= minutesOpen && minutesNow < minutesClose;
+
+  let infoKey;
+  if (isOpen) {
+    infoKey = 'openLeft'; // temps restant — voir note ci-dessous si vous voulez l'exact
+  } else {
+    infoKey = session.tz === 'Europe/London' ? 'closedOpensGmt'
+            : session.tz === 'Asia/Tokyo'    ? 'closedOpensJst'
+            : 'closedOpensEst';
+  }
+
+  return { name: session.name, open: isOpen, infoKey };
+}
+
 export default function Markets() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -150,7 +192,7 @@ export default function Markets() {
 
   // ── "Updated Xs ago" — se déclenche à chaque nouveau snapshot WebSocket ──
   const [lastSnapshotAt, setLastSnapshotAt] = useState(null);
-  const [, forceTick] = useState(0);
+  const [tick, setTick] = useState(0);
 
   useEffect(() => {
     if (streamData && Object.keys(streamData).length > 0) {
@@ -159,9 +201,11 @@ export default function Markets() {
   }, [streamData]);
 
   useEffect(() => {
-    const id = setInterval(() => forceTick(x => x + 1), 1000);
+    const id = setInterval(() => setTick(x => x + 1), 1000);
     return () => clearInterval(id);
   }, []);
+
+  const marketStatuses = useMemo(() => MARKET_SESSIONS.map(getMarketStatus), [tick]);
 
   const ticks    = streamData.ticks    || [];
   const indices  = streamData.indices  || [];
@@ -405,12 +449,7 @@ export default function Markets() {
 
       {/* Market Status + F&G */}
       <div style={{ display:'flex', gap:12, marginBottom: 16 }}>
-        {[
-          { name:'NYSE',    open:true,  infoKey:'openLeft'       },
-          { name:'NASDAQ',  open:true,  infoKey:'openLeft'       },
-          { name:'LSE',     open:false, infoKey:'closedOpensGmt' },
-          { name:'TSE',     open:false, infoKey:'closedOpensJst' },
-        ].map(mk => (
+        {marketStatuses.map(mk => (
           <div key={mk.name} className="glass-panel" style={{ flex:1, ...cardStyle, display:'flex', alignItems:'center', gap:12, borderColor: mk.open ? 'rgba(52,211,153,0.2)' : undefined }}>
             <div style={{ width:8, height:8, borderRadius:'50%', background: mk.open ? 'var(--green)' : 'var(--text-muted)' }} />
             <div>

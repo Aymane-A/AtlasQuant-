@@ -6,6 +6,7 @@ const { checkSignalAlerts }         = require('./signalAlert.service');
 const { takePortfolioSnapshot }     = require('./portfolioSnapshot.service');
 const paperTradeMonitor             = require('./paperTradeMonitor.service');
 const autoTrader                    = require('./autoTrader.service');
+const { resolveOpenSignals }        = require('./outcomeResolver.service');
 const db                            = require('../config/db');
 const logger                        = require('../utils/logger');
 const { healthCheckAllConnections } = require('./exchanges.service');
@@ -60,7 +61,7 @@ const initCronJobs = () => {
   autoTrader.start(60_000);
 
   // ── Market scan every 4 hours → Crypto + Forex/Commodity/Indices + Equities → AI signal alerts ───────
-  cron.schedule('* */4 * * *', async () => {
+  cron.schedule('0 */4 * * *', async () => {
     logger.info('[cron] Starting scheduled market scan...');
     try {
       const equitySymbols = await getTrackedEquitySymbols();
@@ -107,6 +108,26 @@ const initCronJobs = () => {
       logger.error(`[cron] Scan error: ${err.message}`);
     }
   });
+
+  // ── Résolution réelle des signaux BUY/SELL (TP / SL / EXPIRED) ─────────
+  // Alimente signals.outcome / pnl_pct, utilisés par la page Analytics.
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      const r = await resolveOpenSignals();
+      if (r.resolved) {
+        logger.info(`[cron] Outcome resolver: ${r.resolved} signal(s) résolu(s), ${r.open - r.resolved} encore ouvert(s)`);
+      }
+    } catch (err) {
+      logger.error(`[cron] Outcome resolver error: ${err.message}`);
+    }
+  });
+
+  // Première passe (backfill des signaux existants) 30s après le démarrage.
+  setTimeout(() => {
+    resolveOpenSignals()
+      .then(r => logger.info(`[cron] Outcome backfill: ${r.resolved || 0}/${r.open || 0} résolus`))
+      .catch(err => logger.error(`[cron] Outcome backfill error: ${err.message}`));
+  }, 30_000);
 
   // ── Alert price checker every minute ───────────────────
   cron.schedule('* * * * *', async () => {

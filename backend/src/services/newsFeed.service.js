@@ -17,7 +17,7 @@ let cacheStamp = 0;
 const FEEDS = [
   { url: 'https://www.coindesk.com/arc/outboundfeeds/rss/', category: 'Crypto'    },
   { url: 'https://www.forexlive.com/feed/news',              category: 'Forex'     },
-  { url: 'https://www.investing.com/rss/news_301.rss',       category: 'Commodity' },
+  { url: 'https://www.investing.com/rss/news_301.rss',       category: 'Crypto'    }, // ✅ corrigé: news_301 = crypto feed, pas commodity
 ];
 
 async function fetchOneFeed({ url, category }) {

@@ -241,9 +241,9 @@ export default function Dashboard() {
   // benchmark doesn't cover yet just gets null (line connects across it)
   // instead of every point after it shifting by one.
   const chartData = useMemo(() => {
-    const bm = new Map(dashData.benchmarkCurve.map(b => [b.t, b]));
+    const bm = new Map(dashData.benchmarkCurve.map(b => [b.date, b]));
     return dashData.equityCurve.map(p => {
-      const b = bm.get(p.day);
+      const b = bm.get(p.date);
       return {
         day:          p.day,
         value:        p.value,

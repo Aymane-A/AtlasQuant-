@@ -67,6 +67,7 @@ const COMMODITIES = [
   { yahoo: 'BZ=F', name: 'Brent',       sym: 'BRENT'   },
   { yahoo: 'NG=F', name: 'Natural Gas', sym: 'NG'      },
   { yahoo: 'HG=F', name: 'Copper',      sym: 'HG'      },
+  { yahoo: 'PL=F', name: 'Platinum',    sym: 'XPT/USD' },
 ];
 
 // ── Sectors — ETFs SPDR ───────────────────────────────────────────

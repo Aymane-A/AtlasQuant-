@@ -54,7 +54,7 @@ async function buildDashboardPayload(userId, opts = {}) {
   const range     = RANGE_DAYS[opts.range] ? opts.range : '30';
   const rangeDays = RANGE_DAYS[range];
   const benchmarkSymbol   = (opts.benchmarkSymbol || 'BTC').toUpperCase();
-  const includeBenchmark  = opts.includeBenchmark !== false;
+  const includeBenchmark  = opts.includeBenchmark !== false && benchmarkSymbol !== 'NONE';
   const activityLimit  = Math.min(parseInt(opts.activityLimit, 10)  || 5, 50);
   const activityOffset = Math.max(parseInt(opts.activityOffset, 10) || 0, 0);
 
@@ -145,11 +145,10 @@ async function buildDashboardPayload(userId, opts = {}) {
   let alpha = null;
   if (includeBenchmark && !isSimulated) {
     try {
-      const benchmarkSymbol   = (opts.benchmarkSymbol || 'BTC').toUpperCase();
-      // 'NONE' = benchmark switched off in the UI (or a "Load more" page request)
-      // — skip the external fetch entirely.
-      const includeBenchmark  = opts.includeBenchmark !== false && benchmarkSymbol !== 'NONE';
-      const built = buildBenchmarkCurve(equityCurveForBenchmark, benchmarkCandles);
+      // fetch the raw benchmark price history for the same range, then
+      // align it against equityCurve to build the comparison series.
+      const benchmarkCandles = await getBenchmarkHistory(benchmarkSymbol, rangeDays);
+      const built = buildBenchmarkCurve(equityCurve, benchmarkCandles);
       benchmarkCurve = built.curve;
       alpha          = built.alpha;
     } catch (e) {

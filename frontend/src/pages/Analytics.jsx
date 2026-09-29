@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip,
          ResponsiveContainer, CartesianGrid, ReferenceLine, Cell,
          ScatterChart, Scatter } from 'recharts';
@@ -21,18 +21,6 @@ const tt = {
     boxShadow:'0 8px 32px rgba(0,0,0,0.4)',
   }
 };
-
-function Spark({ color }) {
-  const pts = Array.from({length:8}, (_,i) => 30 + Math.sin(i*0.8)*20 + Math.random()*15);
-  const min = Math.min(...pts), max = Math.max(...pts), range = max - min || 1;
-  const w = 52, h = 20;
-  const path = pts.map((v,i) => `${i===0?'M':'L'}${(i/(pts.length-1))*w},${h-((v-min)/range)*h}`).join(' ');
-  return (
-    <svg width={w} height={h} style={{display:'block'}}>
-      <path d={path} fill="none" stroke={color} strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" opacity={0.55}/>
-    </svg>
-  );
-}
 
 // Compact SVG radar — larger viewBox to fit labels
 function MiniRadar({ data }) {
@@ -81,16 +69,22 @@ function MiniRadar({ data }) {
 
 export default function Analytics() {
   const [period, setPeriod] = useState('1M');
-  // ✅ Drill-down: classe sélectionnée via clic sur une ligne Attribution.
+  // Drill-down: classe sélectionnée via clic sur une ligne Attribution.
   // null = aucun filtre, toutes les métriques portent sur l'ensemble des signaux.
   const [selectedClass, setSelectedClass] = useState(null);
   const [data,   setData]   = useState(EMPTY);
-  const [loading,setLoading]= useState(true);
+  // loading = 1er chargement uniquement (skeleton). refreshing = changement de
+  // période / filtre: on garde l'ancien contenu affiché au lieu de tout remplacer
+  // par le skeleton (sinon le scroll saute et la table Attribution disparaît).
+  const [loading,    setLoading]    = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error,  setError]  = useState(null);
+  const firstLoad = useRef(true);
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true); setError(null);
+    if (firstLoad.current) setLoading(true); else setRefreshing(true);
+    setError(null);
     const params = period === 'All' ? {} : { period };
     if (selectedClass) params.class = selectedClass;
     api.get('/signals/analytics', { params })
@@ -106,22 +100,26 @@ export default function Analytics() {
           byDow:       Array.isArray(d.byDow)       ? d.byDow       : [],
           rolling:     Array.isArray(d.rolling)     ? d.rolling     : [],
           fingerprint: Array.isArray(d.fingerprint) ? d.fingerprint : [],
-          // ✅ Fix Bug 1: distribution vient directement du backend (source de vérité),
-          // plus de parsing regex sur le label texte du KPI "Total Signals".
+          // distribution vient directement du backend (source de vérité).
           distribution: d.distribution && typeof d.distribution === 'object'
             ? d.distribution
             : { buy: 0, sell: 0, hold: 0, total: 0 },
-          // ✅ Feature: Confidence vs Outcome — nuage de points confidence IA / P&L réel.
+          // Confidence vs Outcome — nuage de points confidence IA / P&L réel (trades clos).
           confidenceOutcome:     Array.isArray(d.confidenceOutcome) ? d.confidenceOutcome : [],
           confidenceCorrelation: typeof d.confidenceCorrelation === 'number' ? d.confidenceCorrelation : 0,
         });
       })
       .catch(err => { if (!cancelled) setError(err.response?.data?.error || 'Erreur analytics'); })
-      .finally(() => { if (!cancelled) setLoading(false); });
+      .finally(() => {
+        if (cancelled) return;
+        setLoading(false);
+        setRefreshing(false);
+        firstLoad.current = false;
+      });
     return () => { cancelled = true; };
   }, [period, selectedClass]);
 
-  // ✅ Drill-down: clic sur une ligne Attribution → filtre, ou déselectionne si déjà active
+  // Drill-down: clic sur une ligne Attribution → filtre, ou déselectionne si déjà active
   const toggleClassFilter = (name) => {
     setSelectedClass(prev => (prev === name ? null : name));
   };
@@ -141,7 +139,7 @@ export default function Analytics() {
     <div style={{background:'var(--surface)',border:'1px solid rgba(248,113,113,0.25)',borderRadius:10,padding:'20px',textAlign:'center',fontFamily:'JetBrains Mono,monospace',fontSize:12,color:'var(--red)'}}>{error}</div>
   );
 
-  // ✅ Fix Bug 1: total/buys/sells/holds viennent tous de la même source (data.distribution),
+  // total/buys/sells/holds viennent tous de la même source (data.distribution),
   // garantissant que la somme des parts = le total affiché au centre du donut.
   const { buy: buys, sell: sells, hold: holds, total } = data.distribution;
   const distItems = [
@@ -157,7 +155,7 @@ export default function Analytics() {
         <div>
           <div style={{fontSize:10,letterSpacing:'.18em',color:'var(--text-muted)',textTransform:'uppercase',fontFamily:'JetBrains Mono,monospace',marginBottom:2}}>// Performance Analytics</div>
           <div style={{fontSize:10,color:'var(--text-secondary)',fontFamily:'JetBrains Mono,monospace',display:'flex',alignItems:'center',gap:8}}>
-            Métriques temps réel · Signals · R:R
+            Trades clos (TP/SL) · Signals · R:R
             {selectedClass && (
               <span style={{
                 display:'inline-flex', alignItems:'center', gap:6,
@@ -172,6 +170,7 @@ export default function Analytics() {
                 >✕</span>
               </span>
             )}
+            {refreshing && <span style={{color:'var(--text-muted)',fontSize:9}}>actualisation…</span>}
           </div>
         </div>
         <div style={{display:'flex',gap:3,background:'rgba(255,255,255,0.02)',border:'1px solid var(--border)',borderRadius:9,padding:3}}>
@@ -197,7 +196,7 @@ export default function Analytics() {
       ) : (
         <>
           {/* ── KPI Cards — compact 5-col ── */}
-          <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:10}}>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:10,opacity: refreshing ? 0.6 : 1,transition:'opacity .15s'}}>
             {data.kpis.map(k=>(
               <div key={k.label} style={{
                 background:'var(--surface)',border:'1px solid var(--border)',
@@ -210,39 +209,33 @@ export default function Analytics() {
                 <div style={{position:'absolute',top:0,left:0,right:0,height:2,background:k.color,opacity:0.35,borderRadius:'10px 10px 0 0'}}/>
                 <div style={{fontSize:8,letterSpacing:'.12em',color:'var(--text-muted)',textTransform:'uppercase',fontFamily:'JetBrains Mono,monospace',marginBottom:7}}>{k.label}</div>
                 <div style={{fontSize:22,fontWeight:800,color:k.color,marginBottom:3,letterSpacing:'-.02em',lineHeight:1}}>{k.v}</div>
-                <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginTop:6}}>
-                  <div style={{fontSize:9,fontFamily:'JetBrains Mono,monospace',color:k.sub?.startsWith('↑')?'var(--green)':'var(--text-secondary)',maxWidth:80,lineHeight:1.3}}>{k.sub}</div>
-                  <Spark color={k.color}/>
-                </div>
+                <div style={{fontSize:9,fontFamily:'JetBrains Mono,monospace',color:'var(--text-secondary)',marginTop:6,lineHeight:1.4}}>{k.sub}</div>
               </div>
             ))}
           </div>
 
           {/* ── Row 2: Equity + Monthly ── */}
           {(() => {
-            // Compute summary stats for equity header
+            // Baseline = 100: totalPnl = somme des P&L des trades clos.
             const lastPf   = data.equity[data.equity.length-1]?.portfolio ?? 100;
-            const firstPf  = data.equity[0]?.portfolio ?? 100;
-            const totalPnl = (lastPf - firstPf).toFixed(2);
+            const totalPnl = (lastPf - 100).toFixed(2);
             const isPos    = parseFloat(totalPnl) >= 0;
-            const lastBm   = data.equity[data.equity.length-1]?.benchmark ?? 100;
-            const alphaPct = (lastPf - lastBm).toFixed(2);
             return (
-              <div style={{display:'grid',gridTemplateColumns:'1.3fr 1fr',gap:12}}>
+              <div style={{display:'grid',gridTemplateColumns:'1.3fr 1fr',gap:12,opacity: refreshing ? 0.6 : 1,transition:'opacity .15s'}}>
                 <div className="panel" style={{padding:18}}>
                   <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}}>
                     <div>
                       <div style={{fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:7,marginBottom:4}}>
                         <div style={{width:5,height:5,borderRadius:'50%',background:'var(--cyan)'}}/>
                         Equity Curve
-                        <span style={{fontSize:9,color:'var(--text-muted)',fontWeight:400}}>— P&L réel cumulé</span>
+                        <span style={{fontSize:9,color:'var(--text-muted)',fontWeight:400}}>— somme des P&L par trade</span>
                       </div>
                       <div style={{display:'flex',gap:12,alignItems:'center'}}>
                         <span style={{fontSize:13,fontWeight:800,fontFamily:'JetBrains Mono,monospace',color:isPos?'var(--green)':'var(--red)'}}>
                           {isPos?'+':''}{totalPnl}%
                         </span>
                         <span style={{fontSize:9,color:'var(--text-muted)',fontFamily:'JetBrains Mono,monospace'}}>
-                          vs bench: <span style={{color:parseFloat(alphaPct)>=0?'var(--cyan)':'var(--amber)'}}>{parseFloat(alphaPct)>=0?'+':''}{alphaPct}%</span>
+                          {data.equity.length} trades clos
                         </span>
                       </div>
                     </div>
@@ -251,26 +244,27 @@ export default function Analytics() {
                         <span style={{width:14,height:1.5,background:'var(--cyan)',display:'inline-block',borderRadius:1}}/>
                         <span style={{color:'var(--cyan)'}}>Portfolio</span>
                       </span>
-                      <span style={{display:'flex',alignItems:'center',gap:4}}>
-                        <span style={{width:14,height:1.5,background:'rgba(167,139,250,0.5)',display:'inline-block',borderRadius:1}}/>
-                        <span style={{color:'rgba(167,139,250,0.6)'}}>Benchmark</span>
-                      </span>
                     </div>
                   </div>
-                  <ResponsiveContainer width="100%" height={160}>
-                    <LineChart data={data.equity}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.03)"/>
-                      <XAxis dataKey="day" tick={{fontSize:7,fill:'#475569',fontFamily:'JetBrains Mono,monospace'}} interval={Math.max(1,Math.floor(data.equity.length/6))}/>
-                      <YAxis hide/>
-                      <ReferenceLine y={100} stroke="rgba(255,255,255,0.08)" strokeWidth={1}/>
-                      <Tooltip {...tt} formatter={(v,n,props)=>{
-                        if (n==='portfolio') return [`${v.toFixed(2)}% (P&L: ${props.payload?.pnl>=0?'+':''}${props.payload?.pnl?.toFixed(2)||0}%)`, 'Portfolio'];
-                        return [`${v.toFixed(2)}%`, 'Benchmark'];
-                      }}/>
-                      <Line type="monotone" dataKey="portfolio" stroke="var(--cyan)" strokeWidth={1.5} dot={false}/>
-                      <Line type="monotone" dataKey="benchmark" stroke="rgba(167,139,250,0.4)" strokeWidth={1} dot={false} strokeDasharray="4 4"/>
-                    </LineChart>
-                  </ResponsiveContainer>
+                  {data.equity.length === 0 ? (
+                    <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:160,fontSize:10,color:'var(--text-muted)',fontFamily:'JetBrains Mono,monospace',textAlign:'center',lineHeight:1.6}}>
+                      Aucun trade clos pour l'instant.<br/>Les signaux BUY/SELL se clôturent au TP ou au SL.
+                    </div>
+                  ) : (
+                    <ResponsiveContainer width="100%" height={160}>
+                      <LineChart data={data.equity}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.03)"/>
+                        <XAxis dataKey="day" tick={{fontSize:7,fill:'#475569',fontFamily:'JetBrains Mono,monospace'}} interval={Math.max(1,Math.floor(data.equity.length/6))}/>
+                        <YAxis hide domain={['auto','auto']}/>
+                        <ReferenceLine y={100} stroke="rgba(255,255,255,0.08)" strokeWidth={1}/>
+                        <Tooltip {...tt} formatter={(v,n,props)=>[
+                          `${v.toFixed(2)}% (trade: ${props.payload?.pnl>=0?'+':''}${props.payload?.pnl ?? 0}%)`,
+                          'Portfolio',
+                        ]}/>
+                        <Line type="monotone" dataKey="portfolio" stroke="var(--cyan)" strokeWidth={1.5} dot={data.equity.length < 20}/>
+                      </LineChart>
+                    </ResponsiveContainer>
+                  )}
                 </div>
 
                 <div className="panel" style={{padding:18}}>
@@ -291,7 +285,11 @@ export default function Analytics() {
                       );
                     })()}
                   </div>
-                  {data.monthly.length === 1 ? (
+                  {data.monthly.length === 0 ? (
+                    <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:160,fontSize:10,color:'var(--text-muted)',fontFamily:'JetBrains Mono,monospace'}}>
+                      Aucun trade clos
+                    </div>
+                  ) : data.monthly.length === 1 ? (
                     // Single month — compact stat row
                     <div style={{display:'flex',alignItems:'center',justifyContent:'space-around',height:160,gap:12,padding:'0 12px'}}>
                       <div style={{textAlign:'center'}}>
@@ -307,7 +305,7 @@ export default function Analytics() {
                       </div>
                       <div style={{width:1,height:40,background:'var(--border)'}}/>
                       <div style={{textAlign:'center'}}>
-                        <div style={{fontSize:8,letterSpacing:'.12em',color:'var(--text-muted)',textTransform:'uppercase',fontFamily:'JetBrains Mono,monospace',marginBottom:6}}>Signaux</div>
+                        <div style={{fontSize:8,letterSpacing:'.12em',color:'var(--text-muted)',textTransform:'uppercase',fontFamily:'JetBrains Mono,monospace',marginBottom:6}}>Trades</div>
                         <div style={{fontSize:18,fontWeight:700,color:'var(--text-primary)',fontFamily:'JetBrains Mono,monospace'}}>{data.monthly[0].count}</div>
                       </div>
                       <div style={{width:1,height:40,background:'var(--border)'}}/>
@@ -330,10 +328,14 @@ export default function Analytics() {
                           <XAxis dataKey="month" tick={{fontSize:7,fill:'#475569',fontFamily:'JetBrains Mono,monospace'}}/>
                           <YAxis hide domain={[-domainPad, domainPad]}/>
                           <ReferenceLine y={0} stroke="rgba(255,255,255,0.12)" strokeWidth={1}/>
-                          <Tooltip {...tt} formatter={(v,n,props)=>[
-                            [`${v>=0?'+':''}${v}%`, 'P&L'],
-                            props.payload ? [`${props.payload.count} signaux · ${props.payload.winRate}% win`, ''] : null,
-                          ].filter(Boolean)} labelFormatter={l=>l}/>
+                          {/* Recharts attend formatter → [value, name] (un seul couple).
+                              Les détails du mois passent par labelFormatter. */}
+                          <Tooltip {...tt}
+                            formatter={(v) => [`${v>=0?'+':''}${v}%`, 'P&L']}
+                            labelFormatter={(l, payload) => {
+                              const p = payload?.[0]?.payload;
+                              return p ? `${l} · ${p.count} trades · ${p.winRate}% win` : l;
+                            }}/>
                           <Bar dataKey="ret" radius={[3,3,0,0]} maxBarSize={40}>
                             {data.monthly.map((e,i)=>(
                               <Cell key={i} fill={e.ret>=0?'rgba(52,211,153,0.75)':'rgba(248,113,113,0.75)'}/>
@@ -349,7 +351,7 @@ export default function Analytics() {
           })()}
 
           {/* ── Row 3: Distribution (ring) + Journal ── */}
-          <div style={{display:'grid',gridTemplateColumns:'260px 1fr',gap:12}}>
+          <div style={{display:'grid',gridTemplateColumns:'260px 1fr',gap:12,opacity: refreshing ? 0.6 : 1,transition:'opacity .15s'}}>
             <div className="panel" style={{padding:18}}>
               <div style={{fontSize:12,fontWeight:600,marginBottom:14,display:'flex',alignItems:'center',gap:7}}>
                 <div style={{width:5,height:5,borderRadius:'50%',background:'var(--purple-bright)'}}/>
@@ -358,7 +360,6 @@ export default function Analytics() {
               {(()=>{
                 const cx=130, cy=108, R=78, r=52, gap=3;
                 const hexColors = ['#34d399','#f87171','#fbbf24'];
-                const glowColors= ['rgba(52,211,153,0.25)','rgba(248,113,113,0.25)','rgba(251,191,36,0.25)'];
                 let cumAngle = -Math.PI/2;
                 const slices = distItems.map((item,idx) => {
                   const pct   = total > 0 ? item.count / total : 0;
@@ -380,29 +381,39 @@ export default function Analytics() {
                   // Line from arc midpoint to label
                   const lineStart = { x: cx+(R+2)*Math.cos(midA), y: cy+(R+2)*Math.sin(midA) };
                   const lineEnd   = { x: cx+(R+12)*Math.cos(midA), y: cy+(R+12)*Math.sin(midA) };
+                  // Cas limite: une seule part ≈ 100% → start ≈ end, l'arc ne se
+                  // dessinerait pas. On trace alors un anneau complet.
+                  const full = pct > 0.999;
                   return (
                     <g key={idx}>
-                      {/* Arc */}
-                      <path
-                        d={`M${x1},${y1} A${R},${R},0,${large},1,${x2},${y2} L${x3},${y3} A${r},${r},0,${large},0,${x4},${y4} Z`}
-                        fill={hexColors[idx]}
-                        opacity={0.82}
-                      />
-                      {/* Subtle glow on arc */}
-                      <path
-                        d={`M${x1},${y1} A${R},${R},0,${large},1,${x2},${y2} L${x3},${y3} A${r},${r},0,${large},0,${x4},${y4} Z`}
-                        fill="none"
-                        stroke={hexColors[idx]}
-                        strokeWidth="1"
-                        opacity={0.4}
-                      />
+                      {full ? (
+                        <circle cx={cx} cy={cy} r={(R+r)/2} fill="none"
+                          stroke={hexColors[idx]} strokeWidth={R-r} opacity={0.82}/>
+                      ) : (
+                        <>
+                          {/* Arc */}
+                          <path
+                            d={`M${x1},${y1} A${R},${R},0,${large},1,${x2},${y2} L${x3},${y3} A${r},${r},0,${large},0,${x4},${y4} Z`}
+                            fill={hexColors[idx]}
+                            opacity={0.82}
+                          />
+                          {/* Subtle glow on arc */}
+                          <path
+                            d={`M${x1},${y1} A${R},${R},0,${large},1,${x2},${y2} L${x3},${y3} A${r},${r},0,${large},0,${x4},${y4} Z`}
+                            fill="none"
+                            stroke={hexColors[idx]}
+                            strokeWidth="1"
+                            opacity={0.4}
+                          />
+                        </>
+                      )}
                       {/* Tick line */}
-                      {pct > 0.04 && (
+                      {pct > 0.04 && !full && (
                         <line x1={lineStart.x} y1={lineStart.y} x2={lineEnd.x} y2={lineEnd.y}
                           stroke={hexColors[idx]} strokeWidth="0.8" opacity="0.6"/>
                       )}
                       {/* Percentage label */}
-                      {pct > 0.04 && (
+                      {pct > 0.04 && !full && (
                         <text x={lx} y={ly} textAnchor="middle" dominantBaseline="middle"
                           fontSize="9" fontWeight="700" fill={hexColors[idx]}
                           fontFamily="JetBrains Mono,monospace">
@@ -445,19 +456,34 @@ export default function Analytics() {
             <div className="panel" style={{padding:18}}>
               <div style={{fontSize:12,fontWeight:600,marginBottom:14,display:'flex',alignItems:'center',gap:7}}>
                 <div style={{width:5,height:5,borderRadius:'50%',background:'var(--green)'}}/>
-                Journal des Signals
-                <span style={{fontSize:9,color:'var(--text-muted)',fontWeight:400,marginLeft:2}}>— 10 derniers</span>
+                Journal des Trades
+                <span style={{fontSize:9,color:'var(--text-muted)',fontWeight:400,marginLeft:2}}>— 10 derniers BUY/SELL</span>
               </div>
               <div style={{overflowX:'auto'}}>
                 <table style={{width:'100%',borderCollapse:'collapse'}}>
                   <thead>
-                    <tr>{['Date','Symbol','Direction','P&L pts','R:R'].map(h=>(
+                    <tr>{['Date','Symbol','Direction','P&L','R:R','Résultat'].map(h=>(
                       <th key={h} style={{textAlign:'left',padding:'6px 8px',fontSize:8,letterSpacing:'.12em',color:'var(--text-muted)',textTransform:'uppercase',fontFamily:'JetBrains Mono,monospace',borderBottom:'1px solid var(--border)',fontWeight:400}}>{h}</th>
                     ))}</tr>
                   </thead>
                   <tbody>
+                    {data.trades.length === 0 && (
+                      <tr>
+                        <td colSpan={6} style={{padding:'24px 8px',textAlign:'center',fontSize:10,color:'var(--text-muted)',fontFamily:'JetBrains Mono,monospace'}}>
+                          Aucun trade BUY/SELL sur cette période
+                        </td>
+                      </tr>
+                    )}
                     {data.trades.map((t,i)=>{
-                      const pos=t.pnl.startsWith('+');
+                      const pnlStr   = String(t.pnl ?? '');
+                      const isOpen   = pnlStr === 'OPEN';
+                      const val      = parseFloat(pnlStr);
+                      const pnlColor = isOpen || !Number.isFinite(val) || val === 0
+                        ? 'var(--text-muted)'
+                        : val > 0 ? 'var(--green)' : 'var(--red)';
+                      const outColor = t.outcome === 'TP' ? 'var(--green)'
+                        : t.outcome === 'SL' ? 'var(--red)'
+                        : 'var(--text-muted)';
                       return (
                         <tr key={i}
                           onMouseEnter={e=>e.currentTarget.style.background='rgba(255,255,255,0.02)'}
@@ -474,8 +500,9 @@ export default function Analytics() {
                               color:t.side==='Long'?'var(--green)':t.side==='Short'?'var(--red)':'var(--amber)',
                             }}>{t.side}</span>
                           </td>
-                          <td style={{padding:'8px',fontSize:10,fontFamily:'JetBrains Mono,monospace',color:pos?'var(--green)':'var(--red)',fontWeight:600,borderBottom:'1px solid rgba(255,255,255,0.03)'}}>{t.pnl}</td>
-                          <td style={{padding:'8px',fontSize:10,fontFamily:'JetBrains Mono,monospace',color:pos?'var(--amber)':'var(--text-muted)',borderBottom:'1px solid rgba(255,255,255,0.03)'}}>{t.rr}</td>
+                          <td style={{padding:'8px',fontSize:10,fontFamily:'JetBrains Mono,monospace',color:pnlColor,fontWeight:600,borderBottom:'1px solid rgba(255,255,255,0.03)'}}>{pnlStr}</td>
+                          <td style={{padding:'8px',fontSize:10,fontFamily:'JetBrains Mono,monospace',color:'var(--text-muted)',borderBottom:'1px solid rgba(255,255,255,0.03)'}}>{t.rr}</td>
+                          <td style={{padding:'8px',fontSize:9,fontWeight:700,fontFamily:'JetBrains Mono,monospace',color:outColor,borderBottom:'1px solid rgba(255,255,255,0.03)'}}>{t.outcome}</td>
                         </tr>
                       );
                     })}
@@ -487,7 +514,7 @@ export default function Analytics() {
 
           {/* ── Row 4: Attribution — compact table, cliquable (drill-down) ── */}
           {data.attribution.length > 0 && (
-            <div className="panel" style={{padding:18}}>
+            <div className="panel" style={{padding:18,opacity: refreshing ? 0.6 : 1,transition:'opacity .15s'}}>
               <div style={{fontSize:12,fontWeight:600,marginBottom:14,display:'flex',alignItems:'center',gap:7}}>
                 <div style={{width:5,height:5,borderRadius:'50%',background:'var(--amber)'}}/>
                 Attribution P&L · Classe d'Actifs
@@ -496,14 +523,23 @@ export default function Analytics() {
               <table style={{width:'100%',borderCollapse:'collapse'}}>
                 <thead>
                   <tr>
-                    {['Classe','Allocation','Signaux','Win Rate','Avg Conf.','Avg R:R'].map(h=>(
+                    {['Classe','Allocation','Signaux','Win Rate','Avg Conf.','R:R réalisé'].map(h=>(
                       <th key={h} style={{textAlign:h==='Classe'?'left':'center',padding:'6px 10px',fontSize:8,letterSpacing:'.12em',color:'var(--text-muted)',textTransform:'uppercase',fontFamily:'JetBrains Mono,monospace',borderBottom:'1px solid var(--border)',fontWeight:400}}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {data.attribution.map((a,i)=>{
+                  {data.attribution.map((a)=>{
                     const isSelected = selectedClass === a.name;
+                    const wrColor = a.winRate == null
+                      ? 'var(--text-muted)'
+                      : a.winRate >= 60 ? 'var(--green)' : a.winRate >= 45 ? 'var(--amber)' : 'var(--red)';
+                    const cells = [
+                      { v: a.total },
+                      { v: a.winRate == null ? '—' : (Math.round(a.winRate*10)/10)+'%', c: wrColor },
+                      { v: (Math.round(a.avgConf))+'%' },
+                      { v: a.avgRR > 0 ? `1:${a.avgRR}` : '—' },
+                    ];
                     return (
                     <tr key={a.name}
                       onClick={() => toggleClassFilter(a.name)}
@@ -533,11 +569,11 @@ export default function Analytics() {
                         </div>
                       </td>
                       {/* Stats */}
-                      {[a.total, (Math.round(a.winRate*10)/10)+'%', (Math.round(a.avgConf))+'%', a.avgRR > 0 ? `1:${a.avgRR}` : '—'].map((v,j)=>(
+                      {cells.map((cell,j)=>(
                         <td key={j} style={{padding:'10px',textAlign:'center',fontSize:11,fontWeight:600,fontFamily:'JetBrains Mono,monospace',
-                          color: j===1 ? (a.winRate>=60?'var(--green)':a.winRate>=45?'var(--amber)':'var(--red)') : 'var(--text-primary)',
+                          color: cell.c || 'var(--text-primary)',
                           borderBottom: isSelected ? '1px solid rgba(0,245,212,0.2)' : '1px solid rgba(255,255,255,0.03)'
-                        }}>{v}</td>
+                        }}>{cell.v}</td>
                       ))}
                     </tr>
                   );})}
@@ -548,7 +584,7 @@ export default function Analytics() {
 
           {/* ── Row 5: DoW heatmap + Rolling Win Rate ── */}
           {(data.byDow.length > 0 || data.rolling.length > 0) && (
-            <div style={{display:'grid',gridTemplateColumns:'auto 1fr',gap:12,alignItems:'stretch'}}>
+            <div style={{display:'grid',gridTemplateColumns:'auto 1fr',gap:12,alignItems:'stretch',opacity: refreshing ? 0.6 : 1,transition:'opacity .15s'}}>
 
               {/* DoW — compact strip */}
               {data.byDow.length > 0 && (
@@ -557,7 +593,7 @@ export default function Analytics() {
                     <div style={{width:5,height:5,borderRadius:'50%',background:'var(--cyan)'}}/>
                     Win Rate / Jour
                   </div>
-                  <div style={{fontSize:9,color:'var(--text-muted)',fontFamily:'JetBrains Mono,monospace',marginBottom:12}}>Intensité = taux de succès</div>
+                  <div style={{fontSize:9,color:'var(--text-muted)',fontFamily:'JetBrains Mono,monospace',marginBottom:12}}>Jour d'entrée (UTC) · intensité = taux de succès</div>
                   <div style={{display:'flex',gap:6}}>
                     {data.byDow.map(d=>{
                       const intensity = d.total > 0 ? d.winRate / 100 : 0;
@@ -574,7 +610,7 @@ export default function Analytics() {
                           {d.total > 0 ? (
                             <>
                               <div style={{fontSize:13,fontWeight:700,color:'var(--cyan)',fontFamily:'JetBrains Mono,monospace',lineHeight:1}}>{d.winRate}%</div>
-                              <div style={{fontSize:8,color:'var(--text-muted)',fontFamily:'JetBrains Mono,monospace',marginTop:3}}>{d.total}s</div>
+                              <div style={{fontSize:8,color:'var(--text-muted)',fontFamily:'JetBrains Mono,monospace',marginTop:3}}>{d.total}t</div>
                             </>
                           ) : (
                             <div style={{fontSize:11,color:'rgba(255,255,255,0.1)'}}>—</div>
@@ -591,7 +627,7 @@ export default function Analytics() {
                 <div className="panel" style={{padding:18}}>
                   <div style={{fontSize:12,fontWeight:600,marginBottom:4,display:'flex',alignItems:'center',gap:7}}>
                     <div style={{width:5,height:5,borderRadius:'50%',background:'var(--green)'}}/>
-                    Win Rate Glissant (30j)
+                    Win Rate Glissant (30 trades)
                   </div>
                   <div style={{fontSize:9,color:'var(--text-muted)',fontFamily:'JetBrains Mono,monospace',marginBottom:12}}>Fenêtre mobile · Tendance de performance</div>
                   {data.rolling.length < 3 ? (
@@ -639,12 +675,11 @@ export default function Analytics() {
             const corrLabel = absCorr >= 0.5 ? 'forte' : absCorr >= 0.25 ? 'modérée' : 'faible';
             const corrColor = absCorr >= 0.5 ? 'var(--green)' : absCorr >= 0.25 ? 'var(--amber)' : 'var(--red)';
 
-            // ✅ Fix: plusieurs signaux partagent souvent la même confidence/pnl exacts
-            // (calculs basés sur des formules à valeurs discrètes), ce qui les empile
-            // visuellement au même endroit sur le nuage de points. On ajoute un jitter
-            // déterministe (basé sur un hash du symbole, pas Math.random — sinon les
-            // points sauteraient à chaque re-render) pour les séparer visuellement.
-            // Les valeurs réelles restent affichées telles quelles dans le tooltip.
+            // Plusieurs signaux partagent souvent la même confidence/pnl exacts
+            // (TP/SL à valeurs discrètes), ce qui les empile visuellement.
+            // Jitter déterministe (hash du symbole, pas Math.random — sinon les
+            // points sauteraient à chaque re-render). Les vraies valeurs restent
+            // affichées telles quelles dans le tooltip.
             function seededJitter(str, range) {
               let hash = 0;
               for (let i = 0; i < str.length; i++) {
@@ -664,12 +699,12 @@ export default function Analytics() {
             const sellPoints = data.confidenceOutcome.filter(p => p.signal === 'SELL').map(withJitter);
 
             return (
-              <div className="panel" style={{padding:18}}>
+              <div className="panel" style={{padding:18,opacity: refreshing ? 0.6 : 1,transition:'opacity .15s'}}>
                 <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:4}}>
                   <div style={{fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:7}}>
                     <div style={{width:5,height:5,borderRadius:'50%',background:'var(--cyan)'}}/>
                     Confidence vs Outcome
-                    <span style={{fontSize:9,color:'var(--text-muted)',fontWeight:400}}>— confidence IA vs résultat réel (BUY/SELL uniquement)</span>
+                    <span style={{fontSize:9,color:'var(--text-muted)',fontWeight:400}}>— confidence IA vs résultat réel (trades clos, n={data.confidenceOutcome.length})</span>
                   </div>
                   <div style={{display:'flex',gap:12,fontSize:9,fontFamily:'JetBrains Mono,monospace'}}>
                     <span style={{display:'flex',alignItems:'center',gap:4}}>
@@ -723,7 +758,7 @@ export default function Analytics() {
 
           {/* ── Row 7: Strategy Fingerprint — compact horizontal ── */}
           {data.fingerprint.length > 0 && (
-            <div className="panel" style={{padding:18}}>
+            <div className="panel" style={{padding:18,opacity: refreshing ? 0.6 : 1,transition:'opacity .15s'}}>
               <div style={{fontSize:12,fontWeight:600,marginBottom:14,display:'flex',alignItems:'center',gap:7}}>
                 <div style={{width:5,height:5,borderRadius:'50%',background:'var(--purple-bright)'}}/>
                 Strategy Fingerprint

@@ -24,7 +24,7 @@ function buildBenchmarkCurve(equityCurve, benchmarkCandles) {
     else break;
   }
 
-  const firstPortfolio = equityCurve[0].v;
+  const firstPortfolio = equityCurve[0].value;
   let firstBenchmark = null;
 
   const curve = equityCurve.map(point => {
@@ -32,8 +32,9 @@ function buildBenchmarkCurve(equityCurve, benchmarkCandles) {
     if (firstBenchmark === null && lastKnownClose != null) firstBenchmark = lastKnownClose;
 
     return {
-      t: point.t,
-      portfolio: firstPortfolio > 0 ? ((point.v - firstPortfolio) / firstPortfolio) * 100 : 0,
+      day: point.day,
+      date: point.date,
+      portfolio: firstPortfolio > 0 ? ((point.value - firstPortfolio) / firstPortfolio) * 100 : 0,
       benchmark: (lastKnownClose != null && firstBenchmark)
         ? ((lastKnownClose - firstBenchmark) / firstBenchmark) * 100
         : null,

@@ -379,6 +379,15 @@ async function migrate() {
     ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS signal_alert_min_confidence INTEGER NOT NULL DEFAULT 75;
 
     ALTER TABLE signals ADD COLUMN IF NOT EXISTS asset_class TEXT NOT NULL DEFAULT 'Crypto';
+
+    -- ✅ Analytics: résolution réelle TP/SL des signaux BUY/SELL
+    -- (remplie toutes les 15 min par outcomeResolver.service.js)
+    --   outcome : 'TP' | 'SL' | 'EXPIRED' | 'INVALID' (NULL = encore ouvert)
+    ALTER TABLE signals ADD COLUMN IF NOT EXISTS outcome    TEXT;
+    ALTER TABLE signals ADD COLUMN IF NOT EXISTS closed_at  TIMESTAMPTZ;
+    ALTER TABLE signals ADD COLUMN IF NOT EXISTS exit_price NUMERIC;
+    ALTER TABLE signals ADD COLUMN IF NOT EXISTS pnl_pct    NUMERIC;
+
     -- ✅ Feature: health monitoring des connexions exchange — permet de
     -- détecter une clé API cassée/expirée AVANT qu'un ordre réel échoue,
     -- au lieu de le découvrir seulement au moment critique.
@@ -573,6 +582,17 @@ async function migrate() {
 
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_signals_asset_class ON signals(asset_class);
+  `);
+
+  // ✅ Analytics: index créés APRÈS les ALTER TABLE ci-dessus (les colonnes
+  // outcome / asset_class doivent exister avant les index partiels).
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_signals_created_class
+      ON signals(created_at DESC, asset_class);
+    CREATE INDEX IF NOT EXISTS idx_signals_open
+      ON signals(created_at) WHERE outcome IS NULL AND signal IN ('BUY','SELL');
+    CREATE INDEX IF NOT EXISTS idx_signals_trades
+      ON signals(created_at) WHERE signal IN ('BUY','SELL');
   `);
 
   // ✅ Fix: ces deux index doivent être créés APRÈS les ALTER TABLE ADD
