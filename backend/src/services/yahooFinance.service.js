@@ -5,6 +5,18 @@
  * + getStockCandles : ajouté pour le Backtester, permet de récupérer
  *   n'importe quel symbole boursier (AAPL, SPY, NVDA...), pas seulement
  *   les paires de YF_SYMBOLS ci-dessous.
+ *
+ * ✅ Fixes analytics (2026-10):
+ *   1. Interval '4h' : Yahoo n'a pas de 4h → on récupère du 1h sur 60 jours
+ *      et on AGRÈGE en vraies bougies 4h (buckets UTC). Avant, l'ATR (donc
+ *      SL/TP) était calculé sur des bougies 1h : stops minuscules
+ *      (-0.09%, -0.13%) qui se faisaient toucher par le bruit.
+ *   2. period2 = maintenant (Date) au lieu d'une date sans heure, qui coupait
+ *      les données à minuscule UTC → prix d'entrée jusqu'à 24h périmé.
+ *   3. Marché fermé (week-end, hors session, jour férié) : si la dernière
+ *      bougie 1h est trop ancienne, on lève MARKET_CLOSED et le signal est
+ *      ignoré (pas de BUY/SELL basé sur le close de vendredi). Basé sur les
+ *      données Yahoo → pas de logique d'horaires/DST à maintenir.
  */
 
 const YahooFinance = require('yahoo-finance2').default;
@@ -40,27 +52,55 @@ const YF_SYMBOLS = {
 
 const INTERVAL_MAP = {
   '1h': '1h',
-  '4h': '1h',  // Yahoo ma 3andha-sh 4h — nakhdo 1h u ncompute
+  '4h': '1h',  // Yahoo n'a pas de 4h — on prend du 1h et on agrège en 4h (voir getYFData)
   '1d': '1d',
 };
 
 // Reward:Risk multiple appliqué au SL/TP calculé via ATR
 const RR_MULTIPLE = 2;
 
+const HOUR_MS = 3600_000;
+const H4_MS   = 4 * HOUR_MS;
+
+// Si la dernière bougie 1h a démarré il y a plus que ça, le marché est fermé.
+// (2.5h: une bougie 1h en cours + marge pour le retard de Yahoo.)
+const STALE_MS = 2.5 * HOUR_MS;
+
+// ── Agrégation 1h → 4h (buckets alignés sur 00/04/08/12/16/20 UTC) ──
+function aggregateHourlyTo4h(candles) {
+  const buckets = new Map();
+  for (const c of candles) {
+    const key = Math.floor(c.time / H4_MS);
+    const b = buckets.get(key);
+    if (!b) {
+      buckets.set(key, { time: key * H4_MS, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume });
+    } else {
+      b.high    = Math.max(b.high, c.high);
+      b.low     = Math.min(b.low, c.low);
+      b.close   = c.close;
+      b.volume += c.volume;
+    }
+  }
+  return [...buckets.values()].sort((a, b) => a.time - b.time);
+}
+
 async function getYFData(symbol, interval = '4h', limit = 100) {
   const yfInterval = INTERVAL_MAP[interval] || '1h';
+  const is4h       = interval === '4h';
 
   const now     = new Date();
   const period1 = new Date(now);
   if (yfInterval === '1h') {
-    period1.setDate(period1.getDate() - 7);
+    // 4h: 60 jours de 1h pour avoir >= 50 bougies 4h même sur les actions
+    // (2 buckets 4h par séance US). 1h simple: 7 jours.
+    period1.setDate(period1.getDate() - (is4h ? 60 : 7));
   } else {
     period1.setFullYear(period1.getFullYear() - 1);
   }
 
   const result = await yahooFinance.chart(symbol, {
-    period1:  period1.toISOString().split('T')[0],
-    period2:  now.toISOString().split('T')[0],
+    period1,
+    period2:  now,        // maintenant (avec l'heure), pas minuit UTC
     interval: yfInterval,
   });
 
@@ -68,16 +108,35 @@ async function getYFData(symbol, interval = '4h', limit = 100) {
     throw new Error(`No data for ${symbol}`);
   }
 
-  const candles = result.quotes
+  const raw = result.quotes
     .filter(q => q.open && q.high && q.low && q.close)
-    .slice(-limit)
     .map(q => ({
+      time:   new Date(q.date).getTime(),
       open:   q.open,
       high:   q.high,
       low:    q.low,
       close:  q.close,
       volume: q.volume || 0,
     }));
+
+  if (!raw.length) {
+    throw new Error(`No data for ${symbol}`);
+  }
+
+  // Marché fermé ? (seulement pertinent en intraday)
+  if (yfInterval === '1h') {
+    const lastTime = raw[raw.length - 1].time;
+    if (now.getTime() - lastTime > STALE_MS) {
+      const err = new Error(`Market closed for ${symbol} (last candle ${new Date(lastTime).toISOString()})`);
+      err.code = 'MARKET_CLOSED';
+      throw err;
+    }
+  }
+
+  const merged  = is4h ? aggregateHourlyTo4h(raw) : raw;
+  const candles = merged
+    .slice(-limit)
+    .map(c => ({ open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume }));
 
   if (candles.length < 30) {
     throw new Error(`Not enough candles for ${symbol}: ${candles.length}`);
@@ -247,6 +306,8 @@ async function scanAllYF(interval = '4h', onProgress = () => {}) {
       const symbol = batch[idx];
       if (outcome.status === 'fulfilled') {
         results.push(outcome.value);
+      } else if (outcome.reason?.code === 'MARKET_CLOSED') {
+        logger.info(`[yahooFinance] ${symbol} marché fermé — signal ignoré`);
       } else {
         logger.error(`[yahooFinance] ${symbol} error: ${outcome.reason?.message}`);
       }
@@ -427,6 +488,8 @@ async function scanEquities(symbols, interval = '4h', onProgress = () => {}) {
       const symbol = batch[idx];
       if (outcome.status === 'fulfilled') {
         results.push(outcome.value);
+      } else if (outcome.reason?.code === 'MARKET_CLOSED') {
+        logger.info(`[yahooFinance] equity ${symbol} marché fermé — signal ignoré`);
       } else {
         logger.error(`[yahooFinance] equity ${symbol} error: ${outcome.reason?.message}`);
       }

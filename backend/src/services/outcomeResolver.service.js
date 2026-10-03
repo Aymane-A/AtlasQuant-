@@ -54,7 +54,7 @@ async function binanceCandles(pair, fromMs, toMs) {
     if (!res.ok) throw new Error(`Binance ${pair} HTTP ${res.status}`);
     const rows = await res.json();
     if (!rows.length) break;
-    for (const k of rows) out.push({ time: k[0], high: +k[2], low: +k[3], close: +k[4] });
+    for (const k of rows) out.push({ time: k[0], open: +k[1], high: +k[2], low: +k[3], close: +k[4] });
     start = rows[rows.length - 1][0] + HOUR;
     if (rows.length < 1000) break;
   }
@@ -70,7 +70,7 @@ async function yahooCandles(ticker, fromMs, toMs) {
   });
   return (res?.quotes || [])
     .filter(q => q.high && q.low && q.close)
-    .map(q => ({ time: new Date(q.date).getTime(), high: q.high, low: q.low, close: q.close }));
+    .map(q => ({ time: new Date(q.date).getTime(), open: q.open ?? q.close, high: q.high, low: q.low, close: q.close }));
 }
 
 // ── Logique pure: un signal + ses bougies -> résultat ou null ──
@@ -100,6 +100,17 @@ function resolveOutcome(sig, candles, now = Date.now()) {
     if (c.time < from) continue;
     if (c.time >= expiry) break;
     last = c;
+
+    // Gap: si la bougie OUVRE déjà au-delà du SL (ou du TP), le prix a sauté
+    // le niveau → sortie à l'open (pire que le SL, ou meilleur que le TP),
+    // pas au niveau théorique. On ne teste pas la bougie qui contient le
+    // signal (son open précède l'entrée).
+    if (c.time >= created && c.open > 0) {
+      const gapSL = isBuy ? c.open <= sl : c.open >= sl;
+      const gapTP = isBuy ? c.open >= tp : c.open <= tp;
+      if (gapSL) return fin('SL', c.open, c.time);
+      if (gapTP) return fin('TP', c.open, c.time);
+    }
 
     const hitSL = isBuy ? c.low  <= sl : c.high >= sl;
     const hitTP = isBuy ? c.high >= tp : c.low  <= tp;

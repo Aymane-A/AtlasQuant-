@@ -22,6 +22,18 @@
  *   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
  * Ce schéma d'encryption est NOUVEAU (le fichier original a été perdu) —
  * toute connexion existante en DB doit être reconnectée après déploiement.
+ *
+ * ✅ Fix diagnostic (2026-10) : verifyCredentials() avalait TOUTES les
+ * erreurs dans un "Connexion refusée" générique (timeout, IP, signature,
+ * horloge, région... indiscernables). Maintenant :
+ *   - la vraie cause est loguée (sans secret) côté serveur ;
+ *   - le message renvoyé au frontend explique la cause (code Binance -2015,
+ *     -1022, timeout réseau, etc.) ;
+ *   - Binance est vérifié par un appel signé direct à /api/v3/account
+ *     (1 requête, ~300ms) au lieu de ccxt.fetchBalance(), qui déclenche
+ *     d'abord loadMarkets() (spot + futures + options + currencies privées)
+ *     = 14-20s et des échecs sur des clés "Reading" seulement ;
+ *   - apiKey/apiSecret sont trim()és (un espace collé = -2014/-1022).
  */
 
 const crypto = require('crypto');
@@ -76,13 +88,24 @@ function getCcxtInstance(exchangeId, creds) {
   if (typeof ExchangeClass !== 'function') {
     const err = new Error(`Exchange "${exchangeId}" non supportée par ccxt (version installée)`);
     err.status = 400;
+    err.unsupported = true;
     throw err;
   }
+
+  // Binance: fetchCurrencies fait un appel privé (sapi capital/config) qui
+  // échoue avec des clés restreintes (Reading seulement / IP restreinte) et
+  // ralentit loadMarkets(). Pas nécessaire pour lire un solde.
+  const extra = exchangeId === 'binance'
+    ? { options: { defaultType: 'spot', fetchCurrencies: false, adjustForTimeDifference: true } }
+    : {};
+
   return new ExchangeClass({
-    apiKey: creds.apiKey,
-    secret: creds.apiSecret,
-    password: creds.passphrase || undefined, // okx/kucoin/coinbase/bitget
+    apiKey: String(creds.apiKey || '').trim(),
+    secret: String(creds.apiSecret || '').trim(),
+    password: creds.passphrase ? String(creds.passphrase).trim() : undefined, // okx/kucoin/coinbase/bitget
     enableRateLimit: true,
+    timeout: 15000,
+    ...extra,
   });
 }
 
@@ -148,7 +171,6 @@ async function getAlpacaQuote(creds, symbol) {
 }
 
 // ── GET /api/exchanges/connections ────────────────────────────
-// ── GET /api/exchanges/connections ────────────────────────────
 // Objet keyed par exchange_id — Exchanges.jsx lit connections[exchangeId]
 // directement (pas un tableau), et connections initial state = {} côté
 // frontend. Champs en camelCase pour matcher exactement ce que
@@ -176,8 +198,88 @@ async function getUserConnections(userId) {
   return result;
 }
 
+// ── Diagnostic d'erreur exchange ───────────────────────────────
+// Retire tout ce qui ressemble à un secret/une signature avant de loguer.
+function sanitizeForLog(text) {
+  return String(text || '')
+    .replace(/signature=[0-9a-fA-F]+/g, 'signature=***')
+    .replace(/(api[_-]?key|apikey|X-MBX-APIKEY)["':=\s]+[A-Za-z0-9]{8,}/gi, '$1=***')
+    .slice(0, 300);
+}
+
+const BINANCE_CODE_HINTS = {
+  '-2015': "clé API invalide, IP non autorisée ou permissions insuffisantes (code -2015)",
+  '-2014': "format de clé API invalide — espace ou caractère en trop ? (code -2014)",
+  '-2008': "clé API inconnue de Binance (incorrecte ou supprimée) (code -2008)",
+  '-1022': "signature invalide — le secret ne correspond pas à la clé (code -1022)",
+  '-1021': "horloge du PC désynchronisée avec Binance (code -1021)",
+  '-1003': "trop de requêtes (rate limit) (code -1003)",
+};
+
+// Retourne { code, hint, kind, raw } à partir d'une erreur axios OU ccxt.
+function classifyExchangeError(err) {
+  const body = err?.response?.data;
+  let raw = body?.msg || body?.message || err?.message || String(err);
+  if (typeof body === 'string') raw = body;
+
+  // code Binance: soit dans response.data.code, soit embarqué dans le message ccxt
+  let code = body?.code != null ? String(body.code) : null;
+  if (code == null) {
+    const m = /"code"\s*:\s*"?(-?\d+)/.exec(String(err?.message || ''));
+    if (m) code = m[1];
+  }
+
+  const httpStatus = err?.response?.status;
+
+  if (code && BINANCE_CODE_HINTS[code]) {
+    return { kind: 'auth', code, hint: BINANCE_CODE_HINTS[code], raw };
+  }
+  if (httpStatus === 451 || httpStatus === 403) {
+    return { kind: 'blocked', code, hint: `accès bloqué par l'exchange (HTTP ${httpStatus}) — restriction de région/IP`, raw };
+  }
+  if (err?.code === 'ECONNABORTED' || err?.code === 'ETIMEDOUT' || err instanceof ccxt.RequestTimeout) {
+    return { kind: 'timeout', code, hint: "timeout réseau — l'exchange n'a pas répondu à temps", raw };
+  }
+  if (['ENOTFOUND', 'ECONNREFUSED', 'ECONNRESET', 'EAI_AGAIN'].includes(err?.code)
+      || err instanceof ccxt.NetworkError || err instanceof ccxt.ExchangeNotAvailable) {
+    return { kind: 'network', code, hint: "exchange injoignable (réseau/DNS/pare-feu)", raw };
+  }
+  if (err instanceof ccxt.InvalidNonce) {
+    return { kind: 'clock', code, hint: "horloge du PC désynchronisée (nonce/timestamp invalide)", raw };
+  }
+  if (err instanceof ccxt.AuthenticationError || httpStatus === 401) {
+    return { kind: 'auth', code, hint: "identifiants refusés par l'exchange", raw };
+  }
+  return { kind: 'unknown', code, hint: 'erreur inattendue (voir logs serveur)', raw };
+}
+
+// Vérification Binance directe (1 appel signé /api/v3/account, nécessite
+// seulement "Enable Reading"). Pas de loadMarkets → rapide, et on récupère
+// le code d'erreur Binance exact.
+async function verifyBinanceDirect(creds) {
+  const apiKey    = String(creds.apiKey || '').trim();
+  const apiSecret = String(creds.apiSecret || '').trim();
+  // Binance rejette (-1021) tout timestamp > serverTime + 1000ms. Si l'horloge
+  // Windows avance, recvWindow n'y change rien → on signe avec l'heure du
+  // serveur Binance (endpoint public /time), pas celle du PC.
+  const { data: t } = await axios.get('https://api.binance.com/api/v3/time', { timeout: 5000 });
+  const qs  = `timestamp=${t.serverTime}&recvWindow=10000`;
+  const sig = crypto.createHmac('sha256', apiSecret).update(qs).digest('hex');
+  await axios.get(`https://api.binance.com/api/v3/account?${qs}&signature=${sig}`, {
+    headers: { 'X-MBX-APIKEY': apiKey },
+    timeout: 8000,
+  });
+}
+
 // ── Vérifie que des identifiants fonctionnent réellement ───────
 async function verifyCredentials(exchangeId, creds) {
+  const supported = CCXT_EXCHANGES.has(exchangeId) || exchangeId === 'oanda' || exchangeId === 'alpaca';
+  if (!supported) {
+    const err = new Error(`Exchange "${exchangeId}" non supportée`);
+    err.status = 400;
+    throw err;
+  }
+
   try {
     if (exchangeId === 'oanda') {
       await axios.get(
@@ -192,18 +294,22 @@ async function verifyCredentials(exchangeId, creds) {
       });
       return;
     }
-    if (CCXT_EXCHANGES.has(exchangeId)) {
-      const ex = getCcxtInstance(exchangeId, creds);
-      await ex.fetchBalance();
+    if (exchangeId === 'binance') {
+      await verifyBinanceDirect(creds);
       return;
     }
-    const err = new Error(`Exchange "${exchangeId}" non supportée`);
-    err.status = 400;
-    throw err;
+    const ex = getCcxtInstance(exchangeId, creds);
+    await ex.fetchBalance();
   } catch (err) {
-    if (err.status) throw err;
-    const e = new Error(`Connexion à ${exchangeId} refusée — vérifie tes identifiants`);
-    e.status = 400;
+    if (err.unsupported) throw err;
+
+    const info = classifyExchangeError(err);
+    logger.warn(`[exchanges] verifyCredentials(${exchangeId}) failed [${info.kind}${info.code ? ' ' + info.code : ''}]: ${sanitizeForLog(info.raw)}`);
+
+    const e = new Error(`Connexion à ${exchangeId} refusée — ${info.hint}`);
+    e.status = info.kind === 'timeout' || info.kind === 'network' ? 502 : 400;
+    e.exchangeErrorKind = info.kind;
+    e.exchangeErrorCode = info.code;
     throw e;
   }
 }
@@ -225,6 +331,14 @@ async function connectExchange(userId, exchange, credentials, mode = 'readonly')
     err.status = 400;
     throw err;
   }
+
+  // Un espace/saut de ligne collé avec la clé = -2014 / -1022 sur Binance.
+  credentials = {
+    ...credentials,
+    apiKey:     String(credentials.apiKey).trim(),
+    apiSecret:  String(credentials.apiSecret).trim(),
+    passphrase: credentials.passphrase ? String(credentials.passphrase).trim() : credentials.passphrase,
+  };
 
   // Paper mode : les credentials ne sont PAS vérifiés contre l'exchange —
   // OANDA/Alpaca practice acceptent des clés démo distinctes de leurs clés
@@ -399,7 +513,7 @@ async function getAggregatedPortfolio(userId) {
         totalsBySymbol[p.symbol] = (totalsBySymbol[p.symbol] || 0) + p.total;
       }
     } catch (err) {
-      logger.error(`[exchanges] getAggregatedPortfolio(${c.exchange_id}): ${err.message}`);
+      logger.error(`[exchanges] getAggregatedPortfolio(${c.exchange_id}): ${sanitizeForLog(err.message)}`);
       skipped.push({ exchangeId: c.exchange_id, reason: err.message });
     }
   }));
@@ -583,7 +697,7 @@ async function healthCheckAllConnections() {
         healthStatus: result?.health_status || 'unknown',
       });
     } catch (err) {
-      logger.error(`[exchanges] healthCheckAllConnections(${conn.exchange_id}, user ${conn.user_id}): ${err.message}`);
+      logger.error(`[exchanges] healthCheckAllConnections(${conn.exchange_id}, user ${conn.user_id}): ${sanitizeForLog(err.message)}`);
       results.push({ userId: conn.user_id, exchangeId: conn.exchange_id, healthStatus: 'failed' });
     }
   }

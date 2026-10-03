@@ -6,9 +6,66 @@ const axios  = require('axios');
 const db     = require('../config/db');
 const logger = require('../utils/logger');
 
-const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const GROQ_URL     = 'https://api.groq.com/openai/v1/chat/completions';
-const GROQ_MODEL   = 'llama-3.3-70b-versatile';
+const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
+
+// Model principal depuis .env, puis fallbacks
+function getModelCandidates() {
+  const list = [
+    process.env.GROQ_MODEL,
+    'openai/gpt-oss-120b',
+    'openai/gpt-oss-20b',
+    'llama-3.3-70b-versatile',
+    'llama-3.1-8b-instant',
+  ].filter(Boolean);
+  return [...new Set(list)];
+}
+
+function isModelError(err) {
+  const status = err.response?.status;
+  const code   = err.response?.data?.error?.code;
+  const msg    = String(err.response?.data?.error?.message || '');
+  return status === 404 || code === 'model_not_found' || code === 'model_decommissioned' ||
+         /decommission|does not exist|not found/i.test(msg);
+}
+
+// JSON invalide / tokens épuisés → on essaie le model suivant
+function isJsonError(err) {
+  return err.response?.data?.error?.code === 'json_validate_failed';
+}
+
+async function callGroq(messages) {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error('GROQ_API_KEY is missing in .env');
+
+  let lastErr;
+  for (const model of getModelCandidates()) {
+    const isReasoning = model.startsWith('openai/gpt-oss');
+    const body = {
+      model,
+      messages,
+      temperature: 0.3,
+      // reasoning models: le budget inclut les tokens de réflexion
+      max_completion_tokens: isReasoning ? 6000 : 2000,
+      response_format: { type: 'json_object' },
+    };
+    if (isReasoning) body.reasoning_effort = 'low';
+
+    try {
+      const r = await axios.post(GROQ_URL, body, {
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        timeout: 45000,
+      });
+      logger.info(`[portfolioAnalyzer] Groq OK with model=${model}`);
+      return r.data.choices[0].message.content;
+    } catch (err) {
+      lastErr = err;
+      const detail = JSON.stringify(err.response?.data || err.message);
+      logger.error(`[portfolioAnalyzer] Groq failed model=${model} status=${err.response?.status} body=${detail}`);
+      if (!isModelError(err) && !isJsonError(err)) throw err; // 401/429/timeout → stop
+    }
+  }
+  throw lastErr;
+}
 
 // ── POST /api/portfolio/analyze ───────────────────────────────────────────────
 async function analyzePortfolio(req, res) {
@@ -146,23 +203,12 @@ ${JSON.stringify(portfolioSummary, null, 2)}
 
 Be specific about symbols, percentages, and dollar amounts. Reference actual positions in your analysis.`;
 
-    // 5. Call Groq
-    const groqRes = await axios.post(
-      GROQ_URL,
-      {
-        model:       GROQ_MODEL,
-        messages:    [{ role:'system', content:systemPrompt }, { role:'user', content:userPrompt }],
-        max_tokens:  1200,
-        temperature: 0.3,
-      },
-      {
-        headers: { Authorization:`Bearer ${GROQ_API_KEY}`, 'Content-Type':'application/json' },
-        timeout: 30000,
-      }
-    );
-
-    const raw  = groqRes.data.choices[0].message.content.trim();
-    const clean = raw.replace(/```json|```/g, '').trim();
+    // 5. Call Groq (avec fallback de model)
+    const raw      = (await callGroq([
+      { role: 'system', content: systemPrompt },
+      { role: 'user',   content: userPrompt },
+    ])).trim();
+    const clean    = raw.replace(/```json|```/g, '').trim();
     const analysis = JSON.parse(clean);
 
     // 6. Attach portfolio metrics
@@ -176,9 +222,14 @@ Be specific about symbols, percentages, and dollar amounts. Reference actual pos
     res.json({ success: true, analysis });
 
   } catch (err) {
-    logger.error(`[portfolioAnalyzer] ${err.message}`);
-    if (err.response?.data) logger.error(`[portfolioAnalyzer] Groq error:`, JSON.stringify(err.response.data));
-    res.status(500).json({ success: false, error: 'Analysis failed. Try again.' });
+    logger.error(`[portfolioAnalyzer] ${err.message} | status=${err.response?.status} | body=${JSON.stringify(err.response?.data || null)}`);
+    const status = err.response?.status;
+    const msg =
+      err.message?.includes('GROQ_API_KEY') ? 'AI service not configured.' :
+      status === 401 ? 'AI key invalid.' :
+      status === 429 ? 'AI rate limit reached. Try again in a minute.' :
+      'Analysis failed. Try again.';
+    res.status(500).json({ success: false, error: msg });
   }
 }
 

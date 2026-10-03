@@ -289,7 +289,7 @@ async function getAnalyticsData(req, res) {
                        created_at, asset_class, outcome, closed_at, exit_price, pnl_pct
                 FROM signals
                 ${where ? where + ' AND' : 'WHERE'} signal IN ('BUY','SELL')
-                  AND COALESCE(outcome, '') <> 'INVALID'
+                  AND COALESCE(outcome, '') NOT IN ('INVALID', 'LEGACY')
                 ORDER BY created_at ASC
             `, params),
         ]);

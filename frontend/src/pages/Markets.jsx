@@ -172,6 +172,10 @@ function getMarketStatus(session) {
   return { name: session.name, open: isOpen, infoKey };
 }
 
+// ── Countdown "Next update in Xs" — doit rester synchronisé avec
+// BROADCAST_INTERVAL_MS dans marketSocket.server.js (actuellement 10s).
+const REFRESH_INTERVAL_SEC = 10;
+
 export default function Markets() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -206,6 +210,16 @@ export default function Markets() {
   }, []);
 
   const marketStatuses = useMemo(() => MARKET_SESSIONS.map(getMarketStatus), [tick]);
+
+  // ── Countdown jusqu'au prochain broadcast WS — dépend de `tick` pour se
+  // recalculer chaque seconde, pas besoin de useMemo (Date.now() doit être
+  // évalué à chaque render, pas mémorisé).
+  const secondsSinceSnapshot = lastSnapshotAt
+    ? Math.floor((Date.now() - lastSnapshotAt.getTime()) / 1000)
+    : null;
+  const nextUpdateIn = secondsSinceSnapshot !== null
+    ? Math.max(0, REFRESH_INTERVAL_SEC - (secondsSinceSnapshot % REFRESH_INTERVAL_SEC))
+    : null;
 
   const ticks    = streamData.ticks    || [];
   const indices  = streamData.indices  || [];
@@ -363,6 +377,11 @@ export default function Markets() {
         {lastSnapshotAt && (
           <span style={{ color: 'var(--text-muted)' }}>
             Updated {timeAgo(lastSnapshotAt.toISOString())}
+          </span>
+        )}
+        {connected && nextUpdateIn !== null && (
+          <span style={{ color: 'var(--text-muted)' }}>
+            Next update in {nextUpdateIn}s
           </span>
         )}
         <span style={{ color: connected ? 'var(--green)' : 'var(--red)', display: 'flex', alignItems: 'center', gap: 6 }}>
