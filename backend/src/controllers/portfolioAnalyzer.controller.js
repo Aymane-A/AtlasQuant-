@@ -1,14 +1,19 @@
 /**
  * portfolioAnalyzer.controller.js — AtlasQuant AI
- * Analyzes user portfolio via Groq AI and returns structured recommendations
+ * Analyzes the user's portfolio via Groq and returns structured recommendations.
+ *
+ * Uses the SAME data pipeline as the Portfolio page (DB + exchange balances +
+ * live prices, shorts as negative exposure, same % base) so the AI quotes the
+ * exact numbers the user sees on screen.
  */
 const axios  = require('axios');
 const db     = require('../config/db');
 const logger = require('../utils/logger');
+const { fetchLivePrices, fetchExchangeBalances, mergePositions } = require('./portfolioController');
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
-// Model principal depuis .env, puis fallbacks
+// ── Model selection (env first, then fallbacks) ──────────────────────────────
 function getModelCandidates() {
   const list = [
     process.env.GROQ_MODEL,
@@ -27,8 +32,6 @@ function isModelError(err) {
   return status === 404 || code === 'model_not_found' || code === 'model_decommissioned' ||
          /decommission|does not exist|not found/i.test(msg);
 }
-
-// JSON invalide / tokens épuisés → on essaie le model suivant
 function isJsonError(err) {
   return err.response?.data?.error?.code === 'json_validate_failed';
 }
@@ -44,7 +47,6 @@ async function callGroq(messages) {
       model,
       messages,
       temperature: 0.3,
-      // reasoning models: le budget inclut les tokens de réflexion
       max_completion_tokens: isReasoning ? 6000 : 2000,
       response_format: { type: 'json_object' },
     };
@@ -59,119 +61,136 @@ async function callGroq(messages) {
       return r.data.choices[0].message.content;
     } catch (err) {
       lastErr = err;
-      const detail = JSON.stringify(err.response?.data || err.message);
-      logger.error(`[portfolioAnalyzer] Groq failed model=${model} status=${err.response?.status} body=${detail}`);
-      if (!isModelError(err) && !isJsonError(err)) throw err; // 401/429/timeout → stop
+      logger.error(`[portfolioAnalyzer] Groq failed model=${model} status=${err.response?.status} body=${JSON.stringify(err.response?.data || err.message)}`);
+      if (!isModelError(err) && !isJsonError(err)) throw err;
     }
   }
   throw lastErr;
 }
 
-// ── POST /api/portfolio/analyze ───────────────────────────────────────────────
+function parseJsonLoose(raw) {
+  const clean = String(raw).replace(/```json|```/g, '').trim();
+  try { return JSON.parse(clean); } catch { /* try to extract the object */ }
+  const s = clean.indexOf('{'), e = clean.lastIndexOf('}');
+  if (s >= 0 && e > s) return JSON.parse(clean.slice(s, e + 1));
+  throw new Error('AI returned invalid JSON');
+}
+
+// Simple per-user cooldown → no accidental spam / quota burn
+const LAST_CALL   = new Map();
+const COOLDOWN_MS = 8000;
+
+// ── POST /api/portfolio/analyze ──────────────────────────────────────────────
 async function analyzePortfolio(req, res) {
   try {
     const userId = req.user.id;
 
-    // 1. Fetch portfolio data from DB
-    const { rows: positions } = await db.query(
-      `SELECT symbol, side, amount, average_entry, current_price, sector
-       FROM portfolio WHERE user_id = $1`,
-      [userId]
-    );
+    const last = LAST_CALL.get(userId) || 0;
+    if (Date.now() - last < COOLDOWN_MS) {
+      return res.status(429).json({ success: false, error: 'Please wait a few seconds before re-analyzing.' });
+    }
+    LAST_CALL.set(userId, Date.now());
 
-    const { rows: accountRows } = await db.query(
-      `SELECT cash_balance FROM accounts WHERE user_id=$1 LIMIT 1`,
-      [userId]
-    );
-    const cash = accountRows.length ? parseFloat(accountRows[0].cash_balance) : 0;
+    // 1. Same sources as the Portfolio page
+    const [posRes, exchangeBalances, accRes] = await Promise.all([
+      db.query(
+        `SELECT symbol, side, amount, average_entry, current_price, sector
+         FROM portfolio WHERE user_id = $1`,
+        [userId]
+      ),
+      fetchExchangeBalances(userId),
+      db.query(`SELECT cash_balance FROM accounts WHERE user_id=$1 LIMIT 1`, [userId]),
+    ]);
 
-    // 2. Fetch connected exchanges count
-    const { rows: exchangeRows } = await db.query(
-      `SELECT exchange_id, mode FROM user_exchange_connections WHERE user_id=$1`,
-      [userId]
-    );
-
+    const { positions, stableCash } = mergePositions(posRes.rows, exchangeBalances);
     if (positions.length === 0) {
       return res.status(400).json({ success: false, error: 'No positions to analyze' });
     }
 
-    // 3. Compute portfolio metrics
-    let totalCost = 0, totalValue = cash;
-    const processedPositions = positions.map(p => {
-      const avg    = parseFloat(p.average_entry);
-      const cur    = parseFloat(p.current_price) || avg;
-      const amt    = parseFloat(p.amount);
-      const val    = cur * amt;
-      const cost   = avg * amt;
-      const pnl    = p.side === 'short' ? (avg - cur) * amt : (cur - avg) * amt;
-      const pnlPct = cost > 0 ? (pnl / cost) * 100 : 0;
-      totalCost  += cost;
-      totalValue += val;
-      return {
-        symbol:  p.symbol,
-        side:    p.side,
-        sector:  p.sector || 'Unknown',
-        amount:  amt,
-        avgEntry: avg,
-        curPrice: cur,
-        value:   val,
-        pnl:     pnl,
-        pnlPct:  pnlPct,
-        weight:  0, // filled below
-      };
+    const dbCash = accRes.rows.length ? parseFloat(accRes.rows[0].cash_balance) : 0;
+    const cash   = dbCash + stableCash;
+
+    // 2. Live prices
+    const symbols = [...new Set(positions.map(p => p.symbol))];
+    const hints   = {};
+    positions.forEach(p => { if (p.sector) hints[p.symbol] = p.sector; });
+    const live = await fetchLivePrices(symbols, hints);
+
+    // 3. Metrics (identical maths to getPortfolioData)
+    let grossValue = 0, signedValue = 0, totalCost = 0, unrealised = 0;
+    const processed = positions.map(p => {
+      const sgn   = p.side === 'short' ? -1 : 1;
+      const avg   = parseFloat(p.average_entry) || 0;
+      const amt   = parseFloat(p.amount) || 0;
+      const price = live[p.symbol]?.price > 0 ? live[p.symbol].price : (parseFloat(p.current_price) || avg);
+      const val   = price * amt;
+      const cost  = avg * amt;
+      const pnl   = avg > 0 ? sgn * (price - avg) * amt : null;
+      const pnlPct = avg > 0 && cost > 0 ? (pnl / cost) * 100 : null;
+
+      grossValue  += val;
+      signedValue += sgn * val;
+      if (avg > 0) { totalCost += cost; unrealised += pnl; }
+
+      return { symbol: p.symbol, side: p.side || 'long', sector: p.sector || 'Unknown', val, pnl, pnlPct };
     });
 
-    const investedValue = totalValue - cash;
-    processedPositions.forEach(p => {
-      p.weight = investedValue > 0 ? (p.value / investedValue) * 100 : 0;
-    });
+    const equity    = cash + signedValue;
+    const allocBase = grossValue + Math.max(cash, 0);
+    const pctOf     = (v) => (allocBase > 0 ? (v / allocBase) * 100 : 0);
 
-    const totalPnL    = totalValue - cash - totalCost;
-    const totalPnLPct = totalCost > 0 ? (totalPnL / totalCost) * 100 : 0;
-    const cashRatio   = totalValue > 0 ? (cash / totalValue) * 100 : 0;
-    const maxWeight   = Math.max(...processedPositions.map(p => p.weight));
+    processed.forEach(p => { p.weight = pctOf(p.val); });
+    processed.sort((a, b) => b.val - a.val);
 
-    // Sector breakdown
+    const maxWeight   = processed.length ? processed[0].weight : 0;
+    const cashRatio   = pctOf(Math.max(cash, 0));
+    const totalPnLPct = totalCost > 0 ? (unrealised / totalCost) * 100 : 0;
+
     const sectorMap = {};
-    processedPositions.forEach(p => {
-      sectorMap[p.sector] = (sectorMap[p.sector] || 0) + p.weight;
-    });
+    processed.forEach(p => { sectorMap[p.sector] = (sectorMap[p.sector] || 0) + p.val; });
+    const sectors = {};
+    Object.entries(sectorMap).forEach(([k, v]) => { sectors[k] = (grossValue > 0 ? (v / grossValue) * 100 : 0).toFixed(1) + '%'; });
 
-    // Winning vs losing
-    const winners = processedPositions.filter(p => p.pnl > 0).sort((a,b) => b.pnlPct - a.pnlPct);
-    const losers  = processedPositions.filter(p => p.pnl < 0).sort((a,b) => a.pnlPct - b.pnlPct);
+    const withPnl = processed.filter(p => p.pnl != null);
+    const winners = withPnl.filter(p => p.pnl > 0).sort((a, b) => b.pnlPct - a.pnlPct);
+    const losers  = withPnl.filter(p => p.pnl < 0).sort((a, b) => a.pnlPct - b.pnlPct);
 
-    // 4. Build AI prompt
     const portfolioSummary = {
-      totalValue:     totalValue.toFixed(2),
-      investedValue:  investedValue.toFixed(2),
-      cash:           cash.toFixed(2),
-      cashRatio:      cashRatio.toFixed(1) + '%',
-      totalPnL:       totalPnL.toFixed(2),
-      totalPnLPct:    totalPnLPct.toFixed(2) + '%',
-      concentration:  maxWeight.toFixed(1) + '%',
-      positions:      processedPositions.length,
-      sectors:        sectorMap,
-      connectedExchanges: exchangeRows.map(e => e.exchange_id),
-      positions_detail: processedPositions.map(p => ({
-        symbol:  p.symbol,
-        side:    p.side,
-        sector:  p.sector,
-        weight:  p.weight.toFixed(1) + '%',
-        pnl:     p.pnl.toFixed(2),
-        pnlPct:  p.pnlPct.toFixed(2) + '%',
-        value:   p.value.toFixed(2),
+      totalValue:    equity.toFixed(2),
+      grossExposure: grossValue.toFixed(2),
+      cash:          cash.toFixed(2),
+      cashRatio:     cashRatio.toFixed(1) + '%',
+      unrealisedPnL: unrealised.toFixed(2),
+      unrealisedPnLPct: totalPnLPct.toFixed(2) + '%',
+      largestPosition: maxWeight.toFixed(1) + '%',
+      positions:     processed.length,
+      sectorExposure: sectors,
+      connectedExchanges: [...new Set(exchangeBalances.map(b => b.exchange))],
+      positions_detail: processed.map(p => ({
+        symbol:   p.symbol,
+        side:     p.side,
+        sector:   p.sector,
+        weight:   p.weight.toFixed(1) + '%',
+        value:    p.val.toFixed(2),
+        pnl:      p.pnl != null ? p.pnl.toFixed(2) : 'unknown (no cost basis)',
+        pnlPct:   p.pnlPct != null ? p.pnlPct.toFixed(2) + '%' : 'unknown',
       })),
-      top_winners: winners.slice(0,3).map(p => `${p.symbol} +${p.pnlPct.toFixed(1)}%`),
-      top_losers:  losers.slice(0,3).map(p => `${p.symbol} ${p.pnlPct.toFixed(1)}%`),
+      top_winners: winners.slice(0, 3).map(p => `${p.symbol} +${p.pnlPct.toFixed(1)}%`),
+      top_losers:  losers.slice(0, 3).map(p => `${p.symbol} ${p.pnlPct.toFixed(1)}%`),
     };
 
-    const systemPrompt = `You are AtlasQuant AI — an expert quantitative portfolio analyst and trading advisor. 
+    // 4. Prompt
+    const systemPrompt = `You are AtlasQuant AI — an expert quantitative portfolio analyst and trading advisor.
 You analyze investment portfolios and provide sharp, actionable recommendations.
 You always respond in valid JSON only. No markdown, no explanation outside JSON.
 
-Your analysis must be honest, specific, and data-driven. Never be vague.
-Flag real risks. Praise real strengths. Give concrete actions with specific symbols and percentages.`;
+Rules:
+- Percentages ("weight", "largestPosition", "cashRatio") are % of total portfolio (gross exposure + cash), exactly as shown in the user's app. Quote them as given; never recompute or invent numbers.
+- sectorExposure is the share of invested (gross) exposure per sector.
+- side "short" means the position was sold short: it profits when price falls and its value is a liability, not an asset.
+- A HEDGE must be an offsetting trade (e.g. a long to offset a losing short, a short to offset a large long). Never recommend adding to an already losing short as a hedge.
+- Only mention symbols from the data, or well-known liquid tickers for BUY ideas. Use "PORTFOLIO" for portfolio-wide advice.
+- Be honest, specific and data-driven. Keep each reason under 25 words.`;
 
     const userPrompt = `Analyze this investment portfolio and return a JSON object with this exact structure:
 
@@ -199,24 +218,25 @@ Flag real risks. Praise real strengths. Give concrete actions with specific symb
 }
 
 Portfolio data:
-${JSON.stringify(portfolioSummary, null, 2)}
+${JSON.stringify(portfolioSummary, null, 2)}`;
 
-Be specific about symbols, percentages, and dollar amounts. Reference actual positions in your analysis.`;
-
-    // 5. Call Groq (avec fallback de model)
-    const raw      = (await callGroq([
+    // 5. Call Groq
+    const raw      = await callGroq([
       { role: 'system', content: systemPrompt },
       { role: 'user',   content: userPrompt },
-    ])).trim();
-    const clean    = raw.replace(/```json|```/g, '').trim();
-    const analysis = JSON.parse(clean);
+    ]);
+    const analysis = parseJsonLoose(raw);
 
-    // 6. Attach portfolio metrics
+    analysis.score           = Math.max(0, Math.min(100, Number(analysis.score) || 0));
+    analysis.strengths       = Array.isArray(analysis.strengths) ? analysis.strengths : [];
+    analysis.risks           = Array.isArray(analysis.risks) ? analysis.risks : [];
+    analysis.recommendations = Array.isArray(analysis.recommendations) ? analysis.recommendations : [];
+
     analysis._meta = {
-      analyzedAt:   new Date().toISOString(),
-      positions:    positions.length,
-      totalValue,
-      totalPnLPct:  totalPnLPct.toFixed(2),
+      analyzedAt:  new Date().toISOString(),
+      positions:   processed.length,
+      totalValue:  equity,
+      totalPnLPct: totalPnLPct.toFixed(2),
     };
 
     res.json({ success: true, analysis });

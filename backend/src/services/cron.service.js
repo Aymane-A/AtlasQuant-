@@ -7,13 +7,20 @@ const { takePortfolioSnapshot }     = require('./portfolioSnapshot.service');
 const paperTradeMonitor             = require('./paperTradeMonitor.service');
 const autoTrader                    = require('./autoTrader.service');
 const { resolveOpenSignals }        = require('./outcomeResolver.service');
+const { reconcileLiveOrders }       = require('./liveOrderReconciler.service');
 const db                            = require('../config/db');
 const logger                        = require('../utils/logger');
 const { healthCheckAllConnections } = require('./exchanges.service');
 
 // Symboles déjà couverts par YF_SYMBOLS (forex/commo/indices, display
 // names) — à exclure de l'univers equity pour éviter les doublons.
-const NON_EQUITY_DISPLAYS = new Set(Object.values(YF_SYMBOLS).map(m => m.display));
+// On exclut aussi les TICKERS Yahoo (ex: '^GSPC', 'GC=F') — pas seulement les
+// display names — sinon un ticker présent dans la watchlist ('^GSPC') est
+// scanné une 2e fois comme "Equity" en plus de son scan "Indices".
+const NON_EQUITY_DISPLAYS = new Set([
+  ...Object.values(YF_SYMBOLS).map(m => m.display),
+  ...Object.keys(YF_SYMBOLS),
+]);
 
 // Exclut les paires crypto — via la vraie liste exportée par
 // signalGenerator.service.js (CRYPTO_SYMBOLS, ex: 'BTCUSDT'), pas une
@@ -61,7 +68,7 @@ const initCronJobs = () => {
   autoTrader.start(60_000);
 
   // ── Market scan every 4 hours → Crypto + Forex/Commodity/Indices + Equities → AI signal alerts ───────
-  cron.schedule('0 */4 * * *', async () => {
+  const runMarketScan = async () => {
     logger.info('[cron] Starting scheduled market scan...');
     try {
       const equitySymbols = await getTrackedEquitySymbols();
@@ -107,7 +114,26 @@ const initCronJobs = () => {
     } catch (err) {
       logger.error(`[cron] Scan error: ${err.message}`);
     }
-  });
+  };
+
+  cron.schedule('0 */4 * * *', runMarketScan);
+
+  // ── Rattrapage au démarrage ────────────────────────────
+  // node-cron ne rejoue PAS les exécutions ratées (PC éteint/en veille,
+  // backend arrêté). Si le dernier signal date de plus de 4h30, on lance
+  // un scan 60s après le démarrage au lieu d'attendre le prochain créneau.
+  setTimeout(async () => {
+    try {
+      const { rows } = await db.query(`SELECT MAX(created_at) AS last FROM signals`);
+      const last = rows[0]?.last ? new Date(rows[0].last).getTime() : 0;
+      if (Date.now() - last > 4.5 * 3600_000) {
+        logger.info('[cron] Dernier scan > 4h30 — rattrapage au démarrage...');
+        await runMarketScan();
+      }
+    } catch (err) {
+      logger.error(`[cron] Rattrapage error: ${err.message}`);
+    }
+  }, 60_000);
 
   // ── Résolution réelle des signaux BUY/SELL (TP / SL / EXPIRED) ─────────
   // Alimente signals.outcome / pnl_pct, utilisés par la page Analytics.
@@ -128,6 +154,20 @@ const initCronJobs = () => {
       .then(r => logger.info(`[cron] Outcome backfill: ${r.resolved || 0}/${r.open || 0} résolus`))
       .catch(err => logger.error(`[cron] Outcome backfill error: ${err.message}`));
   }, 30_000);
+
+  // ── Réconciliation des ordres LIVE (lecture seule) ─────
+  // Récupère auprès de l'exchange la quantité exécutée / prix moyen / frais,
+  // pour que "Mon P&L" puisse calculer un P&L live réel. Aucun ordre créé.
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      const r = await reconcileLiveOrders();
+      if (r.updated || r.errors) {
+        logger.info(`[cron] Live reconcile: ${r.updated} mis à jour, ${r.errors} erreur(s) sur ${r.checked}`);
+      }
+    } catch (err) {
+      logger.error(`[cron] Live reconcile error: ${err.message}`);
+    }
+  });
 
   // ── Alert price checker every minute ───────────────────
   cron.schedule('* * * * *', async () => {

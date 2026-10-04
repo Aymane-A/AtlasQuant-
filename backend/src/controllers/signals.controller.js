@@ -173,18 +173,32 @@ async function getAlphaEngineData(req, res) {
     }
 }
 
-// ── analytics helpers ─────────────────────────────────────
+// ═══════════════════════════════════════════════════════════
+// ANALYTICS
+// ═══════════════════════════════════════════════════════════
 const PERIOD_DAYS = { '1M': 30, '3M': 90, '6M': 180, '1Y': 365 };
-const WEEK_MS     = 7 * 86400000;
 const DOW_LABELS  = ['Dim','Lun','Mar','Mer','Jeu','Ven','Sam'];
 const DOW_ORDER   = ['Lun','Mar','Mer','Jeu','Ven','Sam','Dim'];
+
+// En dessous de ce nombre de trades clos, les stats sont indicatives seulement.
+const MIN_SAMPLE = 30;
+const JOURNAL_LIMIT = 50;
+
 const COLORS = {
     Crypto:    'var(--cyan)',
     Forex:     'var(--purple-bright)',
     Commodity: 'var(--amber)',
     Indices:   'var(--green)',
-    Equity:    'var(--red)',
+    Equity:    'var(--blue, #60a5fa)',
 };
+
+// Tranches de confidence IA. min inclus, max exclus.
+const CONF_BUCKETS = [
+    { label: '50-59', min: 0,  max: 60  },
+    { label: '60-69', min: 60, max: 70  },
+    { label: '70-79', min: 70, max: 80  },
+    { label: '80+',   min: 80, max: 101 },
+];
 
 // Un même indice peut avoir été stocké sous 2 noms (GSPC / SPX500)
 const SYMBOL_ALIASES = {
@@ -208,22 +222,32 @@ function classifyAsset(symbol, fallbackClass) {
     return 'Crypto';
 }
 
-// Tout en UTC: journal, heatmap DoW, labels — plus de décalage de timezone
+// Tout en UTC: journal, heatmap DoW, labels
 const dayLabel   = d => new Date(d).toLocaleDateString('fr-FR', { timeZone: 'UTC', day: '2-digit', month: 'short' });
 const monthLabel = d => new Date(d).toLocaleString('fr-FR',      { timeZone: 'UTC', month: 'short', year: 'numeric' });
 const getDow     = d => DOW_LABELS[new Date(d).getUTCDay()];
 
 const avg   = a => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
 const r2    = n => Math.round(n * 100) / 100;
-const clamp = (n, lo = 0, hi = 100) => Math.max(lo, Math.min(hi, n));
+const sgn   = (n, d = 2) => `${n >= 0 ? '+' : ''}${n.toFixed(d)}%`;
+
+function fmtDuration(ms) {
+    const min = ms / 60000;
+    if (min < 60) return `${Math.max(1, Math.round(min))}min`;
+    const h = min / 60;
+    if (h < 48) return `${h < 10 ? h.toFixed(1) : Math.round(h)}h`;
+    return `${(h / 24).toFixed(1)}j`;
+}
+
+function fmtPrice(n) {
+    if (!Number.isFinite(n) || n <= 0) return '—';
+    if (n >= 1000) return n.toFixed(1);
+    if (n >= 100)  return n.toFixed(2);
+    if (n >= 1)    return n.toFixed(3);
+    return n.toFixed(5);
+}
 
 const isResolved = t => t.pnl_pct != null && ['TP', 'SL', 'EXPIRED'].includes(t.outcome);
-
-function realizedRR(list) {
-    const wins   = list.filter(t => t.pnl_pct > 0).map(t => t.pnl_pct);
-    const losses = list.filter(t => t.pnl_pct < 0).map(t => Math.abs(t.pnl_pct));
-    return wins.length && losses.length ? avg(wins) / avg(losses) : 0;
-}
 
 // Un scan toutes les 4h ré-insère le même BUY tant que la position serait
 // encore ouverte. On ne compte qu'UN trade par (symbole, interval, direction)
@@ -241,63 +265,68 @@ function dedupeTrades(rows) {
     return kept;
 }
 
-function pearsonCorrelation(points) {
-    const n = points.length;
-    if (n < 2) return 0;
-    const xs = points.map(p => p.confidence);
-    const ys = points.map(p => p.pnl);
-    const mx = avg(xs), my = avg(ys);
-    let num = 0, dx2 = 0, dy2 = 0;
-    for (let i = 0; i < n; i++) {
-        const dx = xs[i] - mx, dy = ys[i] - my;
-        num += dx * dy; dx2 += dx * dx; dy2 += dy * dy;
-    }
-    const den = Math.sqrt(dx2 * dy2);
-    return den > 0 ? num / den : 0;
+// Stats de base sur une liste de trades clos
+function summarize(list) {
+    const wins   = list.filter(t => t.pnl_pct > 0);
+    const losses = list.filter(t => t.pnl_pct < 0);
+    const grossWin  = wins.reduce((a, t) => a + t.pnl_pct, 0);
+    const grossLoss = Math.abs(losses.reduce((a, t) => a + t.pnl_pct, 0));
+    return {
+        n: list.length,
+        wins: wins.length,
+        winRate: list.length ? (wins.length / list.length) * 100 : null,
+        avgWin:  wins.length ? grossWin / wins.length : 0,
+        avgLoss: losses.length ? grossLoss / losses.length : 0,
+        profitFactor: grossLoss > 0 ? grossWin / grossLoss : (grossWin > 0 ? Infinity : null),
+        expectancy: list.length ? avg(list.map(t => t.pnl_pct)) : null,
+    };
 }
+
+const realizedRR = s => (s.avgWin > 0 && s.avgLoss > 0 ? s.avgWin / s.avgLoss : 0);
 
 const emptyAnalytics = filterClass => ({
     success: true, kpis: [], equity: [], monthly: [], trades: [],
-    attribution: [], byDow: [], rolling: [], fingerprint: [],
+    attribution: [], byDow: [], rolling: [], metrics: [], confidenceBuckets: [],
     distribution: { buy: 0, sell: 0, hold: 0, total: 0 },
-    confidenceOutcome: [], confidenceCorrelation: 0,
+    sample: { closed: 0, open: 0, min: MIN_SAMPLE, low: true },
     selectedClass: filterClass || null,
 });
 
 // ── getAnalyticsData ──────────────────────────────────────
-// Perf: les HOLD (~90% des lignes) ne sont JAMAIS chargés en JS — on les
-// compte via un GROUP BY SQL. Seuls les BUY/SELL sont lus ligne par ligne.
-// P&L: vient de signals.pnl_pct (rempli par outcomeResolver.service.js),
-// plus aucune formule basée sur la confidence.
+// - Les signaux 'LEGACY' (anciens signaux calculés avec ATR 1h / prix périmés)
+//   sont exclus de TOUT.
+// - Les HOLD ne sont jamais chargés ligne par ligne: GROUP BY SQL.
+// - P&L: signals.pnl_pct (rempli par outcomeResolver.service.js).
 async function getAnalyticsData(req, res) {
     try {
         const { period, class: filterClass } = req.query;
         const days   = PERIOD_DAYS[period];
-        const where  = days ? `WHERE created_at >= NOW() - make_interval(days => $1::int)` : '';
         const params = days ? [days] : [];
+
+        const baseConds = [`COALESCE(outcome, '') <> 'LEGACY'`];
+        if (days) baseConds.push(`created_at >= NOW() - make_interval(days => $1::int)`);
+
+        const whereAgg    = `WHERE ${baseConds.join(' AND ')}`;
+        const whereTrades = `WHERE ${[...baseConds, `signal IN ('BUY','SELL')`, `COALESCE(outcome, '') <> 'INVALID'`].join(' AND ')}`;
 
         const [aggRes, tradeRes] = await Promise.all([
             db.query(`
-                SELECT symbol, asset_class, signal,
-                       COUNT(*)::int AS n,
-                       COALESCE(SUM(confidence), 0)::float AS conf_sum
-                FROM signals ${where}
+                SELECT symbol, asset_class, signal, COUNT(*)::int AS n
+                FROM signals ${whereAgg}
                 GROUP BY symbol, asset_class, signal
             `, params),
             db.query(`
                 SELECT id, symbol, interval, signal, confidence, entry, stop_loss, take_profit,
                        created_at, asset_class, outcome, closed_at, exit_price, pnl_pct
-                FROM signals
-                ${where ? where + ' AND' : 'WHERE'} signal IN ('BUY','SELL')
-                  AND COALESCE(outcome, '') NOT IN ('INVALID', 'LEGACY')
+                FROM signals ${whereTrades}
                 ORDER BY created_at ASC
             `, params),
         ]);
 
-        // ── Comptes globaux (tous signaux, HOLD inclus) ──
+        // ── Comptes globaux (tous signaux hors LEGACY, HOLD inclus) ──
         const groups = aggRes.rows.map(g => {
             const symbol = normSymbol(g.symbol);
-            return { symbol, cls: classifyAsset(symbol, g.asset_class), signal: g.signal, n: g.n, confSum: g.conf_sum };
+            return { symbol, cls: classifyAsset(symbol, g.asset_class), signal: g.signal, n: g.n };
         });
         if (!groups.length) return res.json(emptyAnalytics(filterClass));
 
@@ -309,6 +338,8 @@ async function getAnalyticsData(req, res) {
                 symbol,
                 cls:        classifyAsset(symbol, r.asset_class),
                 confidence: r.confidence || 0,
+                entry:      parseFloat(r.entry),
+                exit_price: r.exit_price != null ? parseFloat(r.exit_price) : null,
                 pnl_pct:    r.pnl_pct != null ? parseFloat(r.pnl_pct) : null,
                 created_at: new Date(r.created_at),
                 closed_at:  r.closed_at ? new Date(r.closed_at) : null,
@@ -324,38 +355,45 @@ async function getAnalyticsData(req, res) {
         const buys  = fg.filter(g => g.signal === 'BUY').reduce((a, g) => a + g.n, 0);
         const sells = fg.filter(g => g.signal === 'SELL').reduce((a, g) => a + g.n, 0);
         const holds = total - buys - sells;
-        const avgConf = Math.round(fg.reduce((a, g) => a + g.confSum, 0) / total);
         const uniqueSymbols = new Set(fg.map(g => g.symbol)).size;
+        const classesPresent = [...new Set(fg.map(g => g.cls))];
 
         // ── Stats sur trades CLOS uniquement ──
         const resolved        = trades.filter(isResolved);
         const resolvedByClose = resolved.slice().sort((a, b) => a.closed_at - b.closed_at);
         const openCount       = trades.length - resolved.length;
-        const wins            = resolved.filter(t => t.pnl_pct > 0).length;
-        const winRate         = resolved.length ? (wins / resolved.length) * 100 : 0;
-        const rrReal          = realizedRR(resolved);
+        const S               = summarize(resolved);
+        const rrReal          = realizedRR(S);
+        const low             = resolved.length < MIN_SAMPLE;
+
+        // Equity (somme des %) + max drawdown
+        let cum = 0, peak = 0, maxDD = 0;
+        const equity = resolvedByClose.map(t => {
+            cum += t.pnl_pct;
+            if (cum > peak) peak = cum;
+            maxDD = Math.max(maxDD, peak - cum);
+            return { day: dayLabel(t.closed_at), portfolio: r2(100 + cum), pnl: r2(t.pnl_pct) };
+        });
+
+        const pfValue = S.profitFactor == null ? '—' : S.profitFactor === Infinity ? '∞' : S.profitFactor.toFixed(2);
+        const pfColor = S.profitFactor == null ? 'var(--cyan)' : S.profitFactor >= 1 ? 'var(--green)' : 'var(--red)';
+        const expColor = S.expectancy == null ? 'var(--cyan)' : S.expectancy >= 0 ? 'var(--green)' : 'var(--red)';
 
         const kpis = [
-            { label: 'Total Signals',  v: total.toString(),
+            { label: 'Signaux', v: total.toString(),
               sub: `${buys} BUY · ${sells} SELL · ${holds} HOLD`, color: 'var(--cyan)' },
-            { label: 'Win Rate',       v: resolved.length ? winRate.toFixed(1) + '%' : '—',
-              sub: `${wins}/${resolved.length} clos · ${openCount} ouverts`, color: 'var(--green)' },
-            { label: 'Avg Confidence', v: avgConf + '%',
-              sub: 'Moyenne IA', color: 'var(--amber)' },
-            { label: 'Avg R:R',        v: rrReal > 0 ? `1:${rrReal.toFixed(2)}` : '—',
-              sub: 'R:R réalisé (TP/SL)', color: 'var(--cyan)' },
-            { label: 'Actifs',         v: uniqueSymbols.toString(),
-              sub: 'Crypto · Forex · Commo · Indices', color: 'var(--purple-bright)' },
+            { label: 'Win Rate', v: resolved.length ? S.winRate.toFixed(1) + '%' : '—',
+              sub: `${S.wins}/${resolved.length} clos · ${openCount} ouverts`,
+              color: low ? 'var(--amber)' : 'var(--green)' },
+            { label: 'Profit Factor', v: pfValue,
+              sub: 'gains bruts / pertes brutes', color: pfColor },
+            { label: 'Expectancy', v: S.expectancy == null ? '—' : sgn(S.expectancy),
+              sub: 'gain moyen par trade', color: expColor },
+            { label: 'Max Drawdown', v: resolved.length ? `-${maxDD.toFixed(2)}%` : '—',
+              sub: 'pic → creux (cumul des trades)', color: maxDD > 0 ? 'var(--red)' : 'var(--cyan)' },
         ];
 
         const distribution = { buy: buys, sell: sells, hold: holds, total };
-
-        // ── Equity: somme des P&L par trade, classée par date de CLÔTURE ──
-        let cum = 0;
-        const equity = resolvedByClose.map(t => {
-            cum += t.pnl_pct;
-            return { day: dayLabel(t.closed_at), portfolio: r2(100 + cum), pnl: r2(t.pnl_pct) };
-        });
 
         // ── Rendements mensuels (par date de clôture) ──
         const monthMap = {};
@@ -368,18 +406,18 @@ async function getAnalyticsData(req, res) {
             month, ret: r2(v.sum), count: v.count, winRate: Math.round((v.wins / v.count) * 100),
         }));
 
-        // ── Journal: 10 derniers trades BUY/SELL (les HOLD n'en sont pas) ──
-        const journal = trades.slice().reverse().slice(0, 10).map(t => {
+        // ── Journal: derniers trades BUY/SELL (la page affiche 10 par page) ──
+        const journal = trades.slice().reverse().slice(0, JOURNAL_LIMIT).map(t => {
             const done = isResolved(t);
-            const entry = parseFloat(t.entry), sl = parseFloat(t.stop_loss), tp = parseFloat(t.take_profit);
-            const risk = Math.abs(entry - sl), reward = Math.abs(tp - entry);
             return {
                 date:        t.created_at.toISOString().slice(0, 10),
                 sym:         t.symbol,
                 asset_class: t.cls,
                 side:        t.signal === 'BUY' ? 'Long' : 'Short',
+                entry:       fmtPrice(t.entry),
+                exit:        done ? fmtPrice(t.exit_price) : '—',
                 pnl:         done ? `${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%` : 'OPEN',
-                rr:          risk > 0 ? `1:${(reward / risk).toFixed(1)}` : '—',
+                duration:    done && t.closed_at ? fmtDuration(t.closed_at - t.created_at) : '—',
                 outcome:     done ? t.outcome : 'OPEN',
             };
         });
@@ -387,22 +425,27 @@ async function getAnalyticsData(req, res) {
         // ── Attribution: toujours sur TOUTES les classes (menu de navigation) ──
         const classAgg = {};
         groups.forEach(g => {
-            const c = classAgg[g.cls] || (classAgg[g.cls] = { total: 0, confSum: 0 });
-            c.total += g.n; c.confSum += g.confSum;
+            const c = classAgg[g.cls] || (classAgg[g.cls] = { total: 0, confSum: 0, confN: 0 });
+            c.total += g.n;
+        });
+        allTrades.forEach(t => {
+            const c = classAgg[t.cls] || (classAgg[t.cls] = { total: 0, confSum: 0, confN: 0 });
+            c.confSum += t.confidence; c.confN++;
         });
         const allTotal    = groups.reduce((a, g) => a + g.n, 0);
         const allResolved = allTrades.filter(isResolved);
         const attribution = Object.entries(classAgg).map(([name, v]) => {
             const rs = allResolved.filter(t => t.cls === name);
-            const w  = rs.filter(t => t.pnl_pct > 0).length;
+            const s  = summarize(rs);
             return {
                 name,
                 total:   v.total,
                 pct:     parseFloat(((v.total / allTotal) * 100).toFixed(1)),
                 closed:  rs.length,
-                winRate: rs.length ? parseFloat(((w / rs.length) * 100).toFixed(1)) : null,
-                avgConf: Math.round(v.confSum / v.total),
-                avgRR:   parseFloat(realizedRR(rs).toFixed(2)),
+                winRate: s.winRate == null ? null : parseFloat(s.winRate.toFixed(1)),
+                // confidence moyenne des TRADES (BUY/SELL), pas des HOLD
+                avgConf: v.confN ? Math.round(v.confSum / v.confN) : null,
+                avgRR:   parseFloat(realizedRR(s).toFixed(2)),
                 color:   COLORS[name] || 'var(--cyan)',
             };
         }).sort((a, b) => b.total - a.total);
@@ -433,56 +476,39 @@ async function getAnalyticsData(req, res) {
         });
         const rolling = Object.values(rollingRaw.reduce((acc, r) => { acc[r.day] = r; return acc; }, {}));
 
-        // ── Fingerprint: 6 métriques toutes calculées sur des trades clos/réels ──
-        // Consistance = stabilité du win rate d'une semaine à l'autre (>=3 trades/semaine)
-        const weekMap = {};
-        resolved.forEach(t => {
-            const k = Math.floor(t.closed_at.getTime() / WEEK_MS);
-            const w = weekMap[k] || (weekMap[k] = { n: 0, win: 0 });
-            w.n++; if (t.pnl_pct > 0) w.win++;
+        // ── Win rate par tranche de confidence (remplace la corrélation de Pearson) ──
+        const confidenceBuckets = CONF_BUCKETS.map(b => {
+            const list = resolved.filter(t => t.confidence >= b.min && t.confidence < b.max);
+            const s = summarize(list);
+            return {
+                range:   b.label,
+                n:       list.length,
+                winRate: s.winRate == null ? null : parseFloat(s.winRate.toFixed(1)),
+                avgPnl:  s.expectancy == null ? null : r2(s.expectancy),
+            };
         });
-        const weekRates = Object.values(weekMap).filter(w => w.n >= 3).map(w => (w.win / w.n) * 100);
-        let consistency = 0;
-        if (weekRates.length >= 2) {
-            const m = avg(weekRates);
-            const sd = Math.sqrt(avg(weekRates.map(x => (x - m) ** 2)));
-            consistency = clamp(100 - (sd / 30) * 100);
-        }
 
-        // Diversification = 1 - HHI, normalisé sur 5 classes
-        const clsCount = {};
-        trades.forEach(t => { clsCount[t.cls] = (clsCount[t.cls] || 0) + 1; });
-        const hhi = trades.length ? Object.values(clsCount).reduce((a, n) => a + (n / trades.length) ** 2, 0) : 1;
-        const diversification = trades.length ? clamp(((1 - hhi) / (1 - 1 / 5)) * 100) : 0;
-
-        // Activité = trades (dédupliqués) par jour
-        const span = trades.length > 1
-            ? Math.max(1, (trades[trades.length - 1].created_at - trades[0].created_at) / 86400000) : 1;
-        const tpd = trades.length / span;
-        const activity = tpd < 1 ? tpd * 100 : tpd <= 6 ? 100 : Math.max(30, 100 - (tpd - 6) * 10);
-
-        const fingerprint = [
-            { metric: 'Win Rate',        value: r2(winRate),                         max: 100 },
-            { metric: 'Avg Confidence',  value: r2(avgConf),                         max: 100 },
-            { metric: 'Risk/Reward',     value: r2(clamp((rrReal / 3) * 100)),       max: 100 },
-            { metric: 'Consistance',     value: r2(consistency),                     max: 100 },
-            { metric: 'Diversification', value: r2(diversification),                 max: 100 },
-            { metric: 'Activité',        value: r2(clamp(activity)),                 max: 100 },
+        // ── Métriques de performance ──
+        const durations = resolved.filter(t => t.closed_at).map(t => t.closed_at - t.created_at);
+        const best  = resolved.length ? Math.max(...resolved.map(t => t.pnl_pct)) : null;
+        const worst = resolved.length ? Math.min(...resolved.map(t => t.pnl_pct)) : null;
+        const metrics = [
+            { label: 'Avg Confidence',  value: trades.length ? Math.round(avg(trades.map(t => t.confidence))) + '%' : '—',
+              hint: 'trades BUY/SELL (HOLD exclus)' },
+            { label: 'R:R réalisé',     value: rrReal > 0 ? `1:${rrReal.toFixed(2)}` : '—',
+              hint: 'gain moyen / perte moyenne' },
+            { label: 'Gain moyen',      value: S.avgWin > 0 ? sgn(S.avgWin) : '—',  tone: 'pos', hint: 'trades gagnants' },
+            { label: 'Perte moyenne',   value: S.avgLoss > 0 ? `-${S.avgLoss.toFixed(2)}%` : '—', tone: 'neg', hint: 'trades perdants' },
+            { label: 'Meilleur trade',  value: best  == null ? '—' : sgn(best),  tone: best  > 0 ? 'pos' : undefined },
+            { label: 'Pire trade',      value: worst == null ? '—' : sgn(worst), tone: worst < 0 ? 'neg' : undefined },
+            { label: 'Durée moyenne',   value: durations.length ? fmtDuration(avg(durations)) : '—', hint: 'entrée → clôture' },
+            { label: 'Actifs suivis',   value: String(uniqueSymbols), hint: classesPresent.join(' · ') },
         ];
-
-        // ── Confidence vs Outcome (maintenant vraiment informatif) ──
-        const confidenceOutcome = resolved.map(t => ({
-            confidence: t.confidence,
-            pnl:        r2(t.pnl_pct),
-            signal:     t.signal,
-            symbol:     t.symbol,
-        }));
-        const confidenceCorrelation = parseFloat(pearsonCorrelation(confidenceOutcome).toFixed(2));
 
         res.json({
             success: true, kpis, equity, monthly, trades: journal, attribution, byDow,
-            rolling, fingerprint, distribution,
-            confidenceOutcome, confidenceCorrelation,
+            rolling, metrics, confidenceBuckets, distribution,
+            sample: { closed: resolved.length, open: openCount, min: MIN_SAMPLE, low },
             selectedClass: filterClass || null,
         });
 

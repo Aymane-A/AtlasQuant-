@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
   AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid, Legend,
@@ -21,9 +21,9 @@ const T = {
   surface: 'var(--surface)',
   border:  'var(--border)',
 };
-const PALETTE  = [T.cyan, T.purple, T.amber, T.red, T.sky, T.green, T.orange, T.pink];
-const mono     = { fontFamily: "'JetBrains Mono', 'Fira Code', monospace" };
-const ttStyle  = {
+const PALETTE = [T.cyan, T.purple, T.amber, T.red, T.sky, T.green, T.orange, T.pink];
+const mono    = { fontFamily: "'JetBrains Mono', 'Fira Code', monospace" };
+const ttStyle = {
   contentStyle: { background:'rgba(3,7,18,0.98)', border:'1px solid rgba(0,245,212,0.2)', borderRadius:8, ...mono, fontSize:11, boxShadow:'0 8px 32px rgba(0,0,0,0.6)' },
   labelStyle:   { color: T.slate },
   itemStyle:    { color: T.cyan },
@@ -31,33 +31,27 @@ const ttStyle  = {
 };
 
 const SECTORS = ['Crypto','Stocks','DeFi','NFT','Commodities','Forex','ETF','Other'];
-
-// ✅ Feature: benchmarks disponibles pour la comparaison — doivent matcher ce
-// que getBenchmarkHistory() sait résoudre côté backend (marketData.service.js)
 const BENCHMARKS = [
   { symbol:'BTC', label:'BTC' },
   { symbol:'SPY', label:'S&P 500' },
 ];
 
-// ✅ Feature: même table que Settings.jsx / Dashboard.jsx (CURRENCY_SYMBOLS).
-// ⚠️ Important: cette table ne remplace le "$" QUE pour les valeurs formatées
-// côté frontend (prix live, aperçu du modal, axe du graphique, historique).
-// Les valeurs comme hero.totalValue, p.price, p.pnl, t.pnl arrivent déjà
-// formatées en string depuis le backend (ex. "+$1,204.50") — leur symbole
-// "$" est câblé côté serveur (portfolio.controller.js, non fourni ici) et
-// resterait "$" indépendamment de ce choix tant que ce fichier backend n'est
-// pas adapté pour lire user_settings.currency lui aussi.
-const CURRENCY_SYMBOLS = {
-  USD: '$', EUR: '€', MAD: 'DH', GBP: '£', JPY: '¥',
-  CHF: 'CHF', CAD: 'CA$', AUD: 'A$', CNY: '¥', AED: 'AED',
-};
+// ⚠️ Currency: the backend computes everything in USD and does NOT convert.
+// Swapping the symbol (DH, €...) without converting the numbers would show
+// wrong values, so every amount on this page stays in "$" and we show a small
+// note when the user's Settings currency differs.
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-function fmtPrice(sym, price, currencySymbol = '$') {
-  if (typeof price === 'string') return price;
-  if ((sym === 'BTC' || sym === 'ETH') && price >= 1000)
-    return `${currencySymbol}${price.toLocaleString('en-US', { maximumFractionDigits:2 })}`;
-  return `${currencySymbol}${price.toFixed(2)}`;
+function fmtPrice(price) {
+  if (!(price > 0)) return '$0.00';
+  if (price >= 1000) return `$${price.toLocaleString('en-US', { maximumFractionDigits:2 })}`;
+  if (price >= 0.01) return `$${price.toFixed(2)}`;
+  return `$${price.toFixed(6)}`;
+}
+function fmtSignedUSD(n) {
+  const r = Number(n.toFixed(2));
+  const s = r < 0 ? '-' : r > 0 ? '+' : '';
+  return `${s}$${Math.abs(r).toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 })}`;
 }
 function colorPnl(str) {
   if (!str || str === 'N/A') return T.slate;
@@ -65,11 +59,17 @@ function colorPnl(str) {
 }
 function sign(n) { return n >= 0 ? `+${n.toFixed(2)}%` : `${n.toFixed(2)}%`; }
 function isNeg(str) { return typeof str === 'string' && str.startsWith('-'); }
+function num(str) {
+  if (typeof str === 'number') return str;
+  if (!str || str === 'N/A') return -Infinity;
+  const n = parseFloat(String(str).replace(/[^0-9.\-]/g, ''));
+  return Number.isFinite(n) ? n : -Infinity;
+}
 
 function injectStyles() {
-  if (document.getElementById('aq-pf-v3')) return;
+  if (document.getElementById('aq-pf-v4')) return;
   const s = document.createElement('style');
-  s.id = 'aq-pf-v3';
+  s.id = 'aq-pf-v4';
   s.textContent = `
     @keyframes aq-pulse   { 0%,100%{opacity:.35} 50%{opacity:.7} }
     @keyframes aq-fadein  { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:translateY(0)} }
@@ -85,11 +85,13 @@ function injectStyles() {
     .aq-retry:hover { background: rgba(0,245,212,0.15) !important; }
     .aq-holding { transition: all .2s; }
     .aq-holding:hover { border-color: rgba(255,255,255,0.12) !important; transform:translateY(-2px); }
-    .aq-close-btn { opacity:0; transition: opacity .15s; }
-    .aq-row:hover .aq-close-btn { opacity:1; }
+    .aq-row-btn { opacity:0; transition: opacity .15s; }
+    .aq-row:hover .aq-row-btn { opacity:1; }
     .aq-input:focus { border-color: rgba(0,245,212,0.4) !important; outline:none; }
     .aq-input { transition: border-color .15s; }
     .aq-bench-btn:hover { border-color: rgba(0,245,212,0.5) !important; color: rgba(0,245,212,0.85) !important; }
+    .aq-th-sort { cursor:pointer; user-select:none; }
+    .aq-th-sort:hover { color: var(--text) !important; }
   `;
   document.head.appendChild(s);
 }
@@ -106,25 +108,27 @@ function Counter({ value, prefix='$', decimals=2, style={} }) {
     const from = prev.current, to = value;
     if (from === to) return;
     const dur = 700, start = performance.now();
+    let raf;
     const frame = (now) => {
       const t = Math.min((now - start) / dur, 1);
       const ease = 1 - Math.pow(1 - t, 3);
       setDisplay(from + (to - from) * ease);
-      if (t < 1) requestAnimationFrame(frame);
+      if (t < 1) raf = requestAnimationFrame(frame);
       else prev.current = to;
     };
-    requestAnimationFrame(frame);
+    raf = requestAnimationFrame(frame);
+    return () => cancelAnimationFrame(raf);
   }, [value]);
-  const fmt = typeof display === 'number'
-    ? `${prefix}${display.toLocaleString('en-US', { minimumFractionDigits:decimals, maximumFractionDigits:decimals })}`
-    : display;
+  const neg = display < 0;
+  const fmt = `${neg ? '-' : ''}${prefix}${Math.abs(display).toLocaleString('en-US', { minimumFractionDigits:decimals, maximumFractionDigits:decimals })}`;
   return <span style={style}>{fmt}</span>;
 }
 
 function Bar({ pct, color, h=3 }) {
+  const w = Math.max(0, Math.min(Number.isFinite(pct) ? pct : 0, 100));
   return (
     <div style={{ flex:1, height:h, background:'rgba(255,255,255,0.06)', borderRadius:h, overflow:'hidden' }}>
-      <div style={{ width:`${Math.min(pct,100)}%`, height:'100%', background:color, borderRadius:h, transition:'width .6s cubic-bezier(.4,0,.2,1)', boxShadow:`0 0 6px ${color}60` }} />
+      <div style={{ width:`${w}%`, height:'100%', background:color, borderRadius:h, transition:'width .6s cubic-bezier(.4,0,.2,1)', boxShadow:`0 0 6px ${color}60` }} />
     </div>
   );
 }
@@ -159,22 +163,32 @@ function Divider({ style={} }) {
   return <div style={{ height:1, background:'rgba(255,255,255,0.05)', ...style }} />;
 }
 
+const modalOverlay = { position:'fixed', inset:0, background:'rgba(0,0,0,0.8)', backdropFilter:'blur(14px)', zIndex:500, display:'flex', alignItems:'center', justifyContent:'center', padding:20 };
+const inputStyle = {
+  width:'100%', boxSizing:'border-box',
+  background:'rgba(255,255,255,0.03)', border:'1px solid var(--border)',
+  borderRadius:9, padding:'10px 14px',
+  color:'var(--text)', ...mono, fontSize:12,
+};
+const fieldLabel = { ...mono, fontSize:9, letterSpacing:'.15em', textTransform:'uppercase', color:T.slate, marginBottom:7, display:'block' };
+
+function ErrorBox({ children }) {
+  return (
+    <div style={{ ...mono, fontSize:10, color:T.red, background:'rgba(244,63,94,0.06)', border:'1px solid rgba(244,63,94,0.2)', borderRadius:8, padding:'9px 13px' }}>
+      ✕ {children}
+    </div>
+  );
+}
+
 // ── Add Position Modal ────────────────────────────────────────────────────────
-// ✅ Feature: accepte maintenant un `prefill` optionnel — { symbol, side, mode,
-// existingAmount, avgEntry } — utilisé quand la modale est ouverte depuis une
-// recommandation IA (BUY/TRIM/HEDGE) au lieu du bouton "+ Add Position" standard.
-// En mode 'trim', un bandeau rappelle la position actuelle pour guider la
-// nouvelle quantité à saisir (le endpoint fait un upsert, donc entrer un
-// montant plus bas réduit effectivement la position).
-// ✅ Feature: accepte aussi `currencySymbol` pour afficher le bon symbole
-// dans le label "Avg Entry" et l'aperçu, cohérent avec Settings → Currency.
-function AddPositionModal({ onClose, onAdded, prefill, currencySymbol = '$' }) {
+// Avg entry is OPTIONAL: left empty → the backend uses the live market price.
+function AddPositionModal({ onClose, onAdded, prefill }) {
   const [form, setForm] = useState({
     symbol:       prefill?.symbol || '',
     side:         prefill?.side   || 'long',
     amount:       '',
     averageEntry: '',
-    sector:       'Crypto',
+    sector:       prefill?.sector || 'Crypto',
   });
   const [loading, setLoading] = useState(false);
   const [error,   setError]   = useState('');
@@ -182,18 +196,19 @@ function AddPositionModal({ onClose, onAdded, prefill, currencySymbol = '$' }) {
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
 
   const handleSubmit = async () => {
-    if (!form.symbol || !form.amount || !form.averageEntry) {
-      setError('Symbol, amount and average entry are required'); return;
+    if (!form.symbol || !(parseFloat(form.amount) > 0)) {
+      setError('Symbol and a positive amount are required'); return;
     }
     setLoading(true); setError('');
     try {
-      await api.post('/portfolio/position', {
-        symbol:       form.symbol.toUpperCase().trim(),
-        side:         form.side,
-        amount:       parseFloat(form.amount),
-        averageEntry: parseFloat(form.averageEntry),
-        sector:       form.sector,
-      });
+      const body = {
+        symbol: form.symbol.toUpperCase().trim(),
+        side:   form.side,
+        amount: parseFloat(form.amount),
+        sector: form.sector,
+      };
+      if (form.averageEntry !== '') body.averageEntry = parseFloat(form.averageEntry);
+      await api.post('/portfolio/position', body);
       onAdded();
       onClose();
     } catch (err) {
@@ -201,49 +216,28 @@ function AddPositionModal({ onClose, onAdded, prefill, currencySymbol = '$' }) {
     } finally { setLoading(false); }
   };
 
-  const inputStyle = {
-    width:'100%', boxSizing:'border-box',
-    background:'rgba(255,255,255,0.03)', border:'1px solid var(--border)',
-    borderRadius:9, padding:'10px 14px',
-    color:'var(--text)', ...mono, fontSize:12,
-  };
-  const labelStyle = { ...mono, fontSize:9, letterSpacing:'.15em', textTransform:'uppercase', color:T.slate, marginBottom:7, display:'block' };
-
-  const isTrim  = prefill?.mode === 'trim';
-  const modalTitle = isTrim ? `Adjust ${prefill.symbol} Position` : prefill?.symbol ? `Open ${prefill.symbol} Position` : 'Add Position';
+  const title = prefill?.symbol ? `Open ${prefill.symbol} Position` : 'Add Position';
+  const entryNum = parseFloat(form.averageEntry);
+  const amtNum   = parseFloat(form.amount);
 
   return (
-    <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.8)', backdropFilter:'blur(14px)', zIndex:500, display:'flex', alignItems:'center', justifyContent:'center', padding:20 }}
-      onClick={e => e.target === e.currentTarget && onClose()}>
-      <div style={{ background:'#080f1e', border:'1px solid rgba(0,245,212,0.2)', borderRadius:20, padding:32, width:460, boxShadow:'0 0 60px rgba(0,245,212,0.08), 0 32px 64px rgba(0,0,0,0.7)' }}>
-
-        {/* Header */}
-        <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:isTrim ? 12 : 24 }}>
+    <div style={modalOverlay} onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={{ background:'#080f1e', border:'1px solid rgba(0,245,212,0.2)', borderRadius:20, padding:32, width:460, maxWidth:'100%', boxShadow:'0 0 60px rgba(0,245,212,0.08), 0 32px 64px rgba(0,0,0,0.7)' }}>
+        <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:24 }}>
           <div style={{ width:8, height:8, borderRadius:'50%', background:T.cyan }} />
-          <span style={{ fontSize:15, fontWeight:700, color:'var(--text)' }}>{modalTitle}</span>
+          <span style={{ fontSize:15, fontWeight:700, color:'var(--text)' }}>{title}</span>
         </div>
 
-        {/* Trim context banner */}
-        {isTrim && (
-          <div style={{ background:'rgba(245,158,11,0.06)', border:'1px solid rgba(245,158,11,0.2)', borderRadius:9, padding:'10px 14px', marginBottom:20 }}>
-            <div style={{ ...mono, fontSize:10, color:T.amber, lineHeight:1.6 }}>
-              Current: {prefill.existingAmount} {prefill.symbol} @ {prefill.avgEntry}. Enter a new (lower) amount below to trim the position, or use <strong>Close</strong> on the position row to exit fully.
-            </div>
-          </div>
-        )}
-
         <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
-
-          {/* Symbol + Side row */}
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
             <div>
-              <label style={labelStyle}>Symbol</label>
+              <label style={fieldLabel}>Symbol</label>
               <input className="aq-input" value={form.symbol} onChange={e => set('symbol', e.target.value.toUpperCase())}
                 placeholder="BTC, ETH, AAPL..." style={inputStyle} autoFocus={!prefill?.symbol}
                 readOnly={!!prefill?.symbol} />
             </div>
             <div>
-              <label style={labelStyle}>Side</label>
+              <label style={fieldLabel}>Side</label>
               <div style={{ display:'flex', gap:6 }}>
                 {['long','short'].map(s => (
                   <button key={s} onClick={() => set('side', s)} style={{
@@ -261,48 +255,42 @@ function AddPositionModal({ onClose, onAdded, prefill, currencySymbol = '$' }) {
             </div>
           </div>
 
-          {/* Amount + Avg Entry row */}
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
             <div>
-              <label style={labelStyle}>{isTrim ? 'New Amount' : 'Amount'}</label>
-              <input className="aq-input" type="number" value={form.amount} onChange={e => set('amount', e.target.value)}
-                placeholder={isTrim ? `< ${prefill.existingAmount}` : '0.5'} style={inputStyle} autoFocus={!!prefill?.symbol} />
+              <label style={fieldLabel}>Amount</label>
+              <input className="aq-input" type="number" min="0" value={form.amount} onChange={e => set('amount', e.target.value)}
+                placeholder="0.5" style={inputStyle} autoFocus={!!prefill?.symbol} />
             </div>
             <div>
-              <label style={labelStyle}>Avg Entry ({currencySymbol})</label>
-              <input className="aq-input" type="number" value={form.averageEntry} onChange={e => set('averageEntry', e.target.value)}
-                placeholder="45000" style={inputStyle} />
+              <label style={fieldLabel}>Avg Entry ($) · optional</label>
+              <input className="aq-input" type="number" min="0" value={form.averageEntry} onChange={e => set('averageEntry', e.target.value)}
+                placeholder="Market price" style={inputStyle} />
             </div>
           </div>
 
-          {/* Sector */}
           <div>
-            <label style={labelStyle}>Sector</label>
+            <label style={fieldLabel}>Sector</label>
             <select value={form.sector} onChange={e => set('sector', e.target.value)}
               style={{ ...inputStyle, cursor:'pointer', appearance:'none' }}>
               {SECTORS.map(s => <option key={s} value={s}>{s}</option>)}
             </select>
           </div>
 
-          {/* Preview */}
-          {form.symbol && form.amount && form.averageEntry && (
+          {form.symbol && amtNum > 0 && (
             <div style={{ background:'rgba(0,245,212,0.04)', border:'1px solid rgba(0,245,212,0.1)', borderRadius:9, padding:'12px 14px' }}>
               <div style={{ ...mono, fontSize:10, color:T.slate, marginBottom:6 }}>Preview</div>
               <div style={{ ...mono, fontSize:12, color:'var(--text)' }}>
-                {form.side === 'long' ? '↑' : '↓'} {form.amount} {form.symbol} @ {currencySymbol}{parseFloat(form.averageEntry||0).toLocaleString()}
-                {' '}= <span style={{ color:T.cyan }}>{currencySymbol}{(parseFloat(form.amount||0) * parseFloat(form.averageEntry||0)).toLocaleString('en-US', { maximumFractionDigits:2 })}</span>
+                {form.side === 'long' ? '↑' : '↓'} {form.amount} {form.symbol}{' '}
+                {entryNum > 0
+                  ? <>@ ${entryNum.toLocaleString()} = <span style={{ color:T.cyan }}>${(amtNum * entryNum).toLocaleString('en-US', { maximumFractionDigits:2 })}</span></>
+                  : <span style={{ color:T.slate }}>@ market price</span>}
               </div>
             </div>
           )}
 
-          {error && (
-            <div style={{ ...mono, fontSize:10, color:T.red, background:'rgba(244,63,94,0.06)', border:'1px solid rgba(244,63,94,0.2)', borderRadius:8, padding:'9px 13px' }}>
-              ✕ {error}
-            </div>
-          )}
+          {error && <ErrorBox>{error}</ErrorBox>}
         </div>
 
-        {/* Actions */}
         <div style={{ display:'flex', gap:10, marginTop:24 }}>
           <button onClick={handleSubmit} disabled={loading} style={{
             flex:1, padding:12, borderRadius:9,
@@ -310,14 +298,112 @@ function AddPositionModal({ onClose, onAdded, prefill, currencySymbol = '$' }) {
             color:T.cyan, fontFamily:'Syne,sans-serif', fontSize:13, fontWeight:700,
             cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.7 : 1,
           }}>
-            {loading ? '⟳ Saving...' : isTrim ? '↓ Adjust Position' : '+ Add Position'}
+            {loading ? '⟳ Saving...' : '+ Add Position'}
           </button>
           <button onClick={onClose} style={{
             padding:'12px 20px', borderRadius:9, border:'1px solid var(--border)',
             background:'transparent', color:T.slate, fontFamily:'Syne,sans-serif', fontSize:13, cursor:'pointer',
+          }}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Reduce (partial close) Modal ──────────────────────────────────────────────
+// Real partial sell: calls POST /portfolio/position/:sym/:side/reduce.
+// Books the realized P&L for the sold quantity and moves cash.
+function ReducePositionModal({ position, onClose, onDone }) {
+  const [amount,    setAmount]    = useState('');
+  const [exitPrice, setExitPrice] = useState('');
+  const [loading,   setLoading]   = useState(false);
+  const [error,     setError]     = useState('');
+
+  const held = Number(position.amount) || 0;
+  const qty  = parseFloat(amount);
+  const livePrice = position.priceRaw > 0 ? position.priceRaw : 0;
+  const px   = parseFloat(exitPrice) > 0 ? parseFloat(exitPrice) : livePrice;
+  const sgn  = position.side === 'short' ? -1 : 1;
+  const estPnl = position.avgEntryRaw > 0 && qty > 0 && px > 0 ? sgn * (px - position.avgEntryRaw) * qty : null;
+
+  const pct = (p) => setAmount(String(Number((held * p).toPrecision(8))));
+
+  const submit = async () => {
+    if (!(qty > 0)) { setError('Enter a quantity to sell'); return; }
+    if (qty > held) { setError(`You only hold ${held}`); return; }
+    setLoading(true); setError('');
+    try {
+      const body = { amount: qty };
+      if (parseFloat(exitPrice) > 0) body.exitPrice = parseFloat(exitPrice);
+      await api.post(`/portfolio/position/${position.sym}/${position.side}/reduce`, body);
+      onDone();
+      onClose();
+    } catch (err) {
+      setError(err?.response?.data?.error || 'Failed to reduce position');
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={modalOverlay} onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={{ background:'#080f1e', border:'1px solid rgba(245,158,11,0.25)', borderRadius:20, padding:32, width:440, maxWidth:'100%', boxShadow:'0 32px 64px rgba(0,0,0,0.7)' }}>
+        <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:14 }}>
+          <div style={{ width:8, height:8, borderRadius:'50%', background:T.amber }} />
+          <span style={{ fontSize:15, fontWeight:700, color:'var(--text)' }}>Reduce {position.sym} {position.side === 'long' ? 'Long' : 'Short'}</span>
+        </div>
+
+        <div style={{ background:'rgba(245,158,11,0.06)', border:'1px solid rgba(245,158,11,0.2)', borderRadius:9, padding:'10px 14px', marginBottom:18 }}>
+          <div style={{ ...mono, fontSize:10, color:T.amber, lineHeight:1.6 }}>
+            Holding {held} {position.sym} @ {position.avgEntry} · market {position.price}
+          </div>
+        </div>
+
+        {!position.inDb && (
+          <div style={{ marginBottom:16 }}><ErrorBox>This balance comes from your exchange (read-only). Sell it on the exchange itself.</ErrorBox></div>
+        )}
+
+        <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
+          <div>
+            <label style={fieldLabel}>Quantity to {position.side === 'short' ? 'cover' : 'sell'}</label>
+            <input className="aq-input" type="number" min="0" value={amount} onChange={e => setAmount(e.target.value)}
+              placeholder={`max ${held}`} style={inputStyle} autoFocus />
+            <div style={{ display:'flex', gap:6, marginTop:8 }}>
+              {[0.25, 0.5, 0.75, 1].map(p => (
+                <button key={p} onClick={() => pct(p)} className="aq-filter" style={{
+                  ...mono, fontSize:9, padding:'3px 10px', borderRadius:20, cursor:'pointer',
+                  border:'1px solid rgba(255,255,255,0.08)', background:'transparent', color:T.slate,
+                }}>{p === 1 ? 'MAX' : `${p * 100}%`}</button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label style={fieldLabel}>Exit price ($) · optional</label>
+            <input className="aq-input" type="number" min="0" value={exitPrice} onChange={e => setExitPrice(e.target.value)}
+              placeholder="Market price" style={inputStyle} />
+          </div>
+
+          {estPnl != null && (
+            <div style={{ ...mono, fontSize:11, color:'var(--text)' }}>
+              Realised P&L ≈ <span style={{ color: estPnl >= 0 ? T.green : T.red, fontWeight:700 }}>{fmtSignedUSD(estPnl)}</span>
+              {' '}· remaining {Number((held - qty).toPrecision(8))}
+            </div>
+          )}
+          {error && <ErrorBox>{error}</ErrorBox>}
+        </div>
+
+        <div style={{ display:'flex', gap:10, marginTop:24 }}>
+          <button onClick={submit} disabled={loading || !position.inDb} style={{
+            flex:1, padding:12, borderRadius:9,
+            border:'1px solid rgba(245,158,11,0.35)', background:'rgba(245,158,11,0.08)',
+            color:T.amber, fontFamily:'Syne,sans-serif', fontSize:13, fontWeight:700,
+            cursor: (loading || !position.inDb) ? 'not-allowed' : 'pointer', opacity: (loading || !position.inDb) ? 0.6 : 1,
           }}>
-            Cancel
+            {loading ? 'Saving...' : '↓ Reduce Position'}
           </button>
+          <button onClick={onClose} style={{
+            padding:'12px 20px', borderRadius:9, border:'1px solid var(--border)',
+            background:'transparent', color:T.slate, fontFamily:'Syne,sans-serif', fontSize:13, cursor:'pointer',
+          }}>Cancel</button>
         </div>
       </div>
     </div>
@@ -341,24 +427,21 @@ function ClosePositionModal({ position, onClose, onClosed }) {
     }
   };
 
-  const pnlColor = position.pnl && !position.pnl.startsWith('-') ? T.green : T.red;
+  const pnlColor = position.pnl && position.pnl !== 'N/A' && !position.pnl.startsWith('-') ? T.green : position.pnl === 'N/A' ? T.slate : T.red;
 
   return (
-    <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.8)', backdropFilter:'blur(14px)', zIndex:500, display:'flex', alignItems:'center', justifyContent:'center' }}
-      onClick={e => e.target === e.currentTarget && onClose()}>
-      <div style={{ background:'#080f1e', border:'1px solid rgba(244,63,94,0.25)', borderRadius:20, padding:32, width:400, boxShadow:'0 32px 64px rgba(0,0,0,0.7)' }}>
-
+    <div style={modalOverlay} onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={{ background:'#080f1e', border:'1px solid rgba(244,63,94,0.25)', borderRadius:20, padding:32, width:400, maxWidth:'100%', boxShadow:'0 32px 64px rgba(0,0,0,0.7)' }}>
         <div style={{ textAlign:'center', marginBottom:24 }}>
           <div style={{ fontSize:28, marginBottom:12 }}>◎</div>
           <div style={{ fontSize:15, fontWeight:700, color:'var(--text)', marginBottom:6 }}>
             Close {position.sym} {position.side === 'long' ? 'Long' : 'Short'}?
           </div>
           <div style={{ ...mono, fontSize:11, color:T.slate, lineHeight:1.6 }}>
-            This will remove the position from your portfolio.
+            The position is closed at market price and the result is booked in History.
           </div>
         </div>
 
-        {/* Position summary */}
         <div style={{ background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:10, padding:'14px 16px', marginBottom:20 }}>
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
             {[
@@ -375,26 +458,24 @@ function ClosePositionModal({ position, onClose, onClosed }) {
           </div>
         </div>
 
-        {error && (
-          <div style={{ ...mono, fontSize:10, color:T.red, background:'rgba(244,63,94,0.06)', border:'1px solid rgba(244,63,94,0.2)', borderRadius:8, padding:'9px 13px', marginBottom:16 }}>
-            ✕ {error}
-          </div>
+        {!position.inDb && (
+          <div style={{ marginBottom:16 }}><ErrorBox>This balance comes from your exchange (read-only). Close it on the exchange itself.</ErrorBox></div>
         )}
+        {error && <div style={{ marginBottom:16 }}><ErrorBox>{error}</ErrorBox></div>}
 
         <div style={{ display:'flex', gap:10 }}>
-          <button onClick={handle} disabled={loading} style={{
+          <button onClick={handle} disabled={loading || !position.inDb} style={{
             flex:1, padding:12, borderRadius:9,
             border:'1px solid rgba(244,63,94,0.35)', background:'rgba(244,63,94,0.08)',
-            color:T.red, fontFamily:'Syne,sans-serif', fontSize:13, fontWeight:700, cursor:'pointer',
+            color:T.red, fontFamily:'Syne,sans-serif', fontSize:13, fontWeight:700,
+            cursor: (loading || !position.inDb) ? 'not-allowed' : 'pointer', opacity: (loading || !position.inDb) ? 0.6 : 1,
           }}>
             {loading ? 'Closing...' : 'Close Position'}
           </button>
           <button onClick={onClose} style={{
             padding:'12px 20px', borderRadius:9, border:'1px solid var(--border)',
             background:'transparent', color:T.slate, fontFamily:'Syne,sans-serif', fontSize:13, cursor:'pointer',
-          }}>
-            Cancel
-          </button>
+          }}>Cancel</button>
         </div>
       </div>
     </div>
@@ -406,13 +487,11 @@ export default function Portfolio() {
   const [sideFilter,  setSideFilter]  = useState('all');
   const [activeTab,   setActiveTab]   = useState('positions');
   const [loading,     setLoading]     = useState(true);
-  const [error,       setError]       = useState(null);
+  const [error,       setError]       = useState(null);   // blocking error (no data yet)
+  const [refreshErr,  setRefreshErr]  = useState(null);   // non-blocking (data already on screen)
   const [lastUpdated, setLastUpdated] = useState(null);
-
-  // ✅ Feature: devise de l'user (Settings → Language & Region), appliquée
-  // à tout ce que ce fichier formate lui-même en $ (voir note sur
-  // CURRENCY_SYMBOLS plus haut pour la limite avec les valeurs backend).
-  const [currencySymbol, setCurrencySymbol] = useState('$');
+  const [sort,        setSort]        = useState({ key:null, dir:'desc' });
+  const [userCurrency, setUserCurrency] = useState('USD');
 
   const [hero,             setHero]            = useState({ totalValue:0, todayPnL:'+$0.00', dayReturn:'+0.00%', totalPnL:'+$0.00', totalReturn:'+0.00%', realizedPnL:'+$0.00', lifetimePnL:'+$0.00', openPositions:0, availableCash:'+$0.00' });
   const [allocations,      setAllocations]     = useState([]);
@@ -422,145 +501,162 @@ export default function Portfolio() {
   const [sectorData,       setSectorData]      = useState([]);
   const [equityCurve,      setEquityCurve]     = useState([]);
 
-  // ✅ Feature: trade history (positions fermées, réalisées)
   const [historyData,    setHistoryData]    = useState([]);
   const [historySummary, setHistorySummary] = useState({ totalRealized:'+$0.00', count:0, winRate:0 });
   const [historyLoaded,  setHistoryLoaded]  = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
 
-  // ✅ Feature: Benchmark Comparison (Portfolio vs BTC/SPY)
   const [benchmarkSymbol, setBenchmarkSymbol] = useState('BTC');
   const [benchmarkCurve,  setBenchmarkCurve]  = useState([]);
   const [alpha,           setAlpha]           = useState(null);
 
-  // Modals
-  const [showAddModal,    setShowAddModal]    = useState(false);
-  const [addPrefill,      setAddPrefill]      = useState(null); // ✅ pre-fill for recommendation-triggered Add/Trim
-  const [closeTarget,     setCloseTarget]     = useState(null); // position to close
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [addPrefill,   setAddPrefill]   = useState(null);
+  const [closeTarget,  setCloseTarget]  = useState(null);
+  const [reduceTarget, setReduceTarget] = useState(null);
+
+  // Refs → the 60s poll always sees the CURRENT benchmark (no stale closure)
+  const benchRef   = useRef('BTC');
+  const hasDataRef = useRef(false);
+  const reqIdRef   = useRef(0);
 
   useEffect(() => {
     injectStyles();
     api.get('/settings')
-      .then(res => {
-        const code = res.data?.settings?.currency || 'USD';
-        setCurrencySymbol(CURRENCY_SYMBOLS[code] || '$');
-      })
+      .then(res => setUserCurrency(res.data?.settings?.currency || 'USD'))
       .catch(() => {});
   }, []);
 
-  const fetchPortfolioData = async (silent = false, benchmark = benchmarkSymbol) => {
-    if (!silent) {} // keep loading state on first load only
+  const fetchPortfolioData = async () => {
+    const myReq = ++reqIdRef.current;
     try {
-      const res = await api.get('/portfolio/data', { params: { benchmark } }); // ✅ benchmark query param now sent
+      const res = await api.get('/portfolio/data', { params: { benchmark: benchRef.current } });
+      if (myReq !== reqIdRef.current) return;            // a newer request superseded this one
       if (res.data.success) {
         const d = res.data;
         setHero(d.hero);
-        setAllocations(d.allocations     || []);
-        setHoldingsData(d.holdings       || []);
+        setAllocations(d.allocations       || []);
+        setHoldingsData(d.holdings         || []);
         setAllPositionsData(d.allPositions || []);
-        setRisks(d.risks                 || []);
-        setSectorData(d.sectors          || []);
-        setEquityCurve(d.equityCurve     || []);
-        setBenchmarkCurve(d.benchmarkCurve || []); // ✅ new
-        setAlpha(d.alpha ?? null);                 // ✅ new
+        setRisks(d.risks                   || []);
+        setSectorData(d.sectors            || []);
+        setEquityCurve(d.equityCurve       || []);
+        setBenchmarkCurve(d.benchmarkCurve || []);
+        setAlpha(d.alpha ?? null);
         setLastUpdated(new Date());
+        hasDataRef.current = true;
         setError(null);
+        setRefreshErr(null);
       }
     } catch (err) {
-      setError(err.response?.data?.error || 'Connection error');
+      if (myReq !== reqIdRef.current) return;
+      const msg = err.response?.data?.error || 'Connection error';
+      if (hasDataRef.current) setRefreshErr(msg);        // keep the page, just warn
+      else setError(msg);
     } finally {
-      setLoading(false);
+      if (myReq === reqIdRef.current) setLoading(false);
     }
   };
 
   useEffect(() => {
     fetchPortfolioData();
-    const iv = setInterval(() => fetchPortfolioData(true), 60000);
+    const iv = setInterval(fetchPortfolioData, 60000);
     return () => clearInterval(iv);
   }, []);
 
-  // ✅ Feature: re-fetch (silencieux) quand l'utilisateur change de benchmark
   const handleBenchmarkChange = (symbol) => {
-    if (symbol === benchmarkSymbol) return;
+    if (symbol === benchRef.current) return;
+    benchRef.current = symbol;
     setBenchmarkSymbol(symbol);
-    fetchPortfolioData(true, symbol);
+    fetchPortfolioData();
   };
 
-  // ✅ Feature: lazy-load l'historique seulement quand l'onglet est ouvert
-  const fetchHistory = async () => {
+  const fetchHistory = async (append = false) => {
     setHistoryLoading(true);
     try {
-      const res = await api.get('/portfolio/history');
+      const offset = append ? historyData.length : 0;
+      const res = await api.get('/portfolio/history', { params: { limit: 50, offset } });
       if (res.data.success) {
-        setHistoryData(res.data.trades || []);
+        const rows = res.data.trades || [];
+        setHistoryData(prev => append ? [...prev, ...rows] : rows);
         setHistorySummary(res.data.summary || { totalRealized:'+$0.00', count:0, winRate:0 });
+        setHistoryHasMore(!!res.data.hasMore);
       }
-    } catch { /* silent — history is secondary, don't block the page */ }
+    } catch { /* secondary data — don't block the page */ }
     finally { setHistoryLoading(false); setHistoryLoaded(true); }
   };
 
   useEffect(() => {
-    if (activeTab === 'history' && !historyLoaded) fetchHistory();
+    if (activeTab === 'history' && !historyLoaded) fetchHistory(false);
   }, [activeTab, historyLoaded]);
 
+  const refreshAll = () => { fetchPortfolioData(); if (historyLoaded) fetchHistory(false); };
+
+  // ── Live overlay: recompute price, 24h AND P&L/Return from the live tick ──
   const liveP = useLivePrices();
-  const applyLive = (h) => {
-    const live = liveP[h.sym];
-    if (!live) return h;
-    return { ...h, price: fmtPrice(h.sym, live.price, currencySymbol), ch: sign(live.change), up: live.up };
+  const applyLive = (p) => {
+    const live = liveP?.[p.sym];
+    if (!live || !(live.price > 0)) return p;
+    const out = { ...p, price: fmtPrice(live.price), priceRaw: live.price, ch: sign(live.change), up: live.up };
+    if (p.avgEntryRaw > 0 && p.amount != null) {
+      const sgn = p.side === 'short' ? -1 : 1;
+      const pnl = sgn * (live.price - p.avgEntryRaw) * p.amount;
+      out.pnl = fmtSignedUSD(pnl);
+      out.ret = sign((pnl / (p.avgEntryRaw * p.amount)) * 100);
+    }
+    return out;
   };
 
   const holdings = holdingsData.map(applyLive);
-  const filtered = (sideFilter === 'all' ? allPositionsData : allPositionsData.filter(p => p.side === sideFilter)).map(applyLive);
-  const pnlUp    = !isNeg(hero.totalPnL);
-  const dayUp    = !isNeg(hero.dayReturn);
-  const hasBenchmark = benchmarkCurve.length >= 2; // ✅ new — false → fallback to plain $ equity curve
 
-  // ✅ Feature: route chaque recommandation IA vers la modale d'action adaptée.
-  // - SELL sur une position existante → ClosePositionModal (sortie complète)
-  // - TRIM sur une position existante → AddPositionModal en mode 'trim'
-  //   (upsert : entrer un montant plus bas réduit la position)
-  // - BUY / HEDGE → AddPositionModal pré-rempli avec le symbole suggéré
-  //   (HEDGE pré-sélectionne le côté "short", cohérent avec l'idée de hedge)
-  // - REBALANCE sur une position existante → traité comme TRIM (ajuster le poids)
-  const handleApplyRecommendation = (rec) => {
-    const existing = allPositionsData.find(p => p.sym === rec.symbol);
+  const filtered = useMemo(() => {
+    const base = (sideFilter === 'all' ? allPositionsData : allPositionsData.filter(p => p.side === sideFilter)).map(applyLive);
+    if (!sort.key) return base;
+    const val = (p) => sort.key === 'sym' ? p.sym : sort.key === 'amount' ? Number(p.amount) : num(p[sort.key]);
+    return [...base].sort((a, b) => {
+      const x = val(a), y = val(b);
+      const c = typeof x === 'string' ? x.localeCompare(y) : x - y;
+      return sort.dir === 'asc' ? c : -c;
+    });
+  }, [allPositionsData, sideFilter, sort, liveP]);
 
-    if (rec.action === 'SELL' && existing) {
-      setCloseTarget(existing);
-      return;
-    }
+  const sectorsSorted = useMemo(() => [...sectorData].sort((a, b) => b.pct - a.pct), [sectorData]);
 
-    if ((rec.action === 'TRIM' || rec.action === 'REBALANCE') && existing) {
-      setAddPrefill({
-        symbol: rec.symbol, side: existing.side, mode: 'trim',
-        existingAmount: existing.amount, avgEntry: existing.avgEntry,
-      });
-      setShowAddModal(true);
-      return;
-    }
+  const pnlUp = !isNeg(hero.totalPnL);
+  const dayUp = !isNeg(hero.dayReturn);
+  const hasBenchmark = benchmarkCurve.length >= 2;
 
-    if (rec.action === 'BUY' || rec.action === 'HEDGE' || (rec.action === 'REBALANCE' && !existing)) {
-      setAddPrefill({ symbol: rec.symbol, side: rec.action === 'HEDGE' ? 'short' : 'long' });
-      setShowAddModal(true);
-      return;
-    }
-    // SELL without a matching position (shouldn't normally happen) — no-op.
-  };
+  const toggleSort = (key) => setSort(s => s.key === key ? { key, dir: s.dir === 'desc' ? 'asc' : 'desc' } : { key, dir:'desc' });
 
+  const openAdd = (prefill = null) => { setAddPrefill(prefill); setShowAddModal(true); };
   const closeAddModal = () => { setShowAddModal(false); setAddPrefill(null); };
 
-  // ── Error ──
+  // AI recommendation → right action
+  //  SELL (existing)        → Close modal
+  //  TRIM / REBALANCE (ex.) → Reduce modal (real partial sell)
+  //  BUY / HEDGE            → Add modal prefilled (HEDGE = short)
+  const handleApplyRecommendation = (rec) => {
+    const existing = allPositionsData.find(p => p.sym === rec.symbol);
+    if (rec.action === 'SELL' && existing)                                  { setCloseTarget(applyLive(existing)); return; }
+    if ((rec.action === 'TRIM' || rec.action === 'REBALANCE') && existing)  { setReduceTarget(applyLive(existing)); return; }
+    if (rec.action === 'BUY' || rec.action === 'HEDGE' || (rec.action === 'REBALANCE' && !existing)) {
+      // HEDGE = offsetting trade: opposite of the side we already hold (never add to a losing short)
+      const hedgeSide = existing ? (existing.side === 'short' ? 'long' : 'short') : 'short';
+      openAdd({ symbol: rec.symbol, side: rec.action === 'HEDGE' ? hedgeSide : 'long' });
+    }
+  };
+
+  // ── Blocking error (only when there is no data at all) ──
   if (!loading && error) return (
     <div style={{ background:T.surface, border:'1px solid rgba(244,63,94,0.2)', borderRadius:16, padding:56, textAlign:'center', animation:'aq-fadein .4s ease' }}>
       <div style={{ fontSize:32, marginBottom:12, opacity:.6 }}>⚠</div>
       <div style={{ ...mono, fontSize:13, color:T.red, marginBottom:6 }}>{error}</div>
       <div style={{ ...mono, fontSize:11, color:T.slate, marginBottom:24 }}>Check backend connection or session</div>
-      <button className="aq-retry" onClick={() => fetchPortfolioData()} style={{ padding:'8px 28px', background:'rgba(0,245,212,0.08)', color:T.cyan, border:`1px solid ${T.cyan}40`, borderRadius:8, ...mono, fontSize:12, cursor:'pointer', transition:'background .2s' }}>Retry</button>
+      <button className="aq-retry" onClick={() => { setError(null); setLoading(true); fetchPortfolioData(); }} style={{ padding:'8px 28px', background:'rgba(0,245,212,0.08)', color:T.cyan, border:`1px solid ${T.cyan}40`, borderRadius:8, ...mono, fontSize:12, cursor:'pointer', transition:'background .2s' }}>Retry</button>
     </div>
   );
 
-  // ── Skeleton ──
   if (loading) return (
     <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
       <div style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:16, padding:28 }}>
@@ -575,24 +671,35 @@ export default function Portfolio() {
     </div>
   );
 
+  const thSort = (label, key, i) => (
+    <th key={i} className={key ? 'aq-th-sort' : undefined} onClick={key ? () => toggleSort(key) : undefined}
+      style={{ ...mono, fontSize:9, letterSpacing:'.18em', textTransform:'uppercase', color: sort.key === key && key ? T.cyan : T.slate, textAlign:'left', paddingBottom:12, paddingRight:i < 8 ? 16 : 0, fontWeight:400, whiteSpace:'nowrap' }}>
+      {label}{key && sort.key === key ? (sort.dir === 'desc' ? ' ↓' : ' ↑') : ''}
+    </th>
+  );
+
+  const COLS = [['Asset','sym'],['Side',null],['Amount','amount'],['Avg Entry',null],['Price',null],['24h','ch'],['P&L','pnl'],['Return','ret'],['',null]];
+
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:14, animation:'aq-fadein .35s ease' }}>
 
       {/* Modals */}
       {showAddModal && (
-        <AddPositionModal
-          onClose={closeAddModal}
-          onAdded={() => fetchPortfolioData(true)}
-          prefill={addPrefill}
-          currencySymbol={currencySymbol}
-        />
+        <AddPositionModal onClose={closeAddModal} onAdded={refreshAll} prefill={addPrefill} />
+      )}
+      {reduceTarget && (
+        <ReducePositionModal position={reduceTarget} onClose={() => setReduceTarget(null)} onDone={refreshAll} />
       )}
       {closeTarget && (
-        <ClosePositionModal
-          position={closeTarget}
-          onClose={() => setCloseTarget(null)}
-          onClosed={() => { fetchPortfolioData(true); if (historyLoaded) fetchHistory(); }}
-        />
+        <ClosePositionModal position={closeTarget} onClose={() => setCloseTarget(null)} onClosed={refreshAll} />
+      )}
+
+      {/* Non-blocking refresh warning */}
+      {refreshErr && (
+        <div style={{ ...mono, fontSize:10, color:T.amber, background:'rgba(245,158,11,0.06)', border:'1px solid rgba(245,158,11,0.2)', borderRadius:10, padding:'9px 14px', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+          <span>⚠ Refresh failed ({refreshErr}) — showing last known data.</span>
+          <button onClick={fetchPortfolioData} style={{ ...mono, fontSize:10, color:T.amber, background:'transparent', border:'1px solid rgba(245,158,11,0.3)', borderRadius:6, padding:'3px 10px', cursor:'pointer' }}>Retry</button>
+        </div>
       )}
 
       {/* ══ HERO ══ */}
@@ -607,9 +714,14 @@ export default function Portfolio() {
             <div style={{ display:'flex', alignItems:'center', gap:12, marginBottom:10 }}>
               <Label>Total Portfolio Value</Label>
               <LiveDot />
+              {userCurrency !== 'USD' && (
+                <span style={{ ...mono, fontSize:9, color:T.slate, border:'1px solid rgba(255,255,255,0.08)', borderRadius:20, padding:'2px 8px' }}>
+                  values in USD (no {userCurrency} conversion)
+                </span>
+              )}
             </div>
             <div style={{ display:'flex', alignItems:'baseline', gap:14, flexWrap:'wrap' }}>
-              <Counter value={typeof hero.totalValue === 'number' ? hero.totalValue : 0} decimals={2} prefix={currencySymbol}
+              <Counter value={typeof hero.totalValue === 'number' ? hero.totalValue : 0} decimals={2} prefix="$"
                 style={{ ...mono, fontSize:46, fontWeight:800, color:T.cyan, lineHeight:1, letterSpacing:'-1px' }} />
               <span style={{ ...mono, fontSize:12, fontWeight:700, padding:'4px 12px', borderRadius:20,
                 background: dayUp ? 'rgba(52,211,153,0.1)' : 'rgba(244,63,94,0.1)',
@@ -688,7 +800,6 @@ export default function Portfolio() {
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16, flexWrap:'wrap', gap:10 }}>
             <div style={{ display:'flex', alignItems:'center', gap:12 }}>
               <Label>Equity Curve</Label>
-              {/* ✅ Feature: Benchmark toggle */}
               {equityCurve.length >= 2 && (
                 <div style={{ display:'flex', gap:4 }}>
                   {BENCHMARKS.map(b => (
@@ -705,7 +816,6 @@ export default function Portfolio() {
               )}
             </div>
             <div style={{ display:'flex', alignItems:'center', gap:10 }}>
-              {/* ✅ Alpha badge */}
               {hasBenchmark && alpha != null && (
                 <span style={{ ...mono, fontSize:10, fontWeight:700, padding:'3px 10px', borderRadius:20,
                   background: alpha >= 0 ? 'rgba(52,211,153,0.1)' : 'rgba(244,63,94,0.1)',
@@ -714,7 +824,7 @@ export default function Portfolio() {
                   Alpha {alpha >= 0 ? '+' : ''}{alpha.toFixed(1)}%
                 </span>
               )}
-              {equityCurve.length >= 2 && <span style={{ ...mono, fontSize:9, color:T.slate }}>30d</span>}
+              {equityCurve.length >= 2 && <span style={{ ...mono, fontSize:9, color:T.slate }}>{equityCurve.length}d</span>}
             </div>
           </div>
 
@@ -743,8 +853,8 @@ export default function Portfolio() {
                 </defs>
                 <CartesianGrid stroke="rgba(255,255,255,0.03)" vertical={false} />
                 <XAxis dataKey="t" tick={{ ...mono, fontSize:9, fill:T.slate }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
-                <YAxis tick={{ ...mono, fontSize:9, fill:T.slate }} axisLine={false} tickLine={false} tickFormatter={v => `${currencySymbol}${(v/1000).toFixed(0)}k`} width={42} />
-                <Tooltip {...ttStyle} formatter={v => [`${currencySymbol}${parseFloat(v).toLocaleString()}`, 'Value']} />
+                <YAxis tick={{ ...mono, fontSize:9, fill:T.slate }} axisLine={false} tickLine={false} tickFormatter={v => `$${(v/1000).toFixed(0)}k`} width={42} />
+                <Tooltip {...ttStyle} formatter={v => [`$${parseFloat(v).toLocaleString()}`, 'Value']} />
                 <Area type="monotone" dataKey="v" stroke={T.purple} strokeWidth={1.5} fill="url(#aqEqGrad)" dot={false} activeDot={{ r:4, fill:T.purple, stroke:'var(--surface)', strokeWidth:2 }} />
               </AreaChart>
             </ResponsiveContainer>
@@ -766,9 +876,8 @@ export default function Portfolio() {
         </div>
       )}
 
-      {/* ══ POSITIONS / SECTORS ══ */}
+      {/* ══ POSITIONS / SECTORS / HISTORY ══ */}
       <div className="aq-card" style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:16, padding:'20px 24px' }}>
-        {/* Tab bar + Add button */}
         <div style={{ display:'flex', alignItems:'center', gap:0, marginBottom:20, borderBottom:'1px solid rgba(255,255,255,0.05)', paddingBottom:12 }}>
           {['positions','sectors','history'].map(tab => (
             <button key={tab} className="aq-tab" onClick={() => setActiveTab(tab)} style={{
@@ -797,9 +906,7 @@ export default function Portfolio() {
                 <span style={{ ...mono, fontSize:9, color:T.slate }}>{filtered.length} pos</span>
               </>
             )}
-
-            {/* Add Position button */}
-            <button onClick={() => { setAddPrefill(null); setShowAddModal(true); }} style={{
+            <button onClick={() => openAdd(null)} style={{
               display:'flex', alignItems:'center', gap:6,
               padding:'6px 14px', borderRadius:8, cursor:'pointer',
               border:'1px solid rgba(0,245,212,0.25)', background:'rgba(0,245,212,0.06)',
@@ -817,7 +924,7 @@ export default function Portfolio() {
           filtered.length === 0 ? (
             <div style={{ textAlign:'center', padding:'48px 0', color:T.slate, ...mono, fontSize:12, opacity:.6 }}>
               <div style={{ marginBottom:16 }}>No {sideFilter !== 'all' ? sideFilter : ''} positions</div>
-              <button onClick={() => { setAddPrefill(null); setShowAddModal(true); }} style={{ padding:'8px 20px', borderRadius:8, border:'1px solid rgba(0,245,212,0.25)', background:'rgba(0,245,212,0.06)', color:T.cyan, ...mono, fontSize:10, cursor:'pointer' }}>
+              <button onClick={() => openAdd(null)} style={{ padding:'8px 20px', borderRadius:8, border:'1px solid rgba(0,245,212,0.25)', background:'rgba(0,245,212,0.06)', color:T.cyan, ...mono, fontSize:10, cursor:'pointer' }}>
                 + Add your first position
               </button>
             </div>
@@ -825,60 +932,58 @@ export default function Portfolio() {
             <div style={{ overflowX:'auto' }}>
               <table style={{ width:'100%', borderCollapse:'collapse' }}>
                 <thead>
-                  <tr>
-                    {['Asset','Side','Amount','Avg Entry','Price','24h','P&L','Return',''].map((h, i) => (
-                      <th key={i} style={{ ...mono, fontSize:9, letterSpacing:'.18em', textTransform:'uppercase', color:T.slate, textAlign:'left', paddingBottom:12, paddingRight:i < 8 ? 16 : 0, fontWeight:400, whiteSpace:'nowrap' }}>{h}</th>
-                    ))}
-                  </tr>
+                  <tr>{COLS.map(([label, key], i) => thSort(label, key, i))}</tr>
                 </thead>
                 <tbody>
-                  {filtered.map((p, i) => (
-                    <tr key={i} className="aq-row">
-                      {/* Asset */}
-                      <td style={{ ...mono, fontSize:13, fontWeight:700, color:'var(--text)', padding:'12px 16px 12px 0', verticalAlign:'middle' }}>
-                        <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-                          <div style={{ width:28, height:28, borderRadius:8, background:`${PALETTE[i%PALETTE.length]}18`, border:`1px solid ${PALETTE[i%PALETTE.length]}30`, display:'flex', alignItems:'center', justifyContent:'center', fontSize:9, fontWeight:700, color:PALETTE[i%PALETTE.length], flexShrink:0 }}>
-                            {p.sym.slice(0,2)}
+                  {filtered.map((p) => {
+                    const c = p.color || T.cyan;
+                    return (
+                      <tr key={`${p.sym}-${p.side}`} className="aq-row">
+                        <td style={{ ...mono, fontSize:13, fontWeight:700, color:'var(--text)', padding:'12px 16px 12px 0', verticalAlign:'middle' }}>
+                          <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                            <div style={{ width:28, height:28, borderRadius:8, background:`${c}18`, border:`1px solid ${c}30`, display:'flex', alignItems:'center', justifyContent:'center', fontSize:9, fontWeight:700, color:c, flexShrink:0 }}>
+                              {p.sym.slice(0,2)}
+                            </div>
+                            {p.sym}
+                            {!p.inDb && (
+                              <span title={`Synced from ${p.exchanges?.join(', ') || 'exchange'} (read-only)`} style={{ ...mono, fontSize:8, color:T.sky, border:'1px solid rgba(56,189,248,0.25)', borderRadius:4, padding:'1px 5px' }}>
+                                {p.exchanges?.[0] || 'EXCH'}
+                              </span>
+                            )}
                           </div>
-                          {p.sym}
-                        </div>
-                      </td>
-                      {/* Side */}
-                      <td style={{ padding:'12px 16px 12px 0', verticalAlign:'middle' }}>
-                        <span style={{ ...mono, fontSize:8, letterSpacing:'.1em', textTransform:'uppercase', padding:'3px 8px', borderRadius:4, background:p.side==='long'?'rgba(52,211,153,0.1)':'rgba(244,63,94,0.1)', color:p.side==='long'?T.green:T.red, border:`1px solid ${p.side==='long'?'rgba(52,211,153,0.2)':'rgba(244,63,94,0.2)'}` }}>
-                          {p.side}
-                        </span>
-                      </td>
-                      {/* Amount */}
-                      <td style={{ ...mono, fontSize:12, color:T.slate, padding:'12px 16px 12px 0', verticalAlign:'middle' }}>{p.amount}</td>
-                      {/* Avg Entry */}
-                      <td style={{ ...mono, fontSize:12, color:T.slate, padding:'12px 16px 12px 0', verticalAlign:'middle' }}>{p.avgEntry}</td>
-                      {/* Price */}
-                      <td style={{ ...mono, fontSize:12, color:'var(--text)', padding:'12px 16px 12px 0', fontWeight:600, verticalAlign:'middle' }}>{p.price}</td>
-                      {/* 24h */}
-                      <td style={{ ...mono, fontSize:12, color:p.up?T.green:T.red, padding:'12px 16px 12px 0', verticalAlign:'middle' }}>
-                        <span style={{ display:'flex', alignItems:'center', gap:3 }}>
-                          <span style={{ fontSize:9 }}>{p.up?'▲':'▼'}</span>{p.ch}
-                        </span>
-                      </td>
-                      {/* P&L */}
-                      <td style={{ ...mono, fontSize:12, color:colorPnl(p.pnl), padding:'12px 16px 12px 0', fontWeight:600, verticalAlign:'middle' }}>{p.pnl}</td>
-                      {/* Return */}
-                      <td style={{ ...mono, fontSize:12, color:colorPnl(p.ret), padding:'12px 16px 12px 0', verticalAlign:'middle' }}>{p.ret}</td>
-                      {/* Close button */}
-                      <td style={{ padding:'12px 0', verticalAlign:'middle', textAlign:'right' }}>
-                        <button className="aq-close-btn" onClick={() => setCloseTarget(p)} style={{
-                          ...mono, fontSize:9, padding:'4px 10px', borderRadius:6, cursor:'pointer',
-                          border:'1px solid rgba(244,63,94,0.25)', background:'rgba(244,63,94,0.06)',
-                          color:T.red, transition:'all .15s',
-                        }}
-                          onMouseEnter={e => { e.currentTarget.style.background='rgba(244,63,94,0.15)'; e.currentTarget.style.opacity='1'; }}
-                          onMouseLeave={e => { e.currentTarget.style.background='rgba(244,63,94,0.06)'; }}>
-                          Close
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                        </td>
+                        <td style={{ padding:'12px 16px 12px 0', verticalAlign:'middle' }}>
+                          <span style={{ ...mono, fontSize:8, letterSpacing:'.1em', textTransform:'uppercase', padding:'3px 8px', borderRadius:4, background:p.side==='long'?'rgba(52,211,153,0.1)':'rgba(244,63,94,0.1)', color:p.side==='long'?T.green:T.red, border:`1px solid ${p.side==='long'?'rgba(52,211,153,0.2)':'rgba(244,63,94,0.2)'}` }}>
+                            {p.side}
+                          </span>
+                        </td>
+                        <td style={{ ...mono, fontSize:12, color:T.slate, padding:'12px 16px 12px 0', verticalAlign:'middle' }}>{p.amount}</td>
+                        <td style={{ ...mono, fontSize:12, color:T.slate, padding:'12px 16px 12px 0', verticalAlign:'middle' }}>{p.avgEntry}</td>
+                        <td style={{ ...mono, fontSize:12, color:'var(--text)', padding:'12px 16px 12px 0', fontWeight:600, verticalAlign:'middle' }}>{p.price}</td>
+                        <td style={{ ...mono, fontSize:12, color:p.up?T.green:T.red, padding:'12px 16px 12px 0', verticalAlign:'middle' }}>
+                          <span style={{ display:'flex', alignItems:'center', gap:3 }}>
+                            <span style={{ fontSize:9 }}>{p.up?'▲':'▼'}</span>{p.ch}
+                          </span>
+                        </td>
+                        <td style={{ ...mono, fontSize:12, color:colorPnl(p.pnl), padding:'12px 16px 12px 0', fontWeight:600, verticalAlign:'middle' }}>{p.pnl}</td>
+                        <td style={{ ...mono, fontSize:12, color:colorPnl(p.ret), padding:'12px 16px 12px 0', verticalAlign:'middle' }}>{p.ret}</td>
+                        <td style={{ padding:'12px 0', verticalAlign:'middle', textAlign:'right', whiteSpace:'nowrap' }}>
+                          {p.inDb && (
+                            <>
+                              <button className="aq-row-btn" onClick={() => setReduceTarget(p)} style={{
+                                ...mono, fontSize:9, padding:'4px 10px', borderRadius:6, cursor:'pointer', marginRight:6,
+                                border:'1px solid rgba(245,158,11,0.25)', background:'rgba(245,158,11,0.06)', color:T.amber,
+                              }}>Reduce</button>
+                              <button className="aq-row-btn" onClick={() => setCloseTarget(p)} style={{
+                                ...mono, fontSize:9, padding:'4px 10px', borderRadius:6, cursor:'pointer',
+                                border:'1px solid rgba(244,63,94,0.25)', background:'rgba(244,63,94,0.06)', color:T.red,
+                              }}>Close</button>
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -887,12 +992,12 @@ export default function Portfolio() {
 
         {/* ── Sectors tab ── */}
         {activeTab === 'sectors' && (
-          sectorData.length === 0 ? (
+          sectorsSorted.length === 0 ? (
             <div style={{ textAlign:'center', padding:'48px 0', color:T.slate, ...mono, fontSize:12, opacity:.6 }}>No sector data available</div>
           ) : (
             <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
-              {sectorData.sort((a,b) => b.pct - a.pct).map((s, i) => (
-                <div key={i} style={{ display:'grid', gridTemplateColumns:'110px 1fr 52px', alignItems:'center', gap:16 }}>
+              {sectorsSorted.map((s, i) => (
+                <div key={s.name} style={{ display:'grid', gridTemplateColumns:'110px 1fr 52px', alignItems:'center', gap:16 }}>
                   <div style={{ ...mono, fontSize:11, color:'var(--text)' }}>{s.name}</div>
                   <Bar pct={s.pct} color={s.color || PALETTE[i % PALETTE.length]} h={4} />
                   <div style={{ ...mono, fontSize:11, color:T.slate, textAlign:'right' }}>{s.pct.toFixed(1)}%</div>
@@ -902,9 +1007,9 @@ export default function Portfolio() {
           )
         )}
 
-        {/* ── History tab — ✅ Feature: trades réalisés (positions fermées) ── */}
+        {/* ── History tab ── */}
         {activeTab === 'history' && (
-          historyLoading ? (
+          historyLoading && historyData.length === 0 ? (
             <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
               {[1,2,3].map(i => <Sk key={i} h={36} />)}
             </div>
@@ -914,13 +1019,10 @@ export default function Portfolio() {
             </div>
           ) : (
             <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
-              {/* Summary strip */}
               <div style={{ display:'flex', gap:24, padding:'12px 16px', background:'rgba(255,255,255,0.02)', border:'1px solid var(--border)', borderRadius:10 }}>
                 <div>
                   <Label style={{ marginBottom:4 }}>Total Realized</Label>
-                  <div style={{ ...mono, fontSize:16, fontWeight:700, color: isNeg(historySummary.totalRealized) ? T.red : T.green }}>
-                    {historySummary.totalRealized}
-                  </div>
+                  <div style={{ ...mono, fontSize:16, fontWeight:700, color: isNeg(historySummary.totalRealized) ? T.red : T.green }}>{historySummary.totalRealized}</div>
                 </div>
                 <div>
                   <Label style={{ marginBottom:4 }}>Win Rate</Label>
@@ -932,7 +1034,6 @@ export default function Portfolio() {
                 </div>
               </div>
 
-              {/* Trades table */}
               <div style={{ overflowX:'auto' }}>
                 <table style={{ width:'100%', borderCollapse:'collapse' }}>
                   <thead>
@@ -947,13 +1048,11 @@ export default function Portfolio() {
                       <tr key={t.id || i} className="aq-row">
                         <td style={{ ...mono, fontSize:12, fontWeight:700, color:'var(--text)', padding:'10px 16px 10px 0' }}>{t.symbol}</td>
                         <td style={{ padding:'10px 16px 10px 0' }}>
-                          <span style={{ ...mono, fontSize:8, letterSpacing:'.1em', textTransform:'uppercase', padding:'3px 8px', borderRadius:4, background:t.side==='long'?'rgba(52,211,153,0.1)':'rgba(244,63,94,0.1)', color:t.side==='long'?T.green:T.red, border:`1px solid ${t.side==='long'?'rgba(52,211,153,0.2)':'rgba(244,63,94,0.2)'}` }}>
-                            {t.side}
-                          </span>
+                          <span style={{ ...mono, fontSize:8, letterSpacing:'.1em', textTransform:'uppercase', padding:'3px 8px', borderRadius:4, background:t.side==='long'?'rgba(52,211,153,0.1)':'rgba(244,63,94,0.1)', color:t.side==='long'?T.green:T.red, border:`1px solid ${t.side==='long'?'rgba(52,211,153,0.2)':'rgba(244,63,94,0.2)'}` }}>{t.side}</span>
                         </td>
                         <td style={{ ...mono, fontSize:12, color:T.slate, padding:'10px 16px 10px 0' }}>{t.quantity}</td>
-                        <td style={{ ...mono, fontSize:12, color:T.slate, padding:'10px 16px 10px 0' }}>{currencySymbol}{t.entry.toLocaleString('en-US', { maximumFractionDigits:4 })}</td>
-                        <td style={{ ...mono, fontSize:12, color:'var(--text)', padding:'10px 16px 10px 0' }}>{currencySymbol}{t.exit.toLocaleString('en-US', { maximumFractionDigits:4 })}</td>
+                        <td style={{ ...mono, fontSize:12, color:T.slate, padding:'10px 16px 10px 0' }}>${t.entry.toLocaleString('en-US', { maximumFractionDigits:4 })}</td>
+                        <td style={{ ...mono, fontSize:12, color:'var(--text)', padding:'10px 16px 10px 0' }}>${t.exit.toLocaleString('en-US', { maximumFractionDigits:4 })}</td>
                         <td style={{ ...mono, fontSize:12, fontWeight:600, color:colorPnl(t.pnl), padding:'10px 16px 10px 0' }}>{t.pnl}</td>
                         <td style={{ ...mono, fontSize:12, color:colorPnl(t.pnlPct), padding:'10px 16px 10px 0' }}>{t.pnlPct}</td>
                         <td style={{ ...mono, fontSize:12, color:T.slate, padding:'10px 16px 10px 0' }}>{t.holdDays != null ? `${t.holdDays}d` : '—'}</td>
@@ -963,6 +1062,13 @@ export default function Portfolio() {
                   </tbody>
                 </table>
               </div>
+
+              {historyHasMore && (
+                <button onClick={() => fetchHistory(true)} disabled={historyLoading} style={{
+                  alignSelf:'center', ...mono, fontSize:10, padding:'7px 22px', borderRadius:8, cursor: historyLoading ? 'wait' : 'pointer',
+                  border:'1px solid rgba(0,245,212,0.25)', background:'rgba(0,245,212,0.06)', color:T.cyan,
+                }}>{historyLoading ? 'Loading…' : 'Load more'}</button>
+              )}
             </div>
           )
         )}
@@ -971,20 +1077,23 @@ export default function Portfolio() {
       {/* ══ HOLDINGS STRIP ══ */}
       {holdings.length > 0 && (
         <div style={{ display:'grid', gridTemplateColumns:`repeat(${Math.min(holdings.length,5)},1fr)`, gap:10 }}>
-          {holdings.slice(0,5).map((h, i) => (
-            <div key={i} className="aq-holding aq-card" style={{ background:T.surface, border:'1px solid rgba(255,255,255,0.06)', borderRadius:14, padding:'16px 18px', position:'relative', overflow:'hidden' }}>
-              <div style={{ position:'absolute', top:0, left:0, right:0, height:2, background:`linear-gradient(90deg, ${PALETTE[i%PALETTE.length]}, transparent)` }}/>
-              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:10 }}>
-                <div>
-                  <div style={{ ...mono, fontSize:13, fontWeight:700, color:'var(--text)' }}>{h.sym}</div>
-                  <div style={{ ...mono, fontSize:9, color:T.slate, marginTop:2 }}>{h.pct} of portfolio</div>
+          {holdings.slice(0,5).map((h, i) => {
+            const c = h.color || PALETTE[i % PALETTE.length];
+            return (
+              <div key={`${h.sym}-${h.side}`} className="aq-holding aq-card" style={{ background:T.surface, border:'1px solid rgba(255,255,255,0.06)', borderRadius:14, padding:'16px 18px', position:'relative', overflow:'hidden' }}>
+                <div style={{ position:'absolute', top:0, left:0, right:0, height:2, background:`linear-gradient(90deg, ${c}, transparent)` }}/>
+                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:10 }}>
+                  <div>
+                    <div style={{ ...mono, fontSize:13, fontWeight:700, color:'var(--text)' }}>{h.sym}{h.side === 'short' ? ' (S)' : ''}</div>
+                    <div style={{ ...mono, fontSize:9, color:T.slate, marginTop:2 }}>{h.pct} of portfolio</div>
+                  </div>
+                  <span style={{ ...mono, fontSize:10, fontWeight:600, color:h.up?T.green:T.red, padding:'2px 6px', borderRadius:4, background:h.up?'rgba(52,211,153,0.08)':'rgba(244,63,94,0.08)' }}>{h.ch}</span>
                 </div>
-                <span style={{ ...mono, fontSize:10, fontWeight:600, color:h.up?T.green:T.red, padding:'2px 6px', borderRadius:4, background:h.up?'rgba(52,211,153,0.08)':'rgba(244,63,94,0.08)' }}>{h.ch}</span>
+                <div style={{ ...mono, fontSize:18, fontWeight:700, color:'var(--text)', marginBottom:10 }}>{h.price}</div>
+                <Bar pct={parseFloat(h.pct)} color={c} h={3} />
               </div>
-              <div style={{ ...mono, fontSize:18, fontWeight:700, color:'var(--text)', marginBottom:10 }}>{h.price}</div>
-              <Bar pct={parseFloat(h.pct)} color={PALETTE[i%PALETTE.length]} h={3} />
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 

@@ -66,7 +66,7 @@ const MAX_OPEN_PER_CONFIG = 1;
 // Baseline utilisée pour convertir max_daily_loss_pct (un %) en montant —
 // même valeur que le solde paper simulé par défaut ailleurs dans l'app
 // (voir trading.controller.js#getBalance, mode paper, fallback $10,000).
-const PAPER_ACCOUNT_BASELINE = 10000;
+const PAPER_ACCOUNT_BASELINE = exchangesSvc.PAPER_START_CAPITAL || 10000;
 
 /**
  * Charge tous les configs actifs (enabled=true, status pas 'disabled' ni
@@ -301,6 +301,7 @@ async function processConfig(config) {
       limitPrice: null,
       stopLoss:   signal.stop_loss   ? parseFloat(signal.stop_loss)   : null,
       takeProfit: signal.take_profit ? parseFloat(signal.take_profit) : null,
+      signalId:   signal.id,
     });
 
     // Traçabilité — lie le paper_trade à son config + backtest d'origine.

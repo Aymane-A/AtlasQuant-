@@ -19,7 +19,7 @@ async function placeOrder(req, res) {
   const userId = req.user.id;
   const {
     exchangeId, symbol, side, orderType = 'market', quantity, price, stopPrice,
-    stopLoss, takeProfit,
+    stopLoss, takeProfit, signalId, 
   } = req.body;
 
   if (!exchangeId || !symbol || !side || !quantity)
@@ -79,6 +79,7 @@ async function placeOrder(req, res) {
         limitPrice:  orderType === 'limit' ? parseFloat(price) : null,
         stopLoss:    stopLoss   ? parseFloat(stopLoss)   : null,
         takeProfit:  takeProfit ? parseFloat(takeProfit) : null,
+        signalId:    signalId ? parseInt(signalId, 10) : null,
       });
 
       return res.json({ success:true, mode:'paper', order: trade });
@@ -104,7 +105,8 @@ async function placeOrder(req, res) {
       [userId, exchangeId, result.exchangeOrderId, symbol.toUpperCase(),
        side, orderType, quantity, price || null,
        stopLoss || null, takeProfit || null,
-       result.status || 'submitted', JSON.stringify(result.raw)]
+       result.status || 'submitted', JSON.stringify(result.raw),
+       signalId ? parseInt(signalId, 10) : null]
     );
 
     res.json({

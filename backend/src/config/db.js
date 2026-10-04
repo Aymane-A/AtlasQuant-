@@ -552,6 +552,29 @@ async function migrate() {
     ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS take_profit NUMERIC(20,8);
     ALTER TABLE live_orders  ADD COLUMN IF NOT EXISTS stop_loss   NUMERIC(20,8);
     ALTER TABLE live_orders  ADD COLUMN IF NOT EXISTS take_profit NUMERIC(20,8);
+
+    -- Colonnes déjà présentes sur ta base (ajoutées à la main) — ici pour les installs neuves.
+    ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS exit_price  NUMERIC(20,8);
+    ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS close_reason TEXT;
+
+    -- ── Mon P&L: lien signal → trade (comparaison "moi vs IA") ──
+    ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS signal_id INTEGER REFERENCES signals(id) ON DELETE SET NULL;
+    ALTER TABLE live_orders  ADD COLUMN IF NOT EXISTS signal_id INTEGER REFERENCES signals(id) ON DELETE SET NULL;
+
+    -- ── Mon P&L (live): exécution réelle récupérée auprès de l'exchange ──
+    -- live_orders stocke l'ordre ENVOYÉ; ces colonnes stockent ce qui a été EXÉCUTÉ.
+    -- Remplies par liveOrderReconciler.service.js (cron 15 min, lecture seule).
+    ALTER TABLE live_orders ADD COLUMN IF NOT EXISTS filled_qty         NUMERIC(28,10);
+    ALTER TABLE live_orders ADD COLUMN IF NOT EXISTS avg_price          NUMERIC(28,10);
+    ALTER TABLE live_orders ADD COLUMN IF NOT EXISTS fee_cost           NUMERIC(28,10);
+    ALTER TABLE live_orders ADD COLUMN IF NOT EXISTS fee_currency       VARCHAR(20);
+    ALTER TABLE live_orders ADD COLUMN IF NOT EXISTS exchange_status    VARCHAR(30);
+    ALTER TABLE live_orders ADD COLUMN IF NOT EXISTS fill_final         BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE live_orders ADD COLUMN IF NOT EXISTS reconciled_at      TIMESTAMPTZ;
+    ALTER TABLE live_orders ADD COLUMN IF NOT EXISTS reconcile_attempts INTEGER NOT NULL DEFAULT 0;
+    CREATE INDEX IF NOT EXISTS idx_live_orders_pending
+      ON live_orders(created_at) WHERE fill_final = false AND exchange_order_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_paper_trades_signal ON paper_trades(signal_id) WHERE signal_id IS NOT NULL;
   `);
 
   // ✅ Fix critique: 'notifications' était créée en BOOLEAN dans les
