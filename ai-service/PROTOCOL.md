@@ -1,4 +1,4 @@
-# PROTOCOL.md: AtlasQuant volatility experiment (v1.1)
+# PROTOCOL.md: AtlasQuant volatility experiment (v1.2)
 
 Written: 2026-10-11 (before any model result was seen)
 v1.0 commit hash (pre-registration): `bdd5bdce706514f8a9fc87820e2866084e4467aa`
@@ -50,6 +50,7 @@ v1.1 commit hash: see `git log -- ai-service/PROTOCOL.md` (a file cannot contain
 - Secondary: RMSE, QLIKE (or MAE on log RV)
 - Report per-fold values and pooled relative improvement:
   improvement = (MAE_best_baseline - MAE_candidate) / MAE_best_baseline
+- QLIKE is computed on variances: mean(r - ln(r) - 1) with r = y^2 / f^2; forecasts are floored at 1e-6.
 
 ## 6. Gate 1 (predeclared)
 PASS only if ALL are true:
@@ -83,3 +84,4 @@ Rules, fixed before any model result:
 |---|---|---|---|
 | 1.0 | 2026-10-11 | Initial protocol | n/a |
 | 1.1 | 2026-10-11 | Added data-quality rules (section 8) | Gaps and zero-volume candles found in validation; decided before any feature or model result |
+| 1.2 | 2026-10-11 | QLIKE definition and forecast floor | Not defined in v1.0; documented after the baseline run, before any candidate result |
