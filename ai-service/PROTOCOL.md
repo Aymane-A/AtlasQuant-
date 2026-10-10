@@ -1,7 +1,8 @@
-# PROTOCOL.md: AtlasQuant volatility experiment (v1.0)
+# PROTOCOL.md: AtlasQuant volatility experiment (v1.1)
 
 Written: 2026-10-11 (before any model result was seen)
-Commit hash of this file: `<fill after git commit>`
+v1.0 commit hash (pre-registration): `bdd5bdce706514f8a9fc87820e2866084e4467aa`
+v1.1 commit hash: see `git log -- ai-service/PROTOCOL.md` (a file cannot contain its own hash)
 
 > Rule: this file is changed only by a NEW dated version with a written reason.
 > Never edit a decision after looking at results.
@@ -65,7 +66,20 @@ If it fails: write "no demonstrated edge", keep HAR-RV as benchmark, do not add 
 - If a trading strategy is simulated: 100+ completed simulated trades, stop threshold 10% drawdown (stop and review)
 - This protocol does not authorize live trading.
 
-## 8. Change log
+## 8. Data-quality rules (added in v1.1, from validation_report.json)
+Validation found: 59,128 candles, 0 duplicates, 0 NaN, 0 bad OHLC, 15 gaps (32 missing candles,
+max gap 5h, all between 2020-02 and 2023-03), 2 zero-volume candles.
+Rules, fixed before any model result:
+1. Missing candles are never filled. The hourly grid is rebuilt so gaps appear as NaN rows.
+2. A candle is INVALID if it is missing or has volume == 0.
+3. The return r_t is NaN if candle t or candle t-1 is invalid.
+4. 24h windows (RV_d, target RV_next24, range, volume change) must be complete: any NaN inside the window drops the row.
+5. Long windows (RV_w 168h, RV_m 720h): std over the available returns if at least 95% of the window is valid (>=160 of 168, >=684 of 720); otherwise the row is dropped.
+6. Rows are dropped BEFORE splitting into folds. The embargo (section 3) still applies afterwards.
+7. The number of dropped rows is reported in the experiment log.
+
+## 9. Change log
 | Version | Date | Change | Reason |
 |---|---|---|---|
 | 1.0 | 2026-10-11 | Initial protocol | n/a |
+| 1.1 | 2026-10-11 | Added data-quality rules (section 8) | Gaps and zero-volume candles found in validation; decided before any feature or model result |
