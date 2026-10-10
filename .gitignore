@@ -32,3 +32,10 @@ backend/database/*.db
 # OS Files
 .DS_Store
 Thumbs.db
+
+# AI service (Python)
+ai-service/.venv/
+ai-service/data/raw/
+ai-service/__pycache__/
+**/__pycache__/
+.env
