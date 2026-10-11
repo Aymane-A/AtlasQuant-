@@ -126,3 +126,4 @@ Gate 1 operational definitions
 | 1.1 | 2026-10-11 | Added data-quality rules (section 8) | Gaps and zero-volume candles found in validation; decided before any feature or model result |
 | 1.2 | 2026-10-11 | QLIKE definition and forecast floor | Not defined in v1.0; documented after the baseline run, before any candidate result |
 | 1.3 | 2026-10-11 | Candidate model, tuning trials and Gate 1 operational rules (section 9) | Make the candidate and the gate fully specified before any candidate result |
+| 1.3.1 | 2026-10-11 | Record: v1.3 committed AFTER tune/evaluate/gate1 were run | Commit step was skipped; file content unchanged since writing, check file timestamps |
