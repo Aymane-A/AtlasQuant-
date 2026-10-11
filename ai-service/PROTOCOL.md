@@ -1,4 +1,4 @@
-# PROTOCOL.md: AtlasQuant volatility experiment (v1.4)
+# PROTOCOL.md: AtlasQuant volatility experiment (v1.5)
 
 Written: 2026-10-11 (before any model result was seen)
 v1.0 commit hash (pre-registration): `bdd5bdce706514f8a9fc87820e2866084e4467aa`
@@ -151,7 +151,43 @@ Model choice for the product
   volatility (bias) is the harmful direction for position sizing.
 - HAR-RV stays the product benchmark whatever the final test says.
 
-## 11. Change log
+## 11. Risk-management backtest (added in v1.5)
+Decided after the final test CONFIRMED the candidate (see change log 1.4.1), BEFORE any risk-backtest result was seen.
+Purpose: decide which volatility forecast AtlasQuant shows and whether a forecast-based sizing rule has any demonstrated risk
+benefit. Research indicator only; not a trading signal, not financial advice.
+
+Data used
+- The 5 walk-forward folds (2023-01-01 to 2025-06-30) for ALL decisions. The validation period (2025-07-01 to 2026-03-30) is reported
+  as a secondary check only (the candidate's parameters were tuned there, so its numbers are optimistic).
+- The final test period and any later data are NOT used.
+- Forecasts for each period come from models refit on that period's training window (same splits, embargo and frozen candidate
+  parameters as before).
+
+Strategy (simulation only)
+- Long-only BTC/USDT spot, rest in cash at 0% return. No leverage, no shorting.
+- One decision per day: candles that open at 00:00 UTC. The exposure chosen from the features at row t is held over the next 24 hourly
+  returns r_(t+1)..r_(t+24) (the same window as the target). Days without a feature row are skipped (no return, previous exposure kept).
+- Exposure w = min(1.0, target_vol / forecast), where forecast is the model's RV_next24 forecast (floored at 1e-6) and
+  target_vol = median of RV_d over the period's training window (past-only).
+- Benchmark: buy-and-hold (w = 1 on the same days).
+- Models compared: persistence, rolling_168h, har_rv, har_x, har_lad, har_x_lad, candidate.
+- Block return = w * (P_(t+24) / P_t - 1) - cost * |w - w_prev|, with w_prev = 0 at the very first block. Main cost = 15 bps per unit of
+  turnover (10 fee + 5 slippage). Sensitivity (Sharpe only): 5 bps and 30 bps.
+
+Metrics (pooled, chronological, over the 5 folds, net of costs)
+- Annualized return and volatility (365 periods per year), Sharpe and Sortino (risk-free 0), max drawdown, average exposure,
+  average daily turnover, worst day.
+
+Decision rules (fixed)
+- Rule A, is forecast-based sizing useful at all? Yes only if har_rv sizing has a LOWER max drawdown than buy-and-hold AND a Sharpe
+  >= buy-and-hold. Otherwise: "no demonstrated risk benefit"; the forecast is shown only as an information indicator, with no sizing claim.
+- Rule B, which forecast ships? Default = HAR-RV. Another model replaces it only if (1) the paired moving-block bootstrap
+  (10-day blocks, 2000 resamples, seed 12345) of the Sharpe difference (model - HAR-RV) has a 95% lower bound > 0, AND (2) its max
+  drawdown is <= HAR-RV's max drawdown + 1 percentage point. If several qualify, the highest Sharpe wins.
+- Results are reported whatever they are. src/backtest_risk_use.py runs once and refuses a re-run (a re-run is allowed only to fix a
+  bug, deleting the decision file on purpose and logging it in the change log).
+
+## 12. Change log
 | Version | Date | Change | Reason |
 |---|---|---|---|
 | 1.0 | 2026-10-11 | Initial protocol | n/a |
@@ -161,3 +197,5 @@ Model choice for the product
 | 1.3.1 | 2026-10-11 | Record: v1.3 committed AFTER tune/evaluate/gate1 were run | Commit step was skipped; file content unchanged since writing, check file timestamps |
 | 1.3.2 | 2026-10-11 | Post-hoc diagnostics (L1 HAR models, bias) added after Gate 1 | They do not change the verdict or the candidate; they inform the model choice for the product |
 | 1.4 | 2026-10-11 | One-shot final test and confirmation criterion (section 10) | Specified after Gate 1 PASS, before any final-test result |
+| 1.4.1 | 2026-10-11 | Record: final test ran from commit 7f3709e, CONFIRMED (candidate vs HAR-RV +9.98% MAE) | Outcome recorded; no rule was changed. Final test is now used |
+| 1.5 | 2026-10-11 | Risk-management backtest and model-choice rules (section 11) | Specified before any risk-backtest result |
