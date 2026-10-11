@@ -225,7 +225,9 @@ Live monitoring (Gate 3 for an indicator; no trades are involved)
 - If any condition fails: mark the indicator "experimental" or hide it, and investigate; do not silently retrain or change thresholds.
 
 ## 13. Live paper-monitoring procedure (added in v1.7, runner changed in v1.8)
-Implementation details of the Gate 3 plan in section 12. Decided BEFORE the first live forecast was logged.
+Implementation details of the Gate 3 plan in section 12. The v1.7 procedure was written before any live forecast. One manual first run
+(25 rows: 1 live + 24 backfill, as_of 2026-10-11 22:00 UTC, logged 2026-10-11 23:20 UTC) was executed on the developer PC before v1.8
+was committed; no evaluation output had been seen. That run stays in the log and counts as the start of the monitoring.
 v1.8 changes only WHERE the logger runs (GitHub Actions instead of a developer PC); no model, window, metric or threshold changed.
 
 Runner
@@ -275,3 +277,4 @@ Evaluation (src/evaluate_live.py, Gate 3 conditions of section 12)
 | 1.6.1 | 2026-10-11 | Product fit uses up to 5000 IRLS iterations and records convergence (artifact fields irls_iterations, irls_converged) | verify_lad.py showed the 200-iteration fit used in evaluation had not reached tol 1e-12 on all rows (MAE within ~1e-8 relative of the exact LP on subsamples). Same model family; no result or rule changed |
 | 1.7 | 2026-10-11 | Live paper-monitoring procedure (section 13) | Implementation details of the Gate 3 plan; specified before the first live forecast was logged |
 | 1.8 | 2026-10-12 | Runner moved from a developer PC (Task Scheduler) to GitHub Actions; logs committed by the workflow (section 13) | The PC cannot stay on 24/7 for 8 weeks; decided BEFORE the first live forecast was logged. No model, window, metric, threshold or condition changed |
+| 1.8 | 2026-10-12 | Runner moved from a developer PC (Task Scheduler) to GitHub Actions; logs committed by the workflow (section 13) | The PC cannot stay on 24/7 for 8 weeks. Decided after one manual first run (25 rows) but before any realized value or evaluation output existed. No model, window, metric, threshold or condition changed |
