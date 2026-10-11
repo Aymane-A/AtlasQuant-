@@ -1,0 +1,29 @@
+{
+  "verdict": "CONFIRMED",
+  "protocol": "v1.4",
+  "git_commit": "7f3709e37599830d0c0e30514ef9c58a6500c124",
+  "n_train": 52961,
+  "n_test": 4368,
+  "improvement_vs_har_rv": 0.09977422512656238,
+  "bootstrap_ci_95": {
+    "24": [
+      0.05638573320942712,
+      0.1472802963328165
+    ],
+    "48": [
+      0.051085772984488256,
+      0.14975388833643882
+    ],
+    "72": [
+      0.05465076207041676,
+      0.1526165488570687
+    ]
+  },
+  "params": {
+    "learning_rate": 0.05,
+    "max_iter": 200,
+    "max_depth": 2,
+    "min_samples_leaf": 200,
+    "l2_regularization": 0.0
+  }
+}
