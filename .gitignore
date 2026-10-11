@@ -39,3 +39,4 @@ ai-service/data/raw/
 ai-service/__pycache__/
 **/__pycache__/
 .env
+ai-service/data/processed/*.csv
