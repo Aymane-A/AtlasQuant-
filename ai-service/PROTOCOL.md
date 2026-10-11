@@ -1,4 +1,4 @@
-# PROTOCOL.md: AtlasQuant volatility experiment (v1.6)
+# PROTOCOL.md: AtlasQuant volatility experiment (v1.8)
 
 Written: 2026-10-11 (before any model result was seen)
 v1.0 commit hash (pre-registration): `bdd5bdce706514f8a9fc87820e2866084e4467aa`
@@ -224,7 +224,41 @@ Live monitoring (Gate 3 for an indicator; no trades are involved)
   range_90 between 80% and 95%; (4) a successful forecast for at least 95% of hours.
 - If any condition fails: mark the indicator "experimental" or hide it, and investigate; do not silently retrain or change thresholds.
 
-## 13. Change log
+## 13. Live paper-monitoring procedure (added in v1.7, runner changed in v1.8)
+Implementation details of the Gate 3 plan in section 12. Decided BEFORE the first live forecast was logged.
+v1.8 changes only WHERE the logger runs (GitHub Actions instead of a developer PC); no model, window, metric or threshold changed.
+
+Runner
+- src/paper_log.py runs every hour from a GitHub Actions workflow (.github/workflows/paper-log.yml, cron "5 * * * *", plus manual
+  workflow_dispatch). It needs no server: it calls app.predict.predict with the frozen artifact models/har_lad_v1.json
+  (the same function the API uses).
+- GitHub cron is best-effort: a run can start late (minutes) or be skipped. This is accepted and measured by condition 4, never corrected afterwards.
+- Each run fetches the last ~1000 Binance 1h candles (api.binance.com, fallback data-api.binance.vision), keeps CLOSED candles only,
+  merges them into data/live/candles.csv (unique timestamps), and logs the forecast for the latest closed candle (source = "live").
+- Missing hours inside the last 24 hours are filled with source = "backfill": same frozen model, using only data up to that hour.
+  Backfilled rows count for accuracy but NEVER for availability.
+- Every run is recorded in data/live/run_log.csv (ok or error), including failed runs. Logged fields (data/live/forecasts.csv):
+  as_of, source, logged_at_utc, model_version, model_sha256 (first 12 hex chars), RV_d, RV_w, RV_m, forecast_hourly_std, range_low,
+  range_high, risk_level, historical_percentile, persistence, har_rv.
+- The workflow commits candles.csv, forecasts.csv and run_log.csv to the repository after every run; the git history is the audit trail
+  (commit timestamps are GitHub's, not editable by the logger). Rows already logged are never rewritten or deleted.
+- No retraining. If model_sha256 changes during monitoring, the monitoring restarts under a new model_version.
+
+Evaluation (src/evaluate_live.py, Gate 3 conditions of section 12)
+- Run locally after `git pull`. Realized value = RV_next24 computed from the stored candles with src.build_features.build
+  (same rules as training: invalid candles, std ddof=1, no annualization). Hours whose target window is invalid or not yet complete
+  are excluded from accuracy and counted.
+- Accuracy uses all logged rows with a realized value (live + backfill; both counts are reported). Uncertainty: moving-block bootstrap, 24h blocks.
+- Condition 4 (availability) = number of distinct "live" hours / number of hours between the first and the last logged hour.
+  It measures this logger (GitHub Actions scheduling, network, Binance availability, data validity), not the Node service.
+  Node-side logs, when they exist, add the service uptime as a separate figure.
+- Duration: at least 56 days between the first logged hour and the last hour with a realized value. Before that, results are INTERIM
+  and informational only: no verdict, no stopping early on good or bad interim numbers.
+- Verdict after 56 days: PASS only if all four conditions of section 12 hold, otherwise FAIL (the failed conditions are listed).
+- Any change to cadence, windows, runner or rules requires a new protocol version. Interruptions (workflow disabled by GitHub,
+  Binance outage) are NOT repaired by hand-editing logs; they simply lower availability.
+
+## 14. Change log
 | Version | Date | Change | Reason |
 |---|---|---|---|
 | 1.0 | 2026-10-11 | Initial protocol | n/a |
@@ -239,3 +273,5 @@ Live monitoring (Gate 3 for an indicator; no trades are involved)
 | 1.5.1 | 2026-10-11 | Record: risk backtest ran; Rule A = no demonstrated risk benefit; Rule B = har_lad (see results/risk_backtest_decision.json) | Outcome recorded; no rule was changed |
 | 1.6 | 2026-10-11 | Product indicator specification (section 12) | Specified before any product or live result; Rule A means no sizing claims |
 | 1.6.1 | 2026-10-11 | Product fit uses up to 5000 IRLS iterations and records convergence (artifact fields irls_iterations, irls_converged) | verify_lad.py showed the 200-iteration fit used in evaluation had not reached tol 1e-12 on all rows (MAE within ~1e-8 relative of the exact LP on subsamples). Same model family; no result or rule changed |
+| 1.7 | 2026-10-11 | Live paper-monitoring procedure (section 13) | Implementation details of the Gate 3 plan; specified before the first live forecast was logged |
+| 1.8 | 2026-10-12 | Runner moved from a developer PC (Task Scheduler) to GitHub Actions; logs committed by the workflow (section 13) | The PC cannot stay on 24/7 for 8 weeks; decided BEFORE the first live forecast was logged. No model, window, metric, threshold or condition changed |
