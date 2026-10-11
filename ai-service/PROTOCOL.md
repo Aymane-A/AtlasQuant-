@@ -1,4 +1,4 @@
-# PROTOCOL.md: AtlasQuant volatility experiment (v1.3)
+# PROTOCOL.md: AtlasQuant volatility experiment (v1.4)
 
 Written: 2026-10-11 (before any model result was seen)
 v1.0 commit hash (pre-registration): `bdd5bdce706514f8a9fc87820e2866084e4467aa`
@@ -119,7 +119,39 @@ Gate 1 operational definitions
 - If Gate 1 = PASS, the frozen candidate is evaluated ONCE on the final test period and the result is reported whatever it is.
 - Order of work: commit this protocol and the code, then run tuning, then fold evaluation, then gate1. HAR-X is reported, never used to rescue a verdict.
 
-## 10. Change log
+## 10. Final test: one-shot confirmation (added in v1.4)
+Decided after Gate 1 = PASS and after the post-hoc diagnostics, BEFORE any final-test result was seen.
+
+Setup
+- Final test period: 2026-04-01 to 2026-09-30 (rows with a full 24h target; the last 24 candles have no target and are dropped).
+- Training window: every row with t + 24h < 2026-04-01 (this includes the validation period; the embargo still applies).
+- Candidate: HistGradientBoostingRegressor with the FROZEN parameters in results/chosen_params.json, refit once on that window. No re-tuning.
+- Baselines are refit on the same window: persistence, rolling_168h, HAR-RV (OLS on RV_d, RV_w, RV_m).
+- The final test is run ONCE (src/final_test.py refuses a second run). The result is reported whatever it is.
+- final_test.py refuses to run unless Gate 1 = PASS and PROTOCOL.md, src/ and tests/ are committed in git.
+
+Confirmation criterion (the only pre-registered decision)
+- Reference model: HAR-RV (it was the best baseline in Gate 1).
+- improvement = (MAE_HAR-RV - MAE_candidate) / MAE_HAR-RV on the final test rows.
+- CONFIRMED: improvement >= 5% AND the 95% moving-block-bootstrap CI lower bound > 0 for block lengths 24, 48 and 72
+  (2000 resamples, seed 12345, same function as Gate 1).
+- INCONCLUSIVE: improvement >= 5% but the CI lower bound is not > 0 for at least one block length.
+- NOT CONFIRMED: improvement < 5%.
+- This confirms (or not) the candidate-versus-HAR-RV claim of Gate 1 in a period never used for any choice. It does NOT decide which model AtlasQuant ships.
+
+Exploratory (descriptive only)
+- Also reported on the final test: har_x, har_lad, har_x_lad (post-hoc models from the diagnostics), plus QLIKE, RMSE, bias (mean f / mean y - 1)
+  and the share of hours with f < y.
+- These are NOT used to select a model, to change the candidate, or to rescue a verdict. Picking the best of many models on the
+  final test would burn it.
+
+Model choice for the product
+- Decided in a separate risk-management backtest with its own protocol (v1.5), using the walk-forward folds and the validation period only.
+  The criteria there are risk metrics (drawdown, strategy volatility, turnover, costs), not MAE alone, because under-forecasting
+  volatility (bias) is the harmful direction for position sizing.
+- HAR-RV stays the product benchmark whatever the final test says.
+
+## 11. Change log
 | Version | Date | Change | Reason |
 |---|---|---|---|
 | 1.0 | 2026-10-11 | Initial protocol | n/a |
@@ -127,3 +159,5 @@ Gate 1 operational definitions
 | 1.2 | 2026-10-11 | QLIKE definition and forecast floor | Not defined in v1.0; documented after the baseline run, before any candidate result |
 | 1.3 | 2026-10-11 | Candidate model, tuning trials and Gate 1 operational rules (section 9) | Make the candidate and the gate fully specified before any candidate result |
 | 1.3.1 | 2026-10-11 | Record: v1.3 committed AFTER tune/evaluate/gate1 were run | Commit step was skipped; file content unchanged since writing, check file timestamps |
+| 1.3.2 | 2026-10-11 | Post-hoc diagnostics (L1 HAR models, bias) added after Gate 1 | They do not change the verdict or the candidate; they inform the model choice for the product |
+| 1.4 | 2026-10-11 | One-shot final test and confirmation criterion (section 10) | Specified after Gate 1 PASS, before any final-test result |
