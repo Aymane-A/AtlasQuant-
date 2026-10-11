@@ -1,0 +1,52 @@
+{
+  "protocol": "v1.5",
+  "git_commit": "35ade84f321da8c1b6beac31ccba04612bd48ae0",
+  "rule_a_useful": false,
+  "rule_b": {
+    "persistence": {
+      "sharpe_diff_ci95": [
+        -0.2449132350777058,
+        -0.026125537558683753
+      ],
+      "qualifies": false
+    },
+    "rolling_168h": {
+      "sharpe_diff_ci95": [
+        -0.050843282864323394,
+        0.17369836587807594
+      ],
+      "qualifies": false
+    },
+    "har_x": {
+      "sharpe_diff_ci95": [
+        -0.04300091772214149,
+        0.04965012483503657
+      ],
+      "qualifies": false
+    },
+    "har_lad": {
+      "sharpe_diff_ci95": [
+        0.02554769683616942,
+        0.13463382101985738
+      ],
+      "qualifies": true
+    },
+    "har_x_lad": {
+      "sharpe_diff_ci95": [
+        -0.01802374344374416,
+        0.1662781835005397
+      ],
+      "qualifies": false
+    },
+    "candidate": {
+      "sharpe_diff_ci95": [
+        -0.005289403435534539,
+        0.15117902322153548
+      ],
+      "qualifies": false
+    }
+  },
+  "product_forecast": "har_lad",
+  "n_blocks": 909,
+  "cost_main": 0.0015
+}
