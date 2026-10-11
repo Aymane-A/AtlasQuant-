@@ -1,4 +1,4 @@
-# PROTOCOL.md: AtlasQuant volatility experiment (v1.5)
+# PROTOCOL.md: AtlasQuant volatility experiment (v1.6)
 
 Written: 2026-10-11 (before any model result was seen)
 v1.0 commit hash (pre-registration): `bdd5bdce706514f8a9fc87820e2866084e4467aa`
@@ -187,7 +187,44 @@ Decision rules (fixed)
 - Results are reported whatever they are. src/backtest_risk_use.py runs once and refuses a re-run (a re-run is allowed only to fix a
   bug, deleting the decision file on purpose and logging it in the change log).
 
-## 12. Change log
+## 12. Product indicator specification (added in v1.6)
+Decided after the risk backtest (Rule A: no demonstrated risk benefit; Rule B: har_lad), before any product or live result.
+
+What ships
+- Model: "har-lad-v1" = linear regression of RV_next24 on RV_d, RV_w, RV_m fitted with an absolute-error (L1 / LAD) loss on ALL rows
+  available at training time (2020-01-31 to 2026-09-29). Stored as JSON (coefficients, thresholds, calibration), no pickle.
+- It is a volatility INFORMATION indicator. Rule A applies: the API and UI return NO exposure, position size, buy/sell or "protection" claim.
+- No automatic retraining. Any refit creates a new model_version and a new entry in this protocol.
+
+Outputs and definitions
+- forecast.hourly_std: forecast of the std of the next 24 hourly log returns (floored at 1e-6). Not annualized.
+- forecast.move_24h_pct_1sigma: hourly_std * sqrt(24) * 100 (a derived, approximate 1-sigma size of a 24h move; not a prediction of direction).
+- forecast.range_90: [hourly_std * q05, hourly_std * q95], where q05 and q95 are quantiles of y / f over the 5 out-of-sample walk-forward folds.
+- risk.level: low / medium / high = bottom / middle / top third of the in-sample forecast distribution over the training window (p33.3, p66.7).
+  It is RELATIVE to the model's own history, not an absolute danger scale. risk.historical_percentile is the same information on a 0-100 scale.
+- monitoring.persistence and monitoring.har_rv: baseline forecasts returned only so the backend can log them for live comparison.
+- Mandatory wording wherever shown: research indicator based on historical data, can be wrong, not financial advice; show the "as_of" time and the range.
+
+Inputs and validation (service side)
+- At least 721 and at most 2000 closed hourly BTCUSDT candles (UTC, aligned to the hour, unique, ascending after sorting), fields timestamp, high, low, close, volume.
+- Features are computed with the SAME code as training (src/build_features.build); a parity test must pass.
+- Rejected with HTTP 422: not enough candles, duplicate or unaligned timestamps, last candle not closed yet, or features not computable
+  (gaps or zero-volume candles inside the last 24 hours, or more than 5% invalid returns in the 168h / 720h windows).
+- The service is called server-side only (Node/Express). If AI_SERVICE_KEY is set, requests need the X-API-Key header.
+
+Failure behavior
+- If the service is down, slow (timeout) or returns an error, the app shows "forecast unavailable". No forecast is computed in Node
+  (a second implementation would risk training/serving skew). The rest of AtlasQuant keeps working.
+
+Live monitoring (Gate 3 for an indicator; no trades are involved)
+- The backend logs, for every successful forecast: as_of, model_version, inputs, forecast, range_90, risk level, monitoring baselines.
+  24 hours later it logs the realized value RV_next24 computed from the closed candles.
+- Duration: at least 8 weeks. Evaluation uses hourly forecasts with a moving-block bootstrap (24h blocks) for uncertainty.
+- Pass conditions, fixed now: (1) har_lad MAE < persistence MAE; (2) har_lad MAE <= 1.02 x HAR-RV MAE; (3) share of realized values inside
+  range_90 between 80% and 95%; (4) a successful forecast for at least 95% of hours.
+- If any condition fails: mark the indicator "experimental" or hide it, and investigate; do not silently retrain or change thresholds.
+
+## 13. Change log
 | Version | Date | Change | Reason |
 |---|---|---|---|
 | 1.0 | 2026-10-11 | Initial protocol | n/a |
@@ -199,3 +236,6 @@ Decision rules (fixed)
 | 1.4 | 2026-10-11 | One-shot final test and confirmation criterion (section 10) | Specified after Gate 1 PASS, before any final-test result |
 | 1.4.1 | 2026-10-11 | Record: final test ran from commit 7f3709e, CONFIRMED (candidate vs HAR-RV +9.98% MAE) | Outcome recorded; no rule was changed. Final test is now used |
 | 1.5 | 2026-10-11 | Risk-management backtest and model-choice rules (section 11) | Specified before any risk-backtest result |
+| 1.5.1 | 2026-10-11 | Record: risk backtest ran; Rule A = no demonstrated risk benefit; Rule B = har_lad (see results/risk_backtest_decision.json) | Outcome recorded; no rule was changed |
+| 1.6 | 2026-10-11 | Product indicator specification (section 12) | Specified before any product or live result; Rule A means no sizing claims |
+| 1.6.1 | 2026-10-11 | Product fit uses up to 5000 IRLS iterations and records convergence (artifact fields irls_iterations, irls_converged) | verify_lad.py showed the 200-iteration fit used in evaluation had not reached tol 1e-12 on all rows (MAE within ~1e-8 relative of the exact LP on subsamples). Same model family; no result or rule changed |
