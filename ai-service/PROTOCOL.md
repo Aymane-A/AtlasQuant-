@@ -1,4 +1,4 @@
-# PROTOCOL.md: AtlasQuant volatility experiment (v1.9)
+# PROTOCOL.md: AtlasQuant volatility experiment (v1.9.2)
 
 Written: 2026-10-11 (before any model result was seen)
 v1.0 commit hash (pre-registration): `bdd5bdce706514f8a9fc87820e2866084e4467aa`
@@ -285,8 +285,9 @@ section 12 are unchanged.
   Rotating the token is maintenance, not a protocol change; log it in the change log as a record row.
 - If the Worker fails (401/403/404/422 or Cloudflare outage), no hand-made runs are added to repair it; availability just goes down
   (same rule as other interruptions). Manual runs made for testing are marked in the change log.
-- Run #2 ("Manually run by Aymane-A", 2026-10-12 01:37 local time) was a manual test made before the Worker cron existed. Run #4
-  (2026-10-12 10:05 UTC) was the first run started by the Worker.
+- Run #2 ("Manually run by Aymane-A", 2026-10-12 00:37 UTC) was a manual test made before the Worker cron existed. Run #4
+  (2026-10-12 11:05 UTC) was the first run started by the Worker; the 10:05 UTC slot produced no run.
+- Start date and availability budget (v1.9.2): the trigger change does NOT reset the monitoring start. The first logged hour stays as it is (2026-10-10 22:00 UTC, from the first run's backfill). Condition 4 allows about 5% of hours missed (about 67 of 1344 over 56 days). Hours not logged live before the Worker's first run (11:05 UTC on 2026-10-12) stay counted against that budget and are never repaired. The earliest possible verdict date stays 2026-12-07. When this was decided, only the availability figure of evaluate_live (9.1%) had been seen; no accuracy metric had been examined.
 
 ## 14. Change log
 | Version | Date | Change | Reason |
@@ -306,4 +307,6 @@ section 12 are unchanged.
 | 1.7 | 2026-10-11 | Live paper-monitoring procedure (section 13) | Implementation details of the Gate 3 plan; specified before the first live forecast was logged |
 | 1.8 | 2026-10-12 | Runner moved from a developer PC (Task Scheduler) to GitHub Actions; logs committed by the workflow (section 13) | The PC cannot stay on 24/7 for 8 weeks; decided BEFORE the first live forecast was logged. No model, window, metric, threshold or condition changed |
 | 1.8.1 | 2026-10-12 | Model hash computed over LF-normalised bytes; a6efc42f99f5 declared equivalent to 7d5796e6d449 (CRLF checkout of the same file) | evaluate_live warned about two model files after the first GitHub run. Cause: Windows checkout (autocrlf=true) vs Linux, verified by hash equality after normalisation. No model, window, metric, threshold or condition changed; no logged row modified |
-| 1.9 | 2026-10-12 | Runs also started by a Cloudflare Worker cron (`5 * * * *` UTC) via workflow_dispatch; GitHub schedule kept (section 13) | GitHub scheduled runs are late or skipped; the external trigger targets better availability. Record: the original 1.8 entry existed twice with different wording in an earlier draft; one entry kept, same change. No model, window, metric, threshold or condition changed; no logged row modified || 1.9.1 | 2026-10-12 | Record: v1.9 was first pushed (commit ade8cfe) with three unfilled placeholders and one stray line in section 13; completed in the next commit (GitHub schedule kept, budget wording, token dates) | Editing slip, no result was involved. No model, window, metric, threshold or condition changed; no logged row modified |
+| 1.9 | 2026-10-12 | Runs also started by a Cloudflare Worker cron (`5 * * * *` UTC) via workflow_dispatch; GitHub schedule kept (section 13) | GitHub scheduled runs are late or skipped; the external trigger targets better availability. Record: the original 1.8 entry existed twice with different wording in an earlier draft; one entry kept, same change. No model, window, metric, threshold or condition changed; no logged row modified
+| 1.9.1 | 2026-10-12 | Record: v1.9 was first pushed (commit ade8cfe) with three unfilled placeholders and one stray line in section 13; completed in the next commit (GitHub schedule kept, budget wording, token dates) | Editing slip, no result was involved. No model, window, metric, threshold or condition changed; no logged row modified |
+| 1.9.2 | 2026-10-12 | Record corrections: run #2 time given in UTC (00:37, not 01:37 local); first Worker run is #4 at 11:05 UTC (not 10:05, that slot produced no run); change-log rows 1.9 and 1.9.1 were on one line and are split; start-date and availability-budget statement added (section 13) | Errors found by comparing the text with run_log.csv and the GitHub Actions list. No model, window, metric, threshold or condition changed; no logged row modified |
