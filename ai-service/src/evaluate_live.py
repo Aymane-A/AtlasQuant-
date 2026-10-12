@@ -27,6 +27,8 @@ MAX_RATIO_VS_HAR = 1.02
 COVERAGE_RANGE = (0.80, 0.95)
 MIN_AVAILABILITY = 0.95
 MIN_ROWS_FOR_CI = 200
+# v1.8.1: same model file, hashed with CRLF line endings by the first PC run
+EQUIVALENT_HASHES = {"a6efc42f99f5": "7d5796e6d449"}
 
 
 def evaluate(fc: pd.DataFrame, candles: pd.DataFrame) -> dict:
@@ -51,7 +53,7 @@ def evaluate(fc: pd.DataFrame, candles: pd.DataFrame) -> dict:
         "rows_backfill": int((fc["source"] == "backfill").sum()),
         "rows_without_realized_yet_or_invalid": int(len(fc) - len(done)),
         "availability_live": availability,
-        "model_hashes": sorted(set(fc["model_sha256"].astype(str))) if "model_sha256" in fc else [],
+        "model_hashes": sorted({EQUIVALENT_HASHES.get(h, h) for h in fc["model_sha256"].astype(str)}) if "model_sha256" in fc else [],
     }
     if len(done) == 0:
         res["status"] = "no realized values yet (the first targets need 25 hours)"

@@ -105,3 +105,10 @@ def test_availability_drops_when_hours_are_missing():
     res = evaluate_live.evaluate(fc, candles)
     assert res["availability_live"] < 0.95
     assert res["conditions"]["4_availability_95"] is False
+
+
+def test_crlf_hash_is_treated_as_same_model():
+    fc, candles, _ = _synthetic_live(days=30)
+    fc.loc[fc.index[:5], "model_sha256"] = "a6efc42f99f5"
+    fc.loc[fc.index[5:], "model_sha256"] = "7d5796e6d449"
+    assert evaluate_live.evaluate(fc, candles)["model_hashes"] == ["7d5796e6d449"]

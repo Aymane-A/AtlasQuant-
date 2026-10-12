@@ -47,7 +47,8 @@ def fetch_candles() -> list:
 
 
 def artifact_sha() -> str:
-    return hashlib.sha256(ARTIFACT_PATH.read_bytes()).hexdigest()[:12]
+    """SHA-256 (first 12 hex) of the model file, CRLF normalised to LF (PROTOCOL v1.8.1)."""
+    return hashlib.sha256(ARTIFACT_PATH.read_bytes().replace(b"\r\n", b"\n")).hexdigest()[:12]
 
 
 def _row(out: dict, source: str, sha: str, logged_at: str) -> dict:

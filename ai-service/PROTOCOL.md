@@ -1,4 +1,4 @@
-# PROTOCOL.md: AtlasQuant volatility experiment (v1.8)
+# PROTOCOL.md: AtlasQuant volatility experiment (v1.8.1)
 
 Written: 2026-10-11 (before any model result was seen)
 v1.0 commit hash (pre-registration): `bdd5bdce706514f8a9fc87820e2866084e4467aa`
@@ -245,6 +245,12 @@ Runner
 - The workflow commits candles.csv, forecasts.csv and run_log.csv to the repository after every run; the git history is the audit trail
   (commit timestamps are GitHub's, not editable by the logger). Rows already logged are never rewritten or deleted.
 - No retraining. If model_sha256 changes during monitoring, the monitoring restarts under a new model_version.
+- Hash definition (v1.8.1): model_sha256 is the SHA-256 (first 12 hex chars) of the model file with CRLF line endings normalised to LF,
+  so Windows and Linux runners report the same value. The first run (25 rows, logged 2026-10-11 23:20 UTC on a Windows PC with git
+  autocrlf=true) recorded a6efc42f99f5, the hash of the CRLF checkout. The GitHub Actions runner recorded 7d5796e6d449, the hash of the
+  committed LF file. After normalisation both are 7d5796e6d449 (verified 2026-10-12 by comparing git show HEAD:<file> with the working file).
+  It is the same model, identical except for line endings, so no restart under a new model_version is required. Logged rows are never
+  rewritten; src/evaluate_live.py maps a6efc42f99f5 to 7d5796e6d449 when it checks for several model files.
 
 Evaluation (src/evaluate_live.py, Gate 3 conditions of section 12)
 - Run locally after `git pull`. Realized value = RV_next24 computed from the stored candles with src.build_features.build
@@ -277,4 +283,5 @@ Evaluation (src/evaluate_live.py, Gate 3 conditions of section 12)
 | 1.6.1 | 2026-10-11 | Product fit uses up to 5000 IRLS iterations and records convergence (artifact fields irls_iterations, irls_converged) | verify_lad.py showed the 200-iteration fit used in evaluation had not reached tol 1e-12 on all rows (MAE within ~1e-8 relative of the exact LP on subsamples). Same model family; no result or rule changed |
 | 1.7 | 2026-10-11 | Live paper-monitoring procedure (section 13) | Implementation details of the Gate 3 plan; specified before the first live forecast was logged |
 | 1.8 | 2026-10-12 | Runner moved from a developer PC (Task Scheduler) to GitHub Actions; logs committed by the workflow (section 13) | The PC cannot stay on 24/7 for 8 weeks; decided BEFORE the first live forecast was logged. No model, window, metric, threshold or condition changed |
+| 1.8.1 | 2026-10-12 | Model hash computed over LF-normalised bytes; a6efc42f99f5 declared equivalent to 7d5796e6d449 (CRLF checkout of the same file) | evaluate_live warned about two model files after the first GitHub run. Cause: Windows checkout (autocrlf=true) vs Linux, verified by hash equality after normalisation. No model, window, metric, threshold or condition changed; no logged row modified |
 | 1.8 | 2026-10-12 | Runner moved from a developer PC (Task Scheduler) to GitHub Actions; logs committed by the workflow (section 13) | The PC cannot stay on 24/7 for 8 weeks. Decided after one manual first run (25 rows) but before any realized value or evaluation output existed. No model, window, metric, threshold or condition changed |
