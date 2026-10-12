@@ -1,4 +1,4 @@
-# PROTOCOL.md: AtlasQuant volatility experiment (v1.8.1)
+# PROTOCOL.md: AtlasQuant volatility experiment (v1.9)
 
 Written: 2026-10-11 (before any model result was seen)
 v1.0 commit hash (pre-registration): `bdd5bdce706514f8a9fc87820e2866084e4467aa`
@@ -224,7 +224,7 @@ Live monitoring (Gate 3 for an indicator; no trades are involved)
   range_90 between 80% and 95%; (4) a successful forecast for at least 95% of hours.
 - If any condition fails: mark the indicator "experimental" or hide it, and investigate; do not silently retrain or change thresholds.
 
-## 13. Live paper-monitoring procedure (added in v1.7, runner changed in v1.8)
+## 13. Live paper-monitoring procedure (added in v1.7, runner changed in v1.8, trigger changed in v1.9)
 Implementation details of the Gate 3 plan in section 12. The v1.7 procedure was written before any live forecast. One manual first run
 (25 rows: 1 live + 24 backfill, as_of 2026-10-11 22:00 UTC, logged 2026-10-11 23:20 UTC) was executed on the developer PC before v1.8
 was committed; no evaluation output had been seen. That run stays in the log and counts as the start of the monitoring.
@@ -266,6 +266,28 @@ Evaluation (src/evaluate_live.py, Gate 3 conditions of section 12)
 - Any change to cadence, windows, runner or rules requires a new protocol version. Interruptions (workflow disabled by GitHub,
   Binance outage) are NOT repaired by hand-editing logs; they simply lower availability.
 
+### External trigger (added in v1.9)
+v1.9 changes only WHAT STARTS the runner. src/paper_log.py, the frozen model, the windows, the metrics and the four conditions of
+section 12 are unchanged.
+
+- Trigger: Cloudflare Worker `atlasquant-cron` (Cron Trigger `5 * * * *`, UTC) calls the GitHub API `workflow_dispatch` on
+  paper-log.yml, ref `main`. These runs appear in GitHub as "Manually run by Aymane-A".
+- Reason: GitHub cron is best-effort (observed: scheduled run #3 started about 10 minutes after :05, with gaps of about 1 hour
+  possible). An external trigger is expected to improve condition 4 (availability). It is still measured, never corrected afterwards.
+- Both triggers: the GitHub `schedule` trigger is kept alongside the Worker (both start the same workflow). Runs are not
+  deduplicated by hand. If both fire for the same hour, the logger's rule of unique as_of applies, and logged rows are never
+  rewritten or deleted.
+- Budget: GitHub Actions usage is about 25-30 s per run, 24 runs per day, roughly 10-12 minutes per day, far below the free-plan
+  monthly allowance. Usage is checked in the GitHub billing page during monitoring; hitting a limit counts as an interruption.
+- Secret: `GITHUB_TOKEN` stored as a Cloudflare Worker secret (never in the repo). Fine-grained token, repo `AtlasQuant-`,
+  permission `Actions: Read and write`, lifetime 90 days.
+  Created: 2026-10-12. Expires: 2027-01-10. Renewal reminder: 2027-01-03 (7 days before expiry).
+  Rotating the token is maintenance, not a protocol change; log it in the change log as a record row.
+- If the Worker fails (401/403/404/422 or Cloudflare outage), no hand-made runs are added to repair it; availability just goes down
+  (same rule as other interruptions). Manual runs made for testing are marked in the change log.
+- Run #2 ("Manually run by Aymane-A", 2026-10-12 01:37 local time) was a manual test made before the Worker cron existed. Run #4
+  (2026-10-12 10:05 UTC) was the first run started by the Worker.
+
 ## 14. Change log
 | Version | Date | Change | Reason |
 |---|---|---|---|
@@ -284,4 +306,4 @@ Evaluation (src/evaluate_live.py, Gate 3 conditions of section 12)
 | 1.7 | 2026-10-11 | Live paper-monitoring procedure (section 13) | Implementation details of the Gate 3 plan; specified before the first live forecast was logged |
 | 1.8 | 2026-10-12 | Runner moved from a developer PC (Task Scheduler) to GitHub Actions; logs committed by the workflow (section 13) | The PC cannot stay on 24/7 for 8 weeks; decided BEFORE the first live forecast was logged. No model, window, metric, threshold or condition changed |
 | 1.8.1 | 2026-10-12 | Model hash computed over LF-normalised bytes; a6efc42f99f5 declared equivalent to 7d5796e6d449 (CRLF checkout of the same file) | evaluate_live warned about two model files after the first GitHub run. Cause: Windows checkout (autocrlf=true) vs Linux, verified by hash equality after normalisation. No model, window, metric, threshold or condition changed; no logged row modified |
-| 1.8 | 2026-10-12 | Runner moved from a developer PC (Task Scheduler) to GitHub Actions; logs committed by the workflow (section 13) | The PC cannot stay on 24/7 for 8 weeks. Decided after one manual first run (25 rows) but before any realized value or evaluation output existed. No model, window, metric, threshold or condition changed |
+| 1.9 | 2026-10-12 | Runs also started by a Cloudflare Worker cron (`5 * * * *` UTC) via workflow_dispatch; GitHub schedule kept (section 13) | GitHub scheduled runs are late or skipped; the external trigger targets better availability. Record: the original 1.8 entry existed twice with different wording in an earlier draft; one entry kept, same change. No model, window, metric, threshold or condition changed; no logged row modified |
