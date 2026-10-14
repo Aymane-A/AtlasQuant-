@@ -1,0 +1,31 @@
+{
+  "first_as_of": "2026-10-10T22:00:00+00:00",
+  "last_as_of": "2026-10-13T22:00:00+00:00",
+  "rows_logged": 73,
+  "rows_live": 40,
+  "rows_backfill": 33,
+  "rows_without_realized_yet_or_invalid": 24,
+  "availability_live": 0.547945205479452,
+  "model_hashes": [
+    "7d5796e6d449"
+  ],
+  "rows_evaluated": 49,
+  "span_days": 2.0,
+  "mae_har_lad": 0.0007678050787162541,
+  "mae_persistence": 0.0013799510822546572,
+  "mae_har_rv": 0.0005476613137997623,
+  "improvement_vs_persistence": 0.44359978510124987,
+  "ratio_vs_har_rv": 1.4019706328882333,
+  "coverage_range_90": 1.0,
+  "bias": -0.204053752748815,
+  "qlike_har_lad": 0.17498540469363671,
+  "qlike_har_rv": 0.08016812510329045,
+  "share_forecast_below_realized": 0.8979591836734694,
+  "conditions": {
+    "1_beats_persistence": true,
+    "2_not_worse_than_1.02x_har_rv": false,
+    "3_coverage_80_95": false,
+    "4_availability_95": false
+  },
+  "verdict": "INTERIM (2.0 of 56 days; no verdict yet, do not stop early)"
+}
