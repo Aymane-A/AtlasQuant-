@@ -25,18 +25,42 @@ async function placeOrder(req, res) {
   if (!exchangeId || !symbol || !side || !quantity)
     return res.status(400).json({ success:false, error:'exchangeId, symbol, side, quantity required' });
 
+  // ── Input validation (this endpoint can send REAL orders in live mode) ──
+  const sideNorm = String(side).toLowerCase();
+  if (!['buy', 'sell'].includes(sideNorm))
+    return res.status(400).json({ success:false, error:"side must be 'buy' or 'sell'" });
+  if (!['market', 'limit'].includes(orderType))
+    return res.status(400).json({ success:false, error:"orderType must be 'market' or 'limit'" });
+
+  const qty = Number(quantity);
+  if (!Number.isFinite(qty) || qty <= 0)
+    return res.status(400).json({ success:false, error:'quantity must be a positive number' });
+
+  if (typeof symbol !== 'string' || !/^[A-Za-z0-9._\-\/]{1,30}$/.test(symbol))
+    return res.status(400).json({ success:false, error:'invalid symbol' });
+
+  if (orderType === 'limit') {
+    const lp = Number(price);
+    if (!Number.isFinite(lp) || lp <= 0)
+      return res.status(400).json({ success:false, error:'limit orders require a positive price' });
+  }
+  for (const [name, v] of [['stopLoss', stopLoss], ['takeProfit', takeProfit]]) {
+    if (v !== undefined && v !== null && v !== '' && (!Number.isFinite(Number(v)) || Number(v) <= 0))
+      return res.status(400).json({ success:false, error:`${name} must be a positive number` });
+  }
+
   // Sanity-check the bracket against the intended direction so a bad UI
   // value can't accidentally submit a nonsensical SL/TP to the exchange.
   if (stopLoss || takeProfit) {
     const refPrice = orderType === 'market' ? null : parseFloat(price);
     if (refPrice) {
-      if (side === 'buy'  && stopLoss   && parseFloat(stopLoss)   >= refPrice)
+      if (sideNorm === 'buy'  && stopLoss   && parseFloat(stopLoss)   >= refPrice)
         return res.status(400).json({ success:false, error:'Stop-loss must be below entry price for a buy order' });
-      if (side === 'buy'  && takeProfit && parseFloat(takeProfit) <= refPrice)
+      if (sideNorm === 'buy'  && takeProfit && parseFloat(takeProfit) <= refPrice)
         return res.status(400).json({ success:false, error:'Take-profit must be above entry price for a buy order' });
-      if (side === 'sell' && stopLoss   && parseFloat(stopLoss)   <= refPrice)
+      if (sideNorm === 'sell' && stopLoss   && parseFloat(stopLoss)   <= refPrice)
         return res.status(400).json({ success:false, error:'Stop-loss must be above entry price for a sell order' });
-      if (side === 'sell' && takeProfit && parseFloat(takeProfit) >= refPrice)
+      if (sideNorm === 'sell' && takeProfit && parseFloat(takeProfit) >= refPrice)
         return res.status(400).json({ success:false, error:'Take-profit must be below entry price for a sell order' });
     }
   }
@@ -67,14 +91,20 @@ async function placeOrder(req, res) {
             );
             fillPrice = parseFloat(r.data.price);
           }
-        } catch { fillPrice = price || 0; }
+        } catch { fillPrice = price; }
+      }
+      // A paper fill at price 0 (or NaN) would create a nonsensical position
+      // and corrupt P&L — fail the order instead of guessing.
+      fillPrice = Number(fillPrice);
+      if (!Number.isFinite(fillPrice) || fillPrice <= 0) {
+        return res.status(502).json({ success:false, error:'Could not fetch a market price for this symbol. Try again shortly.' });
       }
 
       const trade = await exchangesSvc.openPaperTrade(userId, exchangeId, {
         symbol:      symbol.toUpperCase(),
-        side,
+        side:        sideNorm,
         orderType,
-        quantity:    parseFloat(quantity),
+        quantity:    qty,
         price:       fillPrice,
         limitPrice:  orderType === 'limit' ? parseFloat(price) : null,
         stopLoss:    stopLoss   ? parseFloat(stopLoss)   : null,
@@ -92,7 +122,7 @@ async function placeOrder(req, res) {
     // ── Live mode ──
     const result = await exchangesSvc.placeLiveOrder(exchangeId, creds, {
       symbol: symbol.toUpperCase(),
-      side, type: orderType, quantity: parseFloat(quantity), price,
+      side: sideNorm, type: orderType, quantity: qty, price,
       stopLoss:   stopLoss   ? parseFloat(stopLoss)   : undefined,
       takeProfit: takeProfit ? parseFloat(takeProfit) : undefined,
     });
@@ -100,10 +130,10 @@ async function placeOrder(req, res) {
     // Audit log
     await db.query(
       `INSERT INTO live_orders
-         (user_id, exchange_id, exchange_order_id, symbol, side, order_type, quantity, price, stop_loss, take_profit, status, raw_response)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+         (user_id, exchange_id, exchange_order_id, symbol, side, order_type, quantity, price, stop_loss, take_profit, status, raw_response, signal_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
       [userId, exchangeId, result.exchangeOrderId, symbol.toUpperCase(),
-       side, orderType, quantity, price || null,
+       sideNorm, orderType, qty, price || null,
        stopLoss || null, takeProfit || null,
        result.status || 'submitted', JSON.stringify(result.raw),
        signalId ? parseInt(signalId, 10) : null]

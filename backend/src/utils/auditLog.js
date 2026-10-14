@@ -10,7 +10,7 @@ const logger = require('./logger');
 const EVENT_TYPES = [
   'login_success', 'login_failed', 'password_changed',
   '2fa_enabled', '2fa_disabled', 'api_key_created', 'api_key_revoked',
-  'email_changed',
+  'email_changed', 'login_2fa_failed', '2fa_backup_code_used',
 ];
 
 async function logAuditEvent(userId, eventType, req, metadata = null) {

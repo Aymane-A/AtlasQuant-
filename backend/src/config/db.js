@@ -23,7 +23,11 @@ function buildPoolConfig() {
   if (url && url.startsWith('postgres')) {
     return {
       connectionString: url,
-      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+      ssl: process.env.NODE_ENV === 'production'
+        // Set DB_SSL_REJECT_UNAUTHORIZED=false only if your provider uses a
+        // self-signed cert. Default is to VERIFY the server certificate.
+        ? { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false' }
+        : false,
     };
   }
   const host     = process.env.DB_HOST     || 'localhost';
@@ -325,31 +329,6 @@ async function migrate() {
     );
   `);
 
-  // ── Triggers ──────────────────────────────────────────────
-  await pool.query(`
-    CREATE OR REPLACE FUNCTION set_updated_at()
-    RETURNS TRIGGER LANGUAGE plpgsql AS $$
-    BEGIN NEW.updated_at = NOW(); RETURN NEW; END;
-    $$;
-  `);
-
-  for (const [trig, tbl] of [
-    ['trg_portfolio_updated_at',   'portfolio'],
-    ['trg_accounts_updated_at',    'accounts'],
-    ['trg_live_orders_updated_at', 'live_orders'],
-    ['trg_atc_updated_at', 'auto_trade_configs'],
-  ]) {
-    await pool.query(`
-      DO $$ BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '${trig}') THEN
-          CREATE TRIGGER ${trig}
-            BEFORE UPDATE ON ${tbl}
-            FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-        END IF;
-      END $$;
-    `);
-  }
-
   // ── Incremental migrations ────────────────────────────────
   await pool.query(`
     ALTER TABLE alerts ADD COLUMN IF NOT EXISTS condition        TEXT    NOT NULL DEFAULT 'above';
@@ -577,6 +556,35 @@ async function migrate() {
     CREATE INDEX IF NOT EXISTS idx_paper_trades_signal ON paper_trades(signal_id) WHERE signal_id IS NOT NULL;
   `);
 
+  // ✅ Fix: triggers created AFTER all tables exist. Previously this loop ran
+  // before auto_trade_configs was created (it's created in the incremental
+  // block), so on an empty database CREATE TRIGGER threw and aborted the
+  // whole migration before the remaining tables/columns were created.
+  // ── Triggers ──────────────────────────────────────────────
+  await pool.query(`
+    CREATE OR REPLACE FUNCTION set_updated_at()
+    RETURNS TRIGGER LANGUAGE plpgsql AS $$
+    BEGIN NEW.updated_at = NOW(); RETURN NEW; END;
+    $$;
+  `);
+
+  for (const [trig, tbl] of [
+    ['trg_portfolio_updated_at',   'portfolio'],
+    ['trg_accounts_updated_at',    'accounts'],
+    ['trg_live_orders_updated_at', 'live_orders'],
+    ['trg_atc_updated_at', 'auto_trade_configs'],
+  ]) {
+    await pool.query(`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '${trig}') THEN
+          CREATE TRIGGER ${trig}
+            BEFORE UPDATE ON ${tbl}
+            FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+        END IF;
+      END $$;
+    `);
+  }
+
   // ✅ Fix critique: 'notifications' était créée en BOOLEAN dans les
   // installations existantes, alors que settings.controller.js y écrit/lit
   // un objet JSON ({email_alerts, push_alerts, price_alerts}). Toute
@@ -625,13 +633,20 @@ async function migrate() {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_sessions_user ON user_sessions(user_id) WHERE revoked_at IS NULL;
     CREATE INDEX IF NOT EXISTS idx_apikeys_user   ON api_keys(user_id)     WHERE revoked_at IS NULL;
+    -- used by protect() to check revocation on every authenticated request
+    CREATE INDEX IF NOT EXISTS idx_sessions_hash  ON user_sessions(refresh_hash);
   `);
 
   logger.info('[db] ✅ Tables PostgreSQL prêtes');
 }
 
-migrate().catch((err) => {
+// `ready` resolves once migrations are done; app.js awaits it before starting
+// cron jobs and websockets. The catch keeps the process alive (and logs) on
+// failure, but re-throws so awaiting callers know the schema is not ready.
+const ready = migrate().catch((err) => {
   logger.error(`[db] Migration failed: ${err.message}`);
+  throw err;
 });
+ready.catch(() => {}); // avoid an unhandledRejection if nobody awaits it
 
-module.exports = { query, getClient, pool };
+module.exports = { query, getClient, pool, ready };

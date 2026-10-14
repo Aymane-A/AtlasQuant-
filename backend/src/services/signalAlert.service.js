@@ -4,6 +4,7 @@
  */
 
 const db                    = require('../config/db');
+const APP_URL = require('../config/env').FRONTEND_URL;
 const logger                = require('../utils/logger');
 const { sendAlertEmail }    = require('./email.service');
 const { sendTelegramAlert } = require('./telegram.service');
@@ -85,7 +86,7 @@ async function sendSignalEmail({ to, symbol, signal, confidence, entry, stop_los
         ${risk_reward ? `<div class="row"><span class="label">Risk/Reward</span><span class="value">${risk_reward}</span></div>` : ''}
         ${reasoning   ? `<div class="reasoning">💡 ${reasoning}</div>` : ''}
         <div class="cta">
-          <a href="http://localhost:3000/signals" class="btn">View Full Signal →</a>
+          <a href="${APP_URL}/signals" class="btn">View Full Signal →</a>
         </div>
       </div>
       <div class="footer">AtlasQuant AI · This is an automated AI signal, not financial advice.</div>
@@ -125,7 +126,7 @@ async function sendSignalTelegram({ symbol, signal, confidence, entry, stop_loss
     risk_reward ? `*R:R:* \`${risk_reward}\`` : null,
     reasoning   ? `\n💡 _${reasoning.slice(0, 200)}..._` : null,
     ``,
-    `[Open AtlasQuant](http://localhost:3000/signals)`,
+    `[Open AtlasQuant](${APP_URL}/signals)`,
   ].filter(Boolean).join('\n');
 
   const res = await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {

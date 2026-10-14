@@ -24,9 +24,14 @@ export function AuthProvider({ children }) {
   }, []);
 
   // ── Login ─────────────────────────────────────────────
-  const login = useCallback(async (email, password) => {
+  // `twofa` is optional: { totp } or { backupCode }. When the account has 2FA
+  // enabled and no code is given, the server answers { requires2FA: true }
+  // WITHOUT a token — in that case nothing is stored and the caller must ask
+  // the user for a code and call login() again.
+  const login = useCallback(async (email, password, twofa = {}) => {
     setError(null);
-    const res = await authAPI.login(email, password);
+    const res = await authAPI.login(email, password, twofa);
+    if (res.data.requires2FA) return res.data;
     localStorage.setItem('aq_token', res.data.token);
     setUser(res.data.user);
     return res.data;

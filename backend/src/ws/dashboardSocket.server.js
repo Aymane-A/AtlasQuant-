@@ -21,6 +21,7 @@
 const { WebSocketServer } = require('ws');
 const jwt    = require('jsonwebtoken');
 const env    = require('../config/env');
+const { isSessionRevoked } = require('../middleware/auth.middleware');
 const logger = require('../utils/logger');
 const { buildDashboardPayload } = require('../services/dashboardData.service');
 
@@ -49,6 +50,17 @@ function startDashboardSocket() {
     } catch (err) {
       logger.warn(`[dashboardSocket] Invalid token: ${err.message}`);
       socket.close(4001, 'Invalid or expired token');
+      return;
+    }
+
+    try {
+      if (await isSessionRevoked(decoded.id, token)) {
+        socket.close(4001, 'Session revoked');
+        return;
+      }
+    } catch (err) {
+      logger.error(`[dashboardSocket] Session check failed: ${err.message}`);
+      socket.close(1011, 'Auth unavailable');
       return;
     }
 

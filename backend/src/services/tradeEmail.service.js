@@ -8,6 +8,7 @@
  */
 
 const nodemailer = require('nodemailer');
+const APP_URL = require('../config/env').FRONTEND_URL;
 const logger     = require('../utils/logger');
 
 const transporter = nodemailer.createTransport({
@@ -85,7 +86,7 @@ async function sendTradeEmail(to, { symbol, side, price, reason, pnl, pnlPct }) 
           ${reasonLabel && !isOpen ? row('Closed by', reasonLabel) : ''}
         </table>
         <div style="text-align:center;margin-top:26px">
-          <a href="http://localhost:3000/paper-trading" style="display:inline-block;padding:13px 32px;border-radius:10px;background:${accent};color:#06060f;font-size:14px;font-weight:700;text-decoration:none">View Paper Trading →</a>
+          <a href="${APP_URL}/paper-trading" style="display:inline-block;padding:13px 32px;border-radius:10px;background:${accent};color:#06060f;font-size:14px;font-weight:700;text-decoration:none">View Paper Trading →</a>
         </div>
       </div>
 

@@ -4,14 +4,42 @@ function optional(key, defaultValue = "") {
   return process.env[key] || defaultValue;
 }
 
+const NODE_ENV      = optional("NODE_ENV", "development");
+const IS_PRODUCTION = NODE_ENV === "production";
+
+// JWT_SECRET: no silent fallback in production. A missing/weak secret means
+// anyone can forge valid tokens, so we refuse to start instead.
+let JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  if (IS_PRODUCTION) {
+    throw new Error("[env] JWT_SECRET is required in production (use 32+ random chars).");
+  }
+  JWT_SECRET = "dev-secret-change-in-production";
+  console.warn("[env] JWT_SECRET not set — using an insecure dev secret (development only).");
+} else if (IS_PRODUCTION && JWT_SECRET.length < 32) {
+  throw new Error("[env] JWT_SECRET is too short for production (min 32 chars).");
+}
+
 module.exports = {
   PORT:      optional("PORT", "5000"),
-  NODE_ENV:  optional("NODE_ENV", "development"),
-  IS_DEV:    optional("NODE_ENV", "development") === "development",
+  NODE_ENV,
+  IS_DEV:        NODE_ENV === "development",
+  IS_PRODUCTION,
 
-  MONGODB_URI:        optional("MONGODB_URI", "mongodb://localhost:27017/atlasquant"),
-  JWT_SECRET:         optional("JWT_SECRET", "dev-secret-change-in-production"),
-  JWT_EXPIRES_IN:     optional("JWT_EXPIRES_IN", "7d"),
+  // Public URL of the frontend. Used for links in emails/Telegram, CORS, CSP.
+  FRONTEND_URL: optional("FRONTEND_URL", "http://localhost:3000").replace(/\/+$/, ""),
+  // Extra allowed CORS origins (comma-separated).
+  ALLOWED_ORIGINS: optional("ALLOWED_ORIGINS").split(",").map(s => s.trim()).filter(Boolean),
+  // Set to a number of proxy hops (e.g. 1 behind nginx/Render) or "true".
+  TRUST_PROXY: optional("TRUST_PROXY", ""),
+
+  JWT_SECRET,
+  JWT_EXPIRES_IN: optional("JWT_EXPIRES_IN", "7d"),
+  // How long after expiry a token may still be exchanged at /auth/refresh.
+  REFRESH_GRACE_SECONDS: parseInt(optional("REFRESH_GRACE_SECONDS", "86400"), 10),
+
+  API_RATE_LIMIT_MAX:      parseInt(optional("API_RATE_LIMIT_MAX", "500"), 10),
+  BACKTEST_RATE_LIMIT_MAX: parseInt(optional("BACKTEST_RATE_LIMIT_MAX", "20"), 10),
 
   BINANCE_API_KEY:    optional("BINANCE_API_KEY"),
   BINANCE_API_SECRET: optional("BINANCE_API_SECRET"),

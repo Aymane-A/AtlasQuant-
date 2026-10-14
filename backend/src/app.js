@@ -21,6 +21,12 @@ const { startDashboardSocket } = require('./ws/dashboardSocket.server');
 const { attachUpgradeRouter } = require('./ws/upgradeRouter');
 const app = express();
 
+// Behind a reverse proxy (nginx, Render, Heroku...) req.ip is the proxy's IP
+// unless trust proxy is set — which makes every user share one rate-limit bucket.
+if (env.TRUST_PROXY) {
+    app.set('trust proxy', env.TRUST_PROXY === 'true' ? true : (Number.isNaN(Number(env.TRUST_PROXY)) ? env.TRUST_PROXY : Number(env.TRUST_PROXY)));
+}
+
 // ── 1. Security & Middlewares ─────────────────────────────
 app.use(helmet({
     crossOriginResourcePolicy: false,
@@ -31,7 +37,12 @@ app.use(helmet({
             styleSrc:   ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
             fontSrc:    ["'self'", "https://fonts.gstatic.com"],
             imgSrc:     ["'self'", "data:", "blob:"],
-            connectSrc: ["'self'", "http://localhost:5000", "http://localhost:3000", "ws://localhost:5000"],
+            connectSrc: [
+                "'self'",
+                env.FRONTEND_URL,
+                ...env.ALLOWED_ORIGINS,
+                ...(env.IS_PRODUCTION ? [] : ["http://localhost:5000", "ws://localhost:5000"]),
+            ],
         }
     }
 }));
@@ -42,9 +53,9 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cors({
     origin: (origin, cb) => {
         const allowed = [
-            'http://localhost:3000',
-            'http://localhost:4173',
-            ...(process.env.ALLOWED_ORIGINS?.split(',') || []),
+            env.FRONTEND_URL,
+            ...(env.IS_PRODUCTION ? [] : ['http://localhost:3000', 'http://localhost:4173']),
+            ...env.ALLOWED_ORIGINS,
         ];
         if (!origin || allowed.includes(origin)) return cb(null, true);
         cb(new Error('CORS blocked'));
@@ -57,13 +68,13 @@ app.use(morgan('[:method] :url :status :response-time ms'));
 // ── 2. Rate Limiters ──────────────────────────────────────
 const apiLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max:      500,
+    max:      env.API_RATE_LIMIT_MAX,
     message:  { success: false, error: 'Too many requests, slow down!' },
 });
 
 const backtestLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max:      20,
+    max:      env.BACKTEST_RATE_LIMIT_MAX,
     message:  { success: false, error: 'Too many backtest requests' },
 });
 
@@ -120,8 +131,11 @@ app.use((req, res) => {
 
 // ── 6. Global Error Handler ───────────────────────────────
 app.use((err, req, res, next) => {
+    const status = err.status || 500;
     logger.error(`[app] Error: ${err.message}`);
-    res.status(err.status || 500).json({ success: false, error: err.message });
+    // Don't leak internals (SQL errors, stack hints...) on 5xx in production.
+    const message = status >= 500 && env.IS_PRODUCTION ? 'Internal server error' : err.message;
+    res.status(status).json({ success: false, error: message });
 });
 
 // ── 7. Server Start ───────────────────────────────────────
@@ -133,6 +147,9 @@ const server = app.listen(env.PORT, async () => {
     try {
         await db.query('SELECT NOW()');
         logger.info(' Database: ✅ Connected (PostgreSQL)');
+
+        // Cron jobs/queries must not start before the schema is ready.
+        await db.ready;
 
         initCronJobs();
         logger.info(' Cron Engine: ✅ Initialized & Active');

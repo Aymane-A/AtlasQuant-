@@ -4,7 +4,8 @@
   "main": "src/app.js",
   "scripts": {
     "start": "node src/app.js",
-    "dev": "node --max-old-space-size=4096 node_modules/nodemon/bin/nodemon.js src/app.js"
+    "dev": "node --max-old-space-size=4096 node_modules/nodemon/bin/nodemon.js src/app.js",
+    "test": "node --test tests/security.test.js"
   },
   "dependencies": {
     "archiver": "^8.0.0",
@@ -17,18 +18,13 @@
     "express-rate-limit": "^7.5.1",
     "groq-sdk": "^0.3.2",
     "helmet": "^7.1.0",
-    "i18next": "^26.2.0",
-    "i18next-browser-languagedetector": "^8.2.1",
     "jsonwebtoken": "^9.0.2",
     "morgan": "^1.10.1",
     "node-cron": "^4.5.0",
     "nodemailer": "^9.0.1",
     "pg": "^8.20.0",
-    "pg-hstore": "^2.3.4",
     "qrcode": "^1.5.4",
-    "react-i18next": "^17.0.8",
     "rss-parser": "^3.13.0",
-    "sequelize": "^3.30.0",
     "speakeasy": "^2.0.0",
     "winston": "^3.11.0",
     "ws": "^8.21.0",

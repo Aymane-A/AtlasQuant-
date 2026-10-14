@@ -4,6 +4,7 @@
  */
 
 const nodemailer = require('nodemailer');
+const APP_URL = require('../config/env').FRONTEND_URL;
 const logger     = require('../utils/logger');
 
 const transporter = nodemailer.createTransport({
@@ -167,7 +168,7 @@ ${BASE_STYLES}
         </div>
 
         <div class="cta-wrap">
-          <a href="http://localhost:3000/alerts" class="cta-btn" style="background:${accentColor};color:#06060f">
+          <a href="${APP_URL}/alerts" class="cta-btn" style="background:${accentColor};color:#06060f">
             View Alerts Dashboard →
           </a>
         </div>
@@ -324,7 +325,7 @@ ${BASE_STYLES}
         ` : ''}
 
         <div class="cta-wrap">
-          <a href="http://localhost:3000/signals" class="cta-btn" style="background:${accentColor};color:#06060f">
+          <a href="${APP_URL}/signals" class="cta-btn" style="background:${accentColor};color:#06060f">
             View Full Signal →
           </a>
         </div>
@@ -426,7 +427,7 @@ async function sendDigestEmail({ to, name, items }) {
         </table>
 
         <div class="cta-wrap">
-          <a href="http://localhost:3000/alerts" class="cta-btn" style="background:#00f5d4;color:#06060f">
+          <a href="${APP_URL}/alerts" class="cta-btn" style="background:#00f5d4;color:#06060f">
             View Alerts Dashboard →
           </a>
         </div>

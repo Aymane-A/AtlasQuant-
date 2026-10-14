@@ -123,7 +123,7 @@ function ConnectModal({ exchange, onClose, onConnected }) {
       setSuccess(true);
       setTimeout(() => { onConnected(exchange.id, mode); onClose(); }, 1200);
     } catch (err) {
-      setError(err?.response?.data?.message || 'Connection failed. Check your credentials.');
+      setError(err?.error || err?.response?.data?.message || 'Connection failed. Check your credentials.');
     } finally { setLoading(false); }
   };
 
@@ -328,11 +328,12 @@ function BalanceModal({ exchange, onClose }) {
   useEffect(() => {
     api.get(`/exchanges/${exchange.id}/portfolio`)
       .then(res => setData(res.data))
-      .catch(err => setError(err?.response?.data?.message || 'Failed to load balance'))
+      .catch(err => setError(err?.error || err?.response?.data?.message || 'Failed to load balance'))
       .finally(() => setLoading(false));
   }, [exchange.id]);
 
-  const isPaperTrades = data?.mode === 'paper' && Array.isArray(data.positions) && data.positions[0]?.symbol === undefined;
+  // paper rows are trades ({side, quantity, price}); live/readonly rows are balances ({total}).
+  const isPaperTrades = data?.mode === 'paper' && Array.isArray(data.positions) && data.positions.length > 0 && data.positions[0]?.total === undefined;
 
   return (
     <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.8)', backdropFilter:'blur(14px)', zIndex:500, display:'flex', alignItems:'center', justifyContent:'center', padding:20 }}
@@ -417,7 +418,7 @@ function AllPortfolioModal({ onClose }) {
   useEffect(() => {
     api.get('/exchanges/portfolio/all')
       .then(res => setData(res.data))
-      .catch(err => setError(err?.response?.data?.message || 'Failed to load combined portfolio'))
+      .catch(err => setError(err?.error || err?.response?.data?.message || 'Failed to load combined portfolio'))
       .finally(() => setLoading(false));
   }, []);
 
@@ -525,7 +526,7 @@ function ExchangeCard({ exchange, connected, onConnect, onDisconnect, onChangeMo
       setTestMsg(res.data?.message || 'Connection verified');
     } catch (err) {
       setTestState('fail');
-      setTestMsg(err?.response?.data?.message || 'Verification failed');
+      setTestMsg(err?.error || err?.response?.data?.message || 'Verification failed');
     } finally {
       setTimeout(() => setTestState('idle'), 4000);
     }

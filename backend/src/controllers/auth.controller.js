@@ -15,6 +15,10 @@ const logger  = require('../utils/logger');
 const { logAuditEvent } = require('../utils/auditLog');
 const { recordSession } = require('./security.controller');
 const crypto  = require('crypto');
+const speakeasy = require('speakeasy');
+const { isSessionRevoked } = require('../middleware/auth.middleware');
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 // ── Helper : générer un JWT ───────────────────────────────
 function signToken(userId, email, plan) {
@@ -49,15 +53,19 @@ async function register(req, res) {
   if (password.length < 6) {
     return res.status(400).json({ success: false, error: 'Mot de passe : 6 caractères minimum' });
   }
-  if (!email.includes('@')) {
+  if (typeof email !== 'string' || typeof password !== 'string' || !EMAIL_RE.test(email.trim())) {
     return res.status(400).json({ success: false, error: 'Email invalide' });
+  }
+  if (password.length > 128) {
+    // bcrypt only uses the first 72 bytes; cap input to avoid abuse
+    return res.status(400).json({ success: false, error: 'Mot de passe trop long' });
   }
 
   try {
     // Vérifier si l'email existe déjà
     const existing = await query(
       'SELECT id FROM users WHERE email = $1',
-      [email.toLowerCase()]
+      [email.trim().toLowerCase()]
     );
     if (existing.rows.length > 0) {
       return res.status(409).json({ success: false, error: 'Cet email est déjà utilisé' });
@@ -71,7 +79,7 @@ async function register(req, res) {
       `INSERT INTO users (name, email, password, plan)
        VALUES ($1, $2, $3, 'free')
        RETURNING id, name, email, plan, created_at`,
-      [name?.trim() || '', email.toLowerCase(), hashed]
+      [name?.trim() || '', email.trim().toLowerCase(), hashed]
     );
 
     const user  = result.rows[0];
@@ -108,38 +116,70 @@ async function register(req, res) {
 // cas l'email tenté est tracé dans metadata.
 // ─────────────────────────────────────────────────────────
 async function login(req, res) {
-  const { email, password } = req.body;
+  const { email, password, totp, backupCode } = req.body;
 
-  if (!email || !password) {
+  if (!email || !password || typeof email !== 'string' || typeof password !== 'string') {
     return res.status(400).json({ success: false, error: 'Email et mot de passe requis' });
   }
 
   try {
-    // Chercher l'utilisateur
     const result = await query(
-      'SELECT id, name, email, password, plan, created_at FROM users WHERE email = $1',
-      [email.toLowerCase()]
+      `SELECT id, name, email, password, plan, created_at,
+              twofa_enabled, twofa_secret, twofa_backup_codes
+       FROM users WHERE email = $1`,
+      [email.trim().toLowerCase()]
     );
 
     if (result.rows.length === 0) {
       // Réponse volontairement vague pour éviter l'énumération d'emails
-      await logAuditEvent(null, 'login_failed', req, { email: email.toLowerCase() });
+      await logAuditEvent(null, 'login_failed', req, { email: email.trim().toLowerCase() });
       return res.status(401).json({ success: false, error: 'Email ou mot de passe incorrect' });
     }
 
     const user = result.rows[0];
 
-    // Vérifier le mot de passe
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
       await logAuditEvent(user.id, 'login_failed', req, { email: user.email });
       return res.status(401).json({ success: false, error: 'Email ou mot de passe incorrect' });
     }
 
-    const token = signToken(user.id, user.email, user.plan);
+    // ── 2FA challenge ─────────────────────────────────────
+    // Password is correct but 2FA is on: no token until a valid TOTP code
+    // (or a one-time backup code) is provided.
+    if (user.twofa_enabled) {
+      if (!totp && !backupCode) {
+        return res.json({ success: true, requires2FA: true, message: 'Code 2FA requis' });
+      }
 
-    // ✅ Fix: voir commentaire équivalent dans register() — sans ça,
-    // /api/security/sessions renvoie toujours un tableau vide.
+      let ok = false;
+
+      if (totp && user.twofa_secret) {
+        ok = speakeasy.totp.verify({
+          secret: user.twofa_secret, encoding: 'base32',
+          token: String(totp).replace(/\s/g, ''), window: 1,
+        });
+      }
+
+      if (!ok && backupCode) {
+        const hash  = crypto.createHash('sha256').update(String(backupCode).trim().toLowerCase()).digest('hex');
+        const codes = Array.isArray(user.twofa_backup_codes) ? user.twofa_backup_codes : [];
+        const idx   = codes.indexOf(hash);
+        if (idx !== -1) {
+          ok = true;
+          codes.splice(idx, 1); // single use
+          await query('UPDATE users SET twofa_backup_codes = $1 WHERE id = $2', [JSON.stringify(codes), user.id]);
+          await logAuditEvent(user.id, '2fa_backup_code_used', req, { remaining: codes.length });
+        }
+      }
+
+      if (!ok) {
+        await logAuditEvent(user.id, 'login_2fa_failed', req, { email: user.email });
+        return res.status(401).json({ success: false, error: 'Code 2FA invalide' });
+      }
+    }
+
+    const token = signToken(user.id, user.email, user.plan);
     await recordSession(user.id, token, req);
 
     await logAuditEvent(user.id, 'login_success', req);
@@ -204,10 +244,20 @@ async function refreshToken(req, res) {
   const oldToken = authHeader.split(' ')[1];
 
   try {
-    // Vérifier l'ancien token (même s'il est expiré de peu)
+    // Signature must be valid; expiry is checked manually so we can allow a
+    // short grace window (REFRESH_GRACE_SECONDS) — NOT an unlimited one.
     const decoded = jwt.verify(oldToken, env.JWT_SECRET, { ignoreExpiration: true });
 
-    // Vérifier que l'utilisateur existe encore en base
+    const now = Math.floor(Date.now() / 1000);
+    if (!decoded.exp || now > decoded.exp + env.REFRESH_GRACE_SECONDS) {
+      return res.status(401).json({ success: false, error: 'Token expiré — reconnectez-vous' });
+    }
+
+    // A revoked session (logout-all, "revoke" in Settings) can never refresh.
+    if (await isSessionRevoked(decoded.id, oldToken)) {
+      return res.status(401).json({ success: false, error: 'Session révoquée' });
+    }
+
     const result = await query(
       'SELECT id, email, plan FROM users WHERE id = $1',
       [decoded.id]
@@ -218,6 +268,7 @@ async function refreshToken(req, res) {
 
     const user     = result.rows[0];
     const newToken = signToken(user.id, user.email, user.plan);
+    await recordSession(user.id, newToken, req);
 
     res.json({ success: true, token: newToken });
 

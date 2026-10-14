@@ -5,6 +5,7 @@
 
 const logger = require('../utils/logger');
 
+const APP_URL = require('../config/env').FRONTEND_URL;
 const TOKEN   = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
@@ -27,7 +28,7 @@ async function sendTelegramAlert({ symbol, type, condition, target, currentPrice
     `*Current Price:* \`$${parseFloat(currentPrice).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\``,
     `*Time:* ${new Date().toUTCString()}`,
     ``,
-    `[Open AtlasQuant](http://localhost:3000/alerts)`,
+    `[Open AtlasQuant](${APP_URL}/alerts)`,
   ].join('\n');
 
   try {

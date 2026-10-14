@@ -375,7 +375,7 @@ async function sendVerificationEmail(req, res) {
     );
 
     const { sendVerificationEmail: sendVerificationMail } = require('../services/email.service');
-    const verifyUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/verify-email?token=${token}`;
+    const verifyUrl = `${require('../config/env').FRONTEND_URL}/verify-email?token=${token}`;
     await sendVerificationMail({
       to: rows[0].email,
       name: rows[0].name,

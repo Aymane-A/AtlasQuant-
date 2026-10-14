@@ -25,6 +25,8 @@ export default function Login() {
   const [form, setForm] = useState({ name: '', email: '', password: '', confirm: '' });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [needs2FA, setNeeds2FA] = useState(false);
+  const [code, setCode] = useState('');
   const { login, register } = useAuth();
   const navigate = useNavigate();
 
@@ -40,8 +42,15 @@ export default function Login() {
       if (tab === 'register' && form.password !== form.confirm)
         throw { error: t('login.errMatch') };
 
-      if (tab === 'login') await login(form.email, form.password);
-      else                 await register(form.name, form.email, form.password);
+      if (tab === 'login') {
+        // 6 digits = TOTP; anything else = one-time backup code
+        const clean = code.replace(/\s/g, '');
+        const twofa = !needs2FA ? {} : (/^\d{6}$/.test(clean) ? { totp: clean } : { backupCode: clean });
+        const res = await login(form.email, form.password, twofa);
+        if (res?.requires2FA) { setNeeds2FA(true); return; }
+      } else {
+        await register(form.name, form.email, form.password);
+      }
 
       navigate('/dashboard');
     } catch (err) {
@@ -171,6 +180,19 @@ export default function Login() {
                 onChange={set('password')}
                 onKeyDown={e => e.key === 'Enter' && submit()}
               />
+              {tab === 'login' && needs2FA && (
+                <input
+                  style={INPUT_STYLE}
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  autoFocus
+                  placeholder={t('login.twofaCode', '2FA code (or backup code)')}
+                  value={code}
+                  onChange={e => setCode(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && submit()}
+                />
+              )}
               {tab === 'register' && (
                 <input
                   style={INPUT_STYLE}

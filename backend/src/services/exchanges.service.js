@@ -45,6 +45,11 @@ const logger = require('../utils/logger');
 const ALGO = 'aes-256-gcm';
 const VALID_MODES = ['readonly', 'paper', 'live'];
 
+// Capital de départ du compte paper (simulé). Utilisé par getBalance() pour le
+// position sizing de l'AutoTrader ET par "Mon P&L" pour exprimer le % du capital.
+// Modifiable via PAPER_START_CAPITAL dans .env.
+const PAPER_START_CAPITAL = Number(process.env.PAPER_START_CAPITAL) || 10000;
+
 // Exchanges gérées génériquement via ccxt — tout exchange_id hors de cette
 // liste (et hors 'oanda'/'alpaca') est rejeté explicitement à connectExchange().
 const CCXT_EXCHANGES = new Set([
@@ -528,8 +533,8 @@ async function getBalance(userId, exchangeId) {
   if (!creds) return null;
   if (creds.mode === 'paper') {
     return [
-      { symbol: 'USDT', free: 10000, locked: 0, total: 10000 },
-      { symbol: 'USD', free: 10000, locked: 0, total: 10000 },
+      { symbol: 'USDT', free: PAPER_START_CAPITAL, locked: 0, total: PAPER_START_CAPITAL },
+      { symbol: 'USD', free: PAPER_START_CAPITAL, locked: 0, total: PAPER_START_CAPITAL },
     ];
   }
   return fetchPortfolio(exchangeId, creds);
@@ -619,15 +624,57 @@ async function cancelLiveOrder(exchangeId, creds, orderId, symbol) {
   await ex.cancelOrder(orderId, pair);
 }
 
+// ── Exécution réelle d'un ordre live (lecture seule) ───────────
+// Utilisé par liveOrderReconciler.service.js. Retourne:
+//   { status, filledQty, avgPrice, feeCost, feeCurrency, final }
+// ou null si l'exchange n'est pas géré (OANDA).
+async function fetchOrderFill(exchangeId, creds, orderId, symbol) {
+  if (exchangeId === 'alpaca') {
+    const { data } = await axios.get(`${getAlpacaBaseUrl(creds.mode)}/v2/orders/${orderId}`, {
+      headers: alpacaHeaders(creds), timeout: 8000,
+    });
+    const status = String(data.status || '');
+    return {
+      status,
+      filledQty:   parseFloat(data.filled_qty || 0),
+      avgPrice:    data.filled_avg_price != null ? parseFloat(data.filled_avg_price) : null,
+      feeCost:     0,
+      feeCurrency: null,
+      final:       ['filled', 'canceled', 'expired', 'rejected', 'done_for_day'].includes(status),
+    };
+  }
+
+  if (CCXT_EXCHANGES.has(exchangeId)) {
+    const ex = getCcxtInstance(exchangeId, creds);
+    await ex.loadMarkets();
+    // placeLiveOrder() construit la paire `${symbol}/USDT` → même règle ici.
+    const sym  = String(symbol).toUpperCase();
+    const pair = sym.includes('/') ? sym : `${sym}/USDT`;
+    const o    = await ex.fetchOrder(orderId, pair);
+    const fee  = o.fee || (Array.isArray(o.fees) && o.fees.length ? o.fees[0] : null);
+    const status = String(o.status || '');
+    return {
+      status,
+      filledQty:   parseFloat(o.filled || 0),
+      avgPrice:    o.average != null ? parseFloat(o.average) : (o.price != null ? parseFloat(o.price) : null),
+      feeCost:     fee && fee.cost != null ? parseFloat(fee.cost) : 0,
+      feeCurrency: fee && fee.currency ? String(fee.currency) : null,
+      final:       ['closed', 'canceled', 'cancelled', 'expired', 'rejected'].includes(status),
+    };
+  }
+
+  return null;
+}
+
 // ── POST /api/exchanges/:exchangeId/order (mode 'paper') ──────
-async function openPaperTrade(userId, exchangeId, { symbol, side, orderType, quantity, price, limitPrice, stopLoss, takeProfit }) {
+async function openPaperTrade(userId, exchangeId, { symbol, side, orderType, quantity, price, limitPrice, stopLoss, takeProfit, signalId }) {
   const { rows } = await db.query(
     `INSERT INTO paper_trades
-       (user_id, exchange_id, symbol, side, order_type, quantity, price, limit_price, stop_loss, take_profit, status)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'open')
+       (user_id, exchange_id, symbol, side, order_type, quantity, price, limit_price, stop_loss, take_profit, signal_id, status)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'open')
      RETURNING *`,
     [userId, exchangeId, symbol.toUpperCase(), side, orderType, quantity, price,
-     limitPrice || null, stopLoss || null, takeProfit || null]
+     limitPrice || null, stopLoss || null, takeProfit || null, signalId || null]
   );
   return rows[0];
 }
@@ -651,10 +698,11 @@ async function closePaperTrade(userId, tradeId, closePrice, reason = null) {
 
   const { rows } = await db.query(
     `UPDATE paper_trades
-     SET exit_price = $1, pnl = $2, pnl_pct = $3, status = 'closed', closed_at = NOW()
+     SET exit_price = $1, pnl = $2, pnl_pct = $3, status = 'closed', closed_at = NOW(),
+         close_reason = COALESCE($5::text, close_reason)
      WHERE id = $4
      RETURNING *`,
-    [closePrice, pnl.toFixed(8), pnlPct.toFixed(4), tradeId]
+    [closePrice, pnl.toFixed(8), pnlPct.toFixed(4), tradeId, reason]
   );
   logger.info(`[exchanges] paper trade #${tradeId} fermé${reason ? ` (${reason})` : ''} — pnl ${pnl.toFixed(2)}`);
   return rows[0];
@@ -710,4 +758,5 @@ module.exports = {
   getOandaBaseUrl, getOandaPrice, alpacaHeaders, getAlpacaQuote,
   placeLiveOrder, cancelLiveOrder, fetchPortfolio, getAggregatedPortfolio, getBalance,
   openPaperTrade, closePaperTrade, getPaperTrades, getOpenBracketTrades,
+  fetchOrderFill, PAPER_START_CAPITAL,
 };
