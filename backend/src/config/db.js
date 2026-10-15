@@ -23,7 +23,8 @@ function buildPoolConfig() {
   if (url && url.startsWith('postgres')) {
     return {
       connectionString: url,
-      ssl: process.env.NODE_ENV === 'production'
+      // DB_SSL=false disables TLS (e.g. Postgres in the same docker-compose network).
+      ssl: process.env.NODE_ENV === 'production' && process.env.DB_SSL !== 'false'
         // Set DB_SSL_REJECT_UNAUTHORIZED=false only if your provider uses a
         // self-signed cert. Default is to VERIFY the server certificate.
         ? { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false' }
@@ -39,7 +40,13 @@ function buildPoolConfig() {
     logger.error('[db] ❌ DB_PASSWORD manquant dans .env');
     process.exit(1);
   }
-  return { host, port: Number(port), database, user, password: String(password) };
+  return {
+    host, port: Number(port), database, user, password: String(password),
+    // Discrete DB_* vars: TLS is opt-in (DB_SSL=true) — typical for managed DBs.
+    ...(process.env.DB_SSL === 'true'
+      ? { ssl: { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false' } }
+      : {}),
+  };
 }
 
 const pool = new Pool({
@@ -447,6 +454,8 @@ async function migrate() {
       created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     CREATE INDEX IF NOT EXISTS idx_audit_log_user ON audit_log(user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_audit_login_fail ON audit_log ((metadata->>'email'), created_at DESC)
+      WHERE event_type IN ('login_failed', 'login_2fa_failed');
 
     -- ── Auto-Trader: backtest gating metadata ──
     ALTER TABLE backtest_history ADD COLUMN IF NOT EXISTS params        JSONB;

@@ -52,6 +52,7 @@
 const db              = require('../config/db');
 const logger          = require('../utils/logger');
 const exchangesSvc    = require('./exchanges.service');
+const riskGuard       = require('./riskGuard.service');
 const { notifyTradeOpened } = require('./tradeNotify.service');
 
 const GATE_FRESHNESS_DAYS   = 30; // doit rester cohérent avec backtest.controller.js
@@ -290,6 +291,18 @@ async function processConfig(config) {
 
   const quantity = await computeQuantity(config.user_id, config.exchange_id, config.symbol, price, config);
   if (!quantity || quantity <= 0) return;
+
+  // User-level limits from Settings → Risk (max position %, max daily loss %).
+  // The signal's own stop-loss is passed through, so no default SL is injected here.
+  const risk = await riskGuard.checkOrder({
+    userId: config.user_id, exchangeId: config.exchange_id, mode: 'paper',
+    side, quantity, refPrice: price,
+    stopLoss: signal.stop_loss ? parseFloat(signal.stop_loss) : null, noStopLoss: true,
+  }).catch(err => ({ ok: false, code: 'RISK_ERROR', error: err.message }));
+  if (!risk.ok) {
+    logger.warn(`[autoTrader] config #${config.id} - ${side} ${config.symbol} skipped by risk limits (${risk.code}): ${risk.error}`);
+    return;
+  }
 
   try {
     const trade = await exchangesSvc.openPaperTrade(config.user_id, config.exchange_id, {

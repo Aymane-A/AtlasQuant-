@@ -18,6 +18,12 @@ const crypto  = require('crypto');
 const speakeasy = require('speakeasy');
 const { isSessionRevoked } = require('../middleware/auth.middleware');
 
+const PASSWORD_MIN = 8;
+
+// Account lockout: too many failed logins (password OR 2FA code) for one email.
+const LOCK_MAX_FAILURES = 5;
+const LOCK_WINDOW_MIN   = 15;
+
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 // ── Helper : générer un JWT ───────────────────────────────
@@ -50,8 +56,8 @@ async function register(req, res) {
   if (!email || !password) {
     return res.status(400).json({ success: false, error: 'Email et mot de passe requis' });
   }
-  if (password.length < 6) {
-    return res.status(400).json({ success: false, error: 'Mot de passe : 6 caractères minimum' });
+  if (typeof password === 'string' && password.length < PASSWORD_MIN) {
+    return res.status(400).json({ success: false, error: `Mot de passe : ${PASSWORD_MIN} caractères minimum` });
   }
   if (typeof email !== 'string' || typeof password !== 'string' || !EMAIL_RE.test(email.trim())) {
     return res.status(400).json({ success: false, error: 'Email invalide' });
@@ -123,6 +129,23 @@ async function login(req, res) {
   }
 
   try {
+    // Brute-force protection per account (the IP rate limiter alone doesn't stop
+    // a distributed attack, and it also bounds guesses of 2FA codes).
+    const emailNorm = email.trim().toLowerCase();
+    const { rows: fails } = await query(
+      `SELECT COUNT(*)::int AS n FROM audit_log
+       WHERE event_type IN ('login_failed', 'login_2fa_failed')
+         AND created_at > NOW() - make_interval(mins => $2)
+         AND metadata->>'email' = $1`,
+      [emailNorm, LOCK_WINDOW_MIN]
+    );
+    if ((fails[0]?.n || 0) >= LOCK_MAX_FAILURES) {
+      return res.status(429).json({
+        success: false,
+        error: `Trop de tentatives échouées. Réessayez dans ${LOCK_WINDOW_MIN} minutes.`,
+      });
+    }
+
     const result = await query(
       `SELECT id, name, email, password, plan, created_at,
               twofa_enabled, twofa_secret, twofa_backup_codes

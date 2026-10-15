@@ -38,7 +38,7 @@ export default function Login() {
     setLoading(true);
     try {
       if (!form.email.includes('@')) throw { error: t('login.errEmail') };
-      if (form.password.length < 6)   throw { error: t('login.errPass')  };
+      if (form.password.length < 8)   throw { error: t('login.errPass')  };
       if (tab === 'register' && form.password !== form.confirm)
         throw { error: t('login.errMatch') };
 

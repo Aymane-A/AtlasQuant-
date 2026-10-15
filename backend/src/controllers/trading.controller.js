@@ -6,6 +6,26 @@ const axios         = require('axios');
 const db            = require('../config/db');
 const logger        = require('../utils/logger');
 const exchangesSvc  = require('../services/exchanges.service');
+const riskGuard     = require('../services/riskGuard.service');
+const { requireVerifiedEmailForLive } = require('../utils/emailVerified');
+
+// Reference price used for risk checks and paper fills: the limit price for limit
+// orders, otherwise the current market price. Returns null if it can't be fetched.
+async function getReferencePrice(exchangeId, creds, symbol, orderType, price) {
+  if (orderType === 'limit') return Number(price);
+  try {
+    const sym = symbol.toUpperCase();
+    if (exchangeId === 'oanda')  return (await exchangesSvc.getOandaPrice(creds.apiKey, creds.apiSecret, creds.mode, sym)).mid;
+    if (exchangeId === 'alpaca') return (await exchangesSvc.getAlpacaQuote(creds, sym)).mid;
+    const r = await axios.get(
+      `https://api.binance.com/api/v3/ticker/price?symbol=${encodeURIComponent(sym)}USDT`,
+      { timeout: 5000 }
+    );
+    return parseFloat(r.data.price);
+  } catch {
+    return null;
+  }
+}
 
 // ── POST /api/trading/order ───────────────────────────────────────────────────
 // body: { exchangeId, symbol, side, orderType, quantity, price?, stopPrice?,
@@ -18,7 +38,7 @@ const exchangesSvc  = require('../services/exchanges.service');
 async function placeOrder(req, res) {
   const userId = req.user.id;
   const {
-    exchangeId, symbol, side, orderType = 'market', quantity, price, stopPrice,
+    exchangeId, symbol, side, orderType = 'market', quantity, price, stopPrice, noStopLoss,
     stopLoss, takeProfit, signalId, 
   } = req.body;
 
@@ -72,58 +92,58 @@ async function placeOrder(req, res) {
     const creds = await exchangesSvc.getDecryptedCredentials(userId, exchangeId);
     if (!creds) return res.status(404).json({ success:false, error:'Exchange not connected' });
 
-    // ── Paper mode ──
-    if (creds.mode === 'paper') {
-      // Fetch current price for paper fill
-      let fillPrice = price;
-      if (!fillPrice || orderType === 'market') {
-        try {
-          if (isOanda) {
-            const { mid } = await exchangesSvc.getOandaPrice(creds.apiKey, creds.apiSecret, creds.mode, symbol.toUpperCase());
-            fillPrice = mid;
-          } else if (isAlpaca) {
-            const { mid } = await exchangesSvc.getAlpacaQuote(creds, symbol.toUpperCase());
-            fillPrice = mid;
-          } else {
-            const r = await axios.get(
-              `https://api.binance.com/api/v3/ticker/price?symbol=${symbol.toUpperCase()}USDT`,
-              { timeout: 5000 }
-            );
-            fillPrice = parseFloat(r.data.price);
-          }
-        } catch { fillPrice = price; }
-      }
-      // A paper fill at price 0 (or NaN) would create a nonsensical position
-      // and corrupt P&L — fail the order instead of guessing.
-      fillPrice = Number(fillPrice);
-      if (!Number.isFinite(fillPrice) || fillPrice <= 0) {
-        return res.status(502).json({ success:false, error:'Could not fetch a market price for this symbol. Try again shortly.' });
-      }
+    if (creds.mode === 'readonly')
+      return res.status(403).json({ success:false, error:'Exchange is in read-only mode. Switch to Paper or Live to trade.' });
 
+    const isLive = creds.mode === 'live';
+
+    if (isLive) {
+      const v = await requireVerifiedEmailForLive(userId);
+      if (!v.ok) return res.status(v.status).json({ success:false, code:v.code, error:v.error });
+    }
+
+    // Price used for risk checks (and as the paper fill). Without it we can't
+    // enforce the user's limits, and we never guess a price.
+    const refPrice = await getReferencePrice(exchangeId, creds, symbol, orderType, price);
+    if (!Number.isFinite(refPrice) || refPrice <= 0) {
+      return res.status(502).json({ success:false, error:'Could not fetch a market price for this symbol. Try again shortly.' });
+    }
+
+    // ── Risk limits from Settings (max position, daily loss, default stop-loss) ──
+    const risk = await riskGuard.checkOrder({
+      userId, exchangeId, mode: isLive ? 'live' : 'paper', creds,
+      side: sideNorm, quantity: qty, refPrice,
+      stopLoss: stopLoss ? Number(stopLoss) : null,
+      noStopLoss: noStopLoss === true,
+    });
+    if (!risk.ok) {
+      return res.status(risk.status).json({ success:false, code:risk.code, error:risk.error, details:risk.details });
+    }
+    const effStopLoss = risk.stopLoss;
+    const riskInfo = { appliedStopLoss: stopLoss ? null : risk.stopLoss, warnings: risk.warnings };
+
+    // ── Paper mode ──
+    if (!isLive) {
       const trade = await exchangesSvc.openPaperTrade(userId, exchangeId, {
         symbol:      symbol.toUpperCase(),
         side:        sideNorm,
         orderType,
         quantity:    qty,
-        price:       fillPrice,
+        price:       refPrice,
         limitPrice:  orderType === 'limit' ? parseFloat(price) : null,
-        stopLoss:    stopLoss   ? parseFloat(stopLoss)   : null,
+        stopLoss:    effStopLoss,
         takeProfit:  takeProfit ? parseFloat(takeProfit) : null,
         signalId:    signalId ? parseInt(signalId, 10) : null,
       });
 
-      return res.json({ success:true, mode:'paper', order: trade });
+      return res.json({ success:true, mode:'paper', order: trade, risk: riskInfo });
     }
-
-    // ── Readonly mode ──
-    if (creds.mode === 'readonly')
-      return res.status(403).json({ success:false, error:'Exchange is in read-only mode. Switch to Paper or Live to trade.' });
 
     // ── Live mode ──
     const result = await exchangesSvc.placeLiveOrder(exchangeId, creds, {
       symbol: symbol.toUpperCase(),
       side: sideNorm, type: orderType, quantity: qty, price,
-      stopLoss:   stopLoss   ? parseFloat(stopLoss)   : undefined,
+      stopLoss:   effStopLoss ?? undefined,
       takeProfit: takeProfit ? parseFloat(takeProfit) : undefined,
     });
 
@@ -134,13 +154,13 @@ async function placeOrder(req, res) {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
       [userId, exchangeId, result.exchangeOrderId, symbol.toUpperCase(),
        sideNorm, orderType, qty, price || null,
-       stopLoss || null, takeProfit || null,
+       effStopLoss || null, takeProfit || null,
        result.status || 'submitted', JSON.stringify(result.raw),
        signalId ? parseInt(signalId, 10) : null]
     );
 
     res.json({
-      success: true, mode:'live', order: result,
+      success: true, mode:'live', order: result, risk: riskInfo,
       warning: result.bracketUnsupported
         ? 'Order placed, but this exchange does not support attached stop-loss/take-profit — set them manually.'
         : undefined,

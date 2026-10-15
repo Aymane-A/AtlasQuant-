@@ -1,0 +1,58 @@
+# AtlasQuant AI — local/prod-like stack:  docker compose up --build
+# Requires backend/.env (copy backend/.env.example). The values below override it for the container network.
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: atlasquant
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in your shell or a root .env file}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d atlasquant"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # not published to the host on purpose; uncomment to use psql/pgAdmin from your machine:
+    # ports: ["5432:5432"]
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    restart: unless-stopped
+    env_file: ./backend/.env
+    environment:
+      NODE_ENV: production
+      PORT: "5000"
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: atlasquant
+      DB_USER: postgres
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_SSL: "false"                       # in-network Postgres, no TLS
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      TRUST_PROXY: ${TRUST_PROXY:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "5000:5000"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:5000/api}
+        VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:5000}
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "3000:80"
+
+volumes:
+  pgdata:

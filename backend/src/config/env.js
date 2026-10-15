@@ -48,6 +48,11 @@ module.exports = {
   GROQ_API_KEY:       optional("GROQ_API_KEY"),
 
   PAPER_TRADING:      optional("PAPER_TRADING", "true") === "true",
+  // Live trading safety switches (both default to the SAFE value).
+  // Block live orders when the risk limits cannot be verified (e.g. equity unknown).
+  RISK_STRICT_LIVE: optional("RISK_STRICT_LIVE", "true") !== "false",
+  // Require a verified email before connecting/switching an exchange to LIVE or placing live orders.
+  REQUIRE_VERIFIED_EMAIL_FOR_LIVE: optional("REQUIRE_VERIFIED_EMAIL_FOR_LIVE", "true") !== "false",
   MAX_RISK_PER_TRADE: parseFloat(optional("MAX_RISK_PER_TRADE", "0.02")),
   MAX_DAILY_DRAWDOWN: parseFloat(optional("MAX_DAILY_DRAWDOWN", "0.10")),
 

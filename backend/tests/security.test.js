@@ -78,7 +78,10 @@ async function userRow(over = {}) {
     twofa_enabled: true, twofa_secret: speakeasy.generateSecret({ length: 20 }).base32,
     twofa_backup_codes: [], ...over };
 }
-const loginDb = (user) => async (sql) => (/FROM users WHERE email/.test(sql) ? { rows: [user] } : { rows: [] });
+const loginDb = (user, failures = 0) => async (sql) => {
+  if (/FROM audit_log/.test(sql)) return { rows: [{ n: failures }] };
+  return /FROM users WHERE email/.test(sql) ? { rows: [user] } : { rows: [] };
+};
 
 test('login: 2FA on + no code => requires2FA and NO token', async () => {
   fake.handler = loginDb(await userRow());
@@ -109,7 +112,7 @@ test('login: backup code works once and is consumed', async () => {
   let saved = null;
   fake.handler = async (sql, params) => {
     if (/UPDATE users SET twofa_backup_codes/.test(sql)) { saved = JSON.parse(params[0]); return { rows: [] }; }
-    return loginDb(u)(sql);
+    return loginDb(u)(sql, params);
   };
   const res = mkRes();
   await authCtrl.login(mkReq({ body: { email: 'a@b.co', password: 'hunter22', backupCode: 'ABCDE12345' } }), res);
@@ -158,9 +161,18 @@ test('refresh: revoked session cannot refresh', async () => {
 // ── env guard ───────────────────────────────────────────────
 test('env: production refuses to start without a strong JWT_SECRET', () => {
   const { execFileSync } = require('node:child_process');
+  // env.js calls dotenv, which reads ./.env from the CURRENT working directory. Run the
+  // child from an empty temp dir so a developer's real backend/.env (which usually has a
+  // JWT_SECRET) cannot leak into the test and make the "missing secret" case pass.
+  const envJs = path.join(__dirname, '..', 'src', 'config', 'env.js');
   const run = (env) => {
-    try { execFileSync('node', ['-e', "require('./src/config/env')"], { env: { PATH: process.env.PATH, ...env }, cwd: path.join(__dirname, '..'), stdio: 'pipe' }); return 0; }
-    catch { return 1; }
+    try {
+      execFileSync('node', ['-e', `require(${JSON.stringify(envJs)})`], {
+        env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, ...env },
+        cwd: require('node:os').tmpdir(), stdio: 'pipe',
+      });
+      return 0;
+    } catch { return 1; }
   };
   assert.equal(run({ NODE_ENV: 'production' }), 1);                              // missing
   assert.equal(run({ NODE_ENV: 'production', JWT_SECRET: 'short' }), 1);         // too short
@@ -187,4 +199,126 @@ test('placeOrder: rejects bad quantity / side / orderType and never touches the 
     assert.equal(res.statusCode, 400, `expected 400 for ${JSON.stringify(bad)}`);
   }
   assert.equal(touched, false);
+});
+
+
+// ── password policy + account lockout ───────────────────────
+test('register: rejects passwords shorter than 8 chars and bad emails', async () => {
+  fake.handler = async () => ({ rows: [] });
+  for (const body of [
+    { email: 'a@b.co', password: '1234567' },
+    { email: 'not-an-email', password: 'longenough1' },
+    { email: 'a@b', password: 'longenough1' },
+  ]) {
+    const res = mkRes();
+    await authCtrl.register(mkReq({ body }), res);
+    assert.equal(res.statusCode, 400, JSON.stringify(body));
+  }
+});
+
+test('login: account is locked (429) after 5 failed attempts, even with the right password', async () => {
+  fake.handler = loginDb(await userRow({ twofa_enabled: false }), 5);
+  const res = mkRes();
+  await authCtrl.login(mkReq({ body: { email: 'a@b.co', password: 'hunter22' } }), res);
+  assert.equal(res.statusCode, 429); assert.equal(res.body.token, undefined);
+});
+
+test('login: 4 failures do not lock the account yet', async () => {
+  fake.handler = loginDb(await userRow({ twofa_enabled: false }), 4);
+  const res = mkRes();
+  await authCtrl.login(mkReq({ body: { email: 'a@b.co', password: 'hunter22' } }), res);
+  assert.ok(res.body.token);
+});
+
+// ── risk guard ──────────────────────────────────────────────
+const svcPath2 = require.resolve('../src/services/exchanges.service');
+const fakeExchanges = { PAPER_START_CAPITAL: 10000, fetchPortfolio: async () => [] };
+require.cache[svcPath2] = { id: svcPath2, filename: svcPath2, loaded: true, exports: fakeExchanges };
+delete require.cache[require.resolve('../src/services/riskGuard.service')];
+const riskGuard = require('../src/services/riskGuard.service');
+
+const riskDb = ({ settings = {}, realised = 0, todayPnl = 0 } = {}) => async (sql) => {
+  if (/FROM user_settings/.test(sql)) return { rows: [{ risk_max_position_pct: 20, risk_max_daily_loss_pct: 5, risk_default_stoploss_pct: 2, ...settings }] };
+  if (/closed_at >= date_trunc/.test(sql)) return { rows: [{ pnl: todayPnl }] };
+  if (/FROM paper_trades/.test(sql)) return { rows: [{ realised }] };
+  return { rows: [] };
+};
+const paper = (over = {}) => ({ userId: 7, exchangeId: 'binance', mode: 'paper', side: 'buy', quantity: 1, refPrice: 1000, ...over });
+
+test('risk: paper order within the position limit passes and gets the default stop-loss', async () => {
+  fake.handler = riskDb();
+  const r = await riskGuard.checkOrder(paper());            // 1000 = 10% of 10k
+  assert.equal(r.ok, true); assert.equal(r.stopLoss, 980);  // buy: -2%
+});
+
+test('risk: sell gets a stop-loss ABOVE entry', async () => {
+  fake.handler = riskDb();
+  const r = await riskGuard.checkOrder(paper({ side: 'sell' }));
+  assert.equal(r.stopLoss, 1020);
+});
+
+test('risk: order above max position % is refused with a max quantity hint', async () => {
+  fake.handler = riskDb();
+  const r = await riskGuard.checkOrder(paper({ quantity: 3 })); // 3000 = 30% > 20%
+  assert.equal(r.ok, false); assert.equal(r.code, 'RISK_MAX_POSITION');
+  assert.equal(r.details.maxQuantity, 2);
+});
+
+test('risk: equity follows realised paper P&L (losses shrink the allowed size)', async () => {
+  fake.handler = riskDb({ realised: -5000 });               // equity 5000 -> limit 1000
+  const r = await riskGuard.checkOrder(paper({ quantity: 1.5 })); // 1500 = 30%
+  assert.equal(r.code, 'RISK_MAX_POSITION');
+});
+
+test('risk: daily loss limit blocks NEW paper positions', async () => {
+  fake.handler = riskDb({ todayPnl: -600 });                // 6% of 10k >= 5%
+  const r = await riskGuard.checkOrder(paper());
+  assert.equal(r.ok, false); assert.equal(r.code, 'RISK_DAILY_LOSS');
+});
+
+test('risk: a gain today or a loss under the limit does not block', async () => {
+  for (const todayPnl of [250, -100]) {
+    fake.handler = riskDb({ todayPnl });
+    assert.equal((await riskGuard.checkOrder(paper())).ok, true);
+  }
+});
+
+test('risk: limits set to 0 are disabled; noStopLoss opts out; explicit SL is kept', async () => {
+  fake.handler = riskDb({ settings: { risk_max_position_pct: 0, risk_max_daily_loss_pct: 0, risk_default_stoploss_pct: 0 } });
+  const big = await riskGuard.checkOrder(paper({ quantity: 50 }));
+  assert.equal(big.ok, true); assert.equal(big.stopLoss, null);
+  fake.handler = riskDb();
+  assert.equal((await riskGuard.checkOrder(paper({ noStopLoss: true }))).stopLoss, null);
+  assert.equal((await riskGuard.checkOrder(paper({ stopLoss: 900 }))).stopLoss, 900);
+});
+
+test('risk: live CEX sell is reduce-only and is never blocked', async () => {
+  fake.handler = riskDb();
+  const r = await riskGuard.checkOrder({ userId: 7, exchangeId: 'binance', mode: 'live', creds: {}, side: 'sell', quantity: 1000, refPrice: 1000 });
+  assert.equal(r.ok, true); assert.equal(r.details.reduceOnly, true);
+});
+
+test('risk: live buy is refused when equity is unknown (strict mode), allowed with enough USDT', async () => {
+  fake.handler = riskDb();
+  fakeExchanges.fetchPortfolio = async () => [{ symbol: 'BTC', total: 2 }];            // no stablecoin
+  const blocked = await riskGuard.checkOrder({ userId: 7, exchangeId: 'binance', mode: 'live', creds: {}, side: 'buy', quantity: 0.01, refPrice: 60000 });
+  assert.equal(blocked.code, 'RISK_UNVERIFIABLE');
+
+  fakeExchanges.fetchPortfolio = async () => [{ symbol: 'USDT', total: 10000 }];
+  const tooBig = await riskGuard.checkOrder({ userId: 7, exchangeId: 'binance', mode: 'live', creds: {}, side: 'buy', quantity: 0.05, refPrice: 60000 }); // 3000 = 30%
+  assert.equal(tooBig.code, 'RISK_MAX_POSITION');
+  const ok = await riskGuard.checkOrder({ userId: 7, exchangeId: 'binance', mode: 'live', creds: {}, side: 'buy', quantity: 0.03, refPrice: 60000 });   // 1800 = 18%
+  assert.equal(ok.ok, true);
+  assert.ok(ok.warnings.some(w => /stop-loss/i.test(w)), 'CEX spot cannot carry a stop-loss -> warning');
+  fakeExchanges.fetchPortfolio = async () => [];
+});
+
+// ── email verification gate for LIVE ────────────────────────
+test('live gate: unverified email is refused, verified is allowed', async () => {
+  const { requireVerifiedEmailForLive } = require('../src/utils/emailVerified');
+  fake.handler = async () => ({ rows: [{ email_verified: false }] });
+  const no = await requireVerifiedEmailForLive(7);
+  assert.equal(no.ok, false); assert.equal(no.code, 'EMAIL_NOT_VERIFIED'); assert.equal(no.status, 403);
+  fake.handler = async () => ({ rows: [{ email_verified: true }] });
+  assert.equal((await requireVerifiedEmailForLive(7)).ok, true);
 });

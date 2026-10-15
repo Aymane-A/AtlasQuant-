@@ -16,6 +16,7 @@ const svc    = require('../services/exchanges.service');
 const db     = require('../config/db');
 const logger = require('../utils/logger');
 const { logAuditEvent } = require('../utils/auditLog');
+const { requireVerifiedEmailForLive } = require('../utils/emailVerified');
 
 const VALID_MODES   = ['readonly', 'paper', 'live'];
 const ID_RE         = /^[a-z0-9_]{2,32}$/;
@@ -49,6 +50,10 @@ async function connect(req, res) {
   if (!VALID_MODES.includes(mode)) return bad(res, 'Mode invalide');
   if (!credentials || typeof credentials !== 'object') return bad(res, 'credentials requis');
   try {
+    if (mode === 'live') {
+      const v = await requireVerifiedEmailForLive(req.user.id);
+      if (!v.ok) return res.status(v.status).json({ success: false, code: v.code, error: v.error, message: v.error });
+    }
     await svc.connectExchange(req.user.id, exchange, credentials, mode);
     logAuditEvent(req.user.id, 'api_key_created', req, { exchange, mode }).catch(() => {});
     res.json({ success: true, message: 'Exchange connectée' });
@@ -62,6 +67,10 @@ async function changeMode(req, res) {
   if (!validId(res, exchangeId)) return;
   if (!VALID_MODES.includes(mode)) return bad(res, 'Mode invalide');
   try {
+    if (mode === 'live') {
+      const v = await requireVerifiedEmailForLive(req.user.id);
+      if (!v.ok) return res.status(v.status).json({ success: false, code: v.code, error: v.error, message: v.error });
+    }
     await svc.updateMode(req.user.id, exchangeId, mode);
     logger.info(`[exchanges] user ${req.user.id} switched ${exchangeId} to ${mode}`);
     res.json({ success: true, mode });

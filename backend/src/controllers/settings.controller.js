@@ -362,8 +362,12 @@ async function testTelegram(req, res) {
 async function sendVerificationEmail(req, res) {
   try {
     const userId = req.user.id;
-    const { rows } = await db.query('SELECT name, email, email_verified FROM users WHERE id = $1', [userId]);
+    const { rows } = await db.query('SELECT name, email, email_verified, email_verification_sent_at FROM users WHERE id = $1', [userId]);
     if (!rows.length) return res.status(404).json({ success: false, error: 'Utilisateur introuvable' });
+    const lastSent = rows[0].email_verification_sent_at ? new Date(rows[0].email_verification_sent_at).getTime() : 0;
+    if (!rows[0].email_verified && Date.now() - lastSent < 60 * 1000) {
+      return res.status(429).json({ success: false, error: 'Please wait a minute before requesting another verification email.' });
+    }
     if (rows[0].email_verified) return res.json({ success: true, message: 'Email déjà vérifié' });
 
     const token = crypto.randomBytes(32).toString('hex');

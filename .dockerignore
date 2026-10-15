@@ -1,0 +1,13 @@
+# Keep secrets and heavy/irrelevant stuff out of every image build context
+.git
+.github
+**/node_modules
+**/dist
+**/.env
+**/.env.*
+!**/.env.example
+**/logs
+**/*.log
+ai-service
+ai-engine
+docs

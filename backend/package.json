@@ -21,7 +21,7 @@
     "jsonwebtoken": "^9.0.2",
     "morgan": "^1.10.1",
     "node-cron": "^4.5.0",
-    "nodemailer": "^9.0.1",
+    "nodemailer": "^10.1.1",
     "pg": "^8.20.0",
     "qrcode": "^1.5.4",
     "rss-parser": "^3.13.0",
