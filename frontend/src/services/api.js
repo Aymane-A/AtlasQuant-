@@ -1,8 +1,15 @@
 import axios from 'axios';
 
 // ── Base instance (HTTP Pure Config) ──────────────────────
+// The localhost fallback is for `npm run dev` only. A production build without
+// VITE_API_URL would point every visitor's browser at THEIR OWN machine, so we fail loudly.
+const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:5000/api' : '');
+if (!API_URL) {
+  throw new Error('VITE_API_URL is not set. Set it at build time to the public API URL, e.g. https://api.example.com/api');
+}
+
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || 'http://localhost:5000/api',
+  baseURL: API_URL,
   timeout: 120000,
   headers: { 'Content-Type': 'application/json' },
 });

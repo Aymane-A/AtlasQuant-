@@ -5,7 +5,10 @@ import { useEffect, useState, useRef } from 'react';
 // Authorization header). Tell me the real key if this is wrong.
 const TOKEN_KEY = 'aq_token';
 
-const WS_BASE = (import.meta.env.VITE_WS_URL || 'ws://localhost:5000') + '/ws/dashboard';
+// localhost fallback = dev only; production builds must set VITE_WS_URL.
+const WS_ROOT = import.meta.env.VITE_WS_URL || (import.meta.env.DEV ? 'ws://localhost:5000' : '');
+if (!WS_ROOT) throw new Error('VITE_WS_URL is not set (build-time), e.g. wss://api.example.com');
+const WS_BASE = WS_ROOT + '/ws/dashboard';
 
 export function useDashboardData(range = '30') {
   const [data, setData]           = useState(null);

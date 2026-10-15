@@ -41,6 +41,7 @@ const axios  = require('axios');
 const ccxt   = require('ccxt');
 const db     = require('../config/db');
 const logger = require('../utils/logger');
+const env    = require('../config/env');
 
 const ALGO = 'aes-256-gcm';
 const VALID_MODES = ['readonly', 'paper', 'live'];
@@ -547,6 +548,15 @@ async function getBalance(userId, exchangeId) {
 // par exchange pour un chemin générique fiable) — bracketUnsupported=true
 // signale ce cas à trading.controller.js, qui avertit l'utilisateur.
 async function placeLiveOrder(exchangeId, creds, { symbol, side, type, quantity, price, stopLoss, takeProfit }) {
+  // Global kill-switch, enforced HERE (the last step before the exchange) so no
+  // route, script or future caller can bypass it. Set PAPER_TRADING=false to allow real orders.
+  if (env.PAPER_TRADING) {
+    const err = new Error('Live trading is disabled on this server (PAPER_TRADING=true). No order was sent to the exchange.');
+    err.status = 403;
+    err.code = 'PAPER_TRADING_ENABLED';
+    throw err;
+  }
+
   if (exchangeId === 'oanda') {
     const base = getOandaBaseUrl(creds.mode);
     const units = side === 'buy' ? String(quantity) : String(-quantity);

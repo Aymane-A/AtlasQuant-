@@ -1,8 +1,18 @@
-import { defineConfig } from 'vite';
+import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 
-export default defineConfig({
+export default defineConfig(({ mode }) => {
+  // Production builds must know the public API/WS URLs (they are inlined at build time).
+  // Without this check the bundle would silently point visitors' browsers at localhost.
+  if (mode === 'production') {
+    const env = loadEnv(mode, process.cwd(), 'VITE_');
+    const missing = ['VITE_API_URL', 'VITE_WS_URL'].filter((k) => !(process.env[k] || env[k]));
+    if (missing.length) {
+      throw new Error(`[vite] Missing ${missing.join(', ')} for the production build. Example: VITE_API_URL=https://api.example.com/api VITE_WS_URL=wss://api.example.com`);
+    }
+  }
+  return {
   plugins: [react()],
   resolve: {
     alias: {
@@ -33,4 +43,5 @@ export default defineConfig({
   preview: {
     port: 3000,
   },
+  };
 });

@@ -10,8 +10,11 @@ COPY frontend/package*.json ./
 RUN npm ci
 
 # Vite inlines these at BUILD time (not runtime) — they must be the PUBLIC URLs the browser will call.
-ARG VITE_API_URL=http://localhost:5000/api
-ARG VITE_WS_URL=ws://localhost:5000
+# No defaults on purpose: a build without them fails instead of shipping a localhost URL.
+# (docker-compose.yml passes localhost defaults for the local stack.)
+ARG VITE_API_URL
+ARG VITE_WS_URL
+RUN test -n "$VITE_API_URL" && test -n "$VITE_WS_URL" || (echo 'ERROR: pass --build-arg VITE_API_URL=... and VITE_WS_URL=...' && exit 1)
 ENV VITE_API_URL=$VITE_API_URL VITE_WS_URL=$VITE_WS_URL
 
 COPY frontend/ ./

@@ -135,9 +135,15 @@ def test_api_predict_auth_and_validation(monkeypatch):
     body = {"symbol": "BTCUSDT", "timeframe": "1h", "candles": _candles()}
 
     monkeypatch.delenv("AI_SERVICE_KEY", raising=False)
+    monkeypatch.delenv("AI_ALLOW_INSECURE", raising=False)
     assert client.get("/health").status_code == 200
+    # fail closed: no key configured and no explicit dev opt-in => refuse
+    assert client.post("/predict", json=body).status_code == 503
+
+    monkeypatch.setenv("AI_ALLOW_INSECURE", "1")          # explicit local-dev opt-in
     r = client.post("/predict", json=body)
     assert r.status_code == 200 and r.json()["risk"]["level"] in ("low", "medium", "high")
+    monkeypatch.delenv("AI_ALLOW_INSECURE", raising=False)
 
     monkeypatch.setenv("AI_SERVICE_KEY", "secret")
     assert client.post("/predict", json=body).status_code == 401

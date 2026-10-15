@@ -28,9 +28,16 @@ const BATCH_SIZE = 5;
 const BATCH_DELAY_MS = 300;
 
 
+// Supported stock universe. Override with PRICES_ALLOWED_SYMBOLS=AAPL,MSFT,... (comma-separated).
+// Anything outside it is ignored by /stocks (it protects the Yahoo rate limit).
 const ALLOWED_SYMBOLS = new Set(
-  DEFAULT_SYMBOLS.split(',')
+  (process.env.PRICES_ALLOWED_SYMBOLS || DEFAULT_SYMBOLS)
+    .split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
 );
+
+// Hardcoded demo prices are NEVER served as quotes unless explicitly enabled
+// (PRICES_DEMO_MODE=true) — and then every such quote is flagged isDemo:true.
+const DEMO_STATIC = process.env.PRICES_DEMO_MODE === 'true';
 
 
 
@@ -414,7 +421,8 @@ const rawSymbols =
  DEFAULT_SYMBOLS
 )
 
-.replace(/[^a-zA-Z,]/g,'');
+.replace(/[^a-zA-Z,]/g,'')
+.toUpperCase();
 
 
 
@@ -593,7 +601,7 @@ symbols
 
 
 
- if(STATIC[symbol]){
+ if(DEMO_STATIC && STATIC[symbol]){
 
 
  staticFalls++;
@@ -606,7 +614,9 @@ symbols
 
   fromCache:false,
 
-  isStale:true
+  isStale:true,
+
+  isDemo:true
 
  };
 
@@ -631,11 +641,11 @@ symbols
 if(!quotes.length){
 
 
- return res.status(404).json({
+ return res.status(503).json({
 
  success:false,
 
- error:'No data found'
+ error:'Market data temporarily unavailable'
 
  });
 

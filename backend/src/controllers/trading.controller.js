@@ -168,7 +168,7 @@ async function placeOrder(req, res) {
 
   } catch (err) {
     logger.error(`[trading.placeOrder] ${err.message}`);
-    res.status(err.status || 500).json({ success:false, error: err.message });
+    res.status(err.status || 500).json({ success:false, ...(err.code ? { code: err.code } : {}), error: err.message });
   }
 }
 
