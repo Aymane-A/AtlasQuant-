@@ -6,6 +6,7 @@
  */
 const logger = require('../utils/logger');
 const { resolveSymbol } = require('../services/symbolResolver.service');
+const { sendServerError } = require('../utils/httpError');
 
 // GET /api/symbols/resolve?q=<input>
 async function resolve(req, res) {
@@ -17,7 +18,7 @@ async function resolve(req, res) {
     return res.status(200).json({ success: true, ...result });
   } catch (err) {
     logger.error(`[symbols.resolve] ${err.message}`);
-    return res.status(500).json({ success: false, error: err.message });
+    return sendServerError(res, err);
   }
 }
 

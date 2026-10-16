@@ -3,6 +3,7 @@
  */
 const { fetchAllNews } = require('../services/newsFeed.service');
 const logger = require('../utils/logger');
+const { sendServerError } = require('../utils/httpError');
 
 async function getNews(req, res) {
   try {
@@ -10,7 +11,7 @@ async function getNews(req, res) {
     res.json({ success: true, articles });
   } catch (err) {
     logger.error(`[news.controller] ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 

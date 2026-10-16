@@ -5,6 +5,7 @@
  */
 const logger = require('../utils/logger');
 const { buildDashboardPayload } = require('../services/dashboardData.service');
+const { sendServerError } = require('../utils/httpError');
 
 async function getDashboardData(req, res) {
   try {
@@ -19,7 +20,7 @@ async function getDashboardData(req, res) {
     res.json({ success: true, ...payload });
   } catch (err) {
     logger.error(`[dashboard] Error: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 

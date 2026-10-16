@@ -1269,6 +1269,7 @@ export default function Trading() {
   const [ticker,        setTicker]        = useState(null);
   const [candles,       setCandles]       = useState([]);
   const [balance,       setBalance]       = useState([]);
+  const [balanceUnavailable, setBalanceUnavailable] = useState(false);
   const [tickerLoading, setTickerLoading] = useState(false);
   const [ordersRefresh, setOrdersRefresh] = useState(0);
   const [chartMode,     setChartMode]     = useState('tradingview');
@@ -1434,8 +1435,14 @@ export default function Trading() {
   useEffect(() => {
     if (!selectedExId) return;
     api.get(`/trading/balance?exchangeId=${selectedExId}`)
-      .then(res => { if (res.data.success) setBalance(res.data.balances || []); })
-      .catch(() => {});
+      .then(res => {
+        if (res.data.success) { setBalance(res.data.balances || []); setBalanceUnavailable(false); }
+      })
+      .catch((err) => {
+        // Never keep showing an old/fake balance: clear it and say the sync failed.
+        setBalance([]);
+        setBalanceUnavailable(true);
+      });
   }, [selectedExId, ordersRefresh]);
 
   const connectedExchanges = EXCHANGES.filter(e => connections[e.id]);
@@ -1631,6 +1638,15 @@ export default function Trading() {
               </>
             )}
           </div>
+
+          {balanceUnavailable && (
+            <div style={{ ...panel, padding:'14px 22px', border:'1px solid rgba(255,170,0,0.35)' }}>
+              <Label>Balance — {selectedEx?.name}</Label>
+              <div style={{ ...mono, fontSize:12, color:'#ffaa00', marginTop:8 }}>
+                ⚠ Balance unavailable — could not sync with the broker. Nothing is shown rather than a made-up value. It will retry on the next refresh.
+              </div>
+            </div>
+          )}
 
           {balance.filter(b => b.total > 0).length > 0 && (
             <div style={{ ...panel, padding:'16px 22px' }}>

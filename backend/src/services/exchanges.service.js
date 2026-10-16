@@ -710,10 +710,17 @@ async function closePaperTrade(userId, tradeId, closePrice, reason = null) {
     `UPDATE paper_trades
      SET exit_price = $1, pnl = $2, pnl_pct = $3, status = 'closed', closed_at = NOW(),
          close_reason = COALESCE($5::text, close_reason)
-     WHERE id = $4
+     WHERE id = $4 AND user_id = $6 AND status = 'open'
      RETURNING *`,
-    [closePrice, pnl.toFixed(8), pnlPct.toFixed(4), tradeId, reason]
+    [closePrice, pnl.toFixed(8), pnlPct.toFixed(4), tradeId, reason, userId]
   );
+  // Atomic + idempotent: if a concurrent close (manual click vs. the SL/TP monitor) got there first,
+  // the guarded UPDATE matches no row and we must NOT overwrite its exit price / P&L.
+  if (!rows.length) {
+    const err = new Error('Paper trade introuvable ou déjà fermé');
+    err.status = 404;
+    throw err;
+  }
   logger.info(`[exchanges] paper trade #${tradeId} fermé${reason ? ` (${reason})` : ''} — pnl ${pnl.toFixed(2)}`);
   return rows[0];
 }

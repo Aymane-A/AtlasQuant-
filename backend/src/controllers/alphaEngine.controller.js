@@ -9,6 +9,7 @@
  */
 const db     = require('../config/db');
 const logger = require('../utils/logger');
+const { sendServerError } = require('../utils/httpError');
 
 // ── Helpers ───────────────────────────────────────────────
 
@@ -302,7 +303,7 @@ async function getAlphaEngineData(req, res) {
 
   } catch (err) {
     logger.error(`[alphaEngine] ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 

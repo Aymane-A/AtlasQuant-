@@ -55,15 +55,65 @@ const { fetchCandlesForBacktest, convertAmount } = require('../services/backtest
 const { runSimulation, aggregatePortfolio } = require('../services/backtestEngine.service');
 const { listStrategies } = require('../services/backtestStrategies.service');
 const { computeParamsHash } = require('../utils/paramsHash');
+const { toNumber, isAbsent } = require('../utils/validate');
+const { sendServerError, publicMessage } = require('../utils/httpError');
 
 const MAX_SYMBOLS = 8;
 const GATE_FRESHNESS_DAYS = 30;
 
-function parseCapital(raw) {
-  if (typeof raw === 'number') return raw;
-  const cleaned = String(raw || '100000').replace(/[^0-9.]/g, '');
-  const value = parseFloat(cleaned);
-  return Number.isFinite(value) && value > 0 ? value : 100000;
+const DEFAULT_CAPITAL = 100000;
+const DEFAULT_MAX_POSITIONS = 5;
+const DEFAULT_POSITION_PCT = 10;
+
+/** "100,000" / "$100 000" / 100000 -> number, else NaN. */
+function parseAmount(raw) {
+  if (typeof raw === 'string') return toNumber(raw.replace(/[,\s_$€£]/g, ''));
+  return toNumber(raw);
+}
+
+/**
+ * Validates the backtest inputs and returns the parameters ACTUALLY used.
+ * Invalid values are rejected (400) instead of being silently replaced; values that
+ * are simply absent fall back to a default, and that default is reported back in
+ * `defaultsApplied` so the result always shows what was really simulated.
+ */
+function resolveBacktestParams(body) {
+  const errors = [];
+  const defaultsApplied = [];
+
+  let capital;
+  if (isAbsent(body.capital)) { capital = DEFAULT_CAPITAL; defaultsApplied.push('capital'); }
+  else {
+    capital = parseAmount(body.capital);
+    if (!(capital > 0) || capital > 1e12) errors.push('capital must be a positive number');
+  }
+
+  let maxPositions;
+  if (isAbsent(body.maxPos)) { maxPositions = DEFAULT_MAX_POSITIONS; defaultsApplied.push('maxPositions'); }
+  else {
+    maxPositions = toNumber(body.maxPos);
+    if (!Number.isInteger(maxPositions) || maxPositions < 1 || maxPositions > 50) errors.push('maxPos must be an integer between 1 and 50');
+  }
+
+  let positionSizeMode = body.positionSizeMode;
+  if (isAbsent(positionSizeMode)) { positionSizeMode = 'fixed_pct'; defaultsApplied.push('positionSizeMode'); }
+  else if (!['fixed_pct', 'fixed_dollar', 'kelly'].includes(positionSizeMode)) {
+    errors.push('positionSizeMode must be one of fixed_pct, fixed_dollar, kelly');
+  }
+
+  let positionSizeValue = null;
+  if (positionSizeMode === 'fixed_pct') {
+    if (isAbsent(body.positionSizeValue)) { positionSizeValue = DEFAULT_POSITION_PCT; defaultsApplied.push('positionSizeValue'); }
+    else {
+      positionSizeValue = toNumber(body.positionSizeValue);
+      if (!(positionSizeValue > 0 && positionSizeValue <= 100)) errors.push('positionSizeValue must be a percentage > 0 and <= 100');
+    }
+  } else if (positionSizeMode === 'fixed_dollar') {
+    positionSizeValue = parseAmount(body.positionSizeValue);
+    if (!(positionSizeValue > 0) || positionSizeValue > 1e12) errors.push('positionSizeValue must be a positive amount for fixed_dollar');
+  }
+
+  return { errors, capital, maxPositions, positionSizeMode, positionSizeValue, defaultsApplied };
 }
 
 function parseUniverse(universe) {
@@ -90,18 +140,16 @@ function parseUniverse(universe) {
  * donc des `positionSizeDollar` différents en valeur absolue, mais
  * équivalents en pouvoir d'achat réel.
  */
-async function resolvePositionSizingForSymbol(body, capitalCurrency, quoteCurrency, warningsSink) {
-  const mode = body.positionSizeMode;
-  if (mode === 'fixed_dollar') {
-    const raw = parseCapital(body.positionSizeValue);
-    const converted = await convertAmount(raw, capitalCurrency, quoteCurrency, warningsSink);
+async function resolvePositionSizingForSymbol(params, capitalCurrency, quoteCurrency, warningsSink) {
+  // `params` comes from resolveBacktestParams(): already validated, no silent fallback here.
+  if (params.positionSizeMode === 'fixed_dollar') {
+    const converted = await convertAmount(params.positionSizeValue, capitalCurrency, quoteCurrency, warningsSink);
     return { positionSizeMode: 'fixed_dollar', positionSizeDollar: converted };
   }
-  if (mode === 'kelly') {
+  if (params.positionSizeMode === 'kelly') {
     return { positionSizeMode: 'kelly' };
   }
-  const pct = parseFloat(body.positionSizeValue);
-  return { positionSizeMode: 'fixed_pct', positionSizePct: Number.isFinite(pct) && pct > 0 ? pct : 10 };
+  return { positionSizeMode: 'fixed_pct', positionSizePct: params.positionSizeValue };
 }
 
 function buildWarningMessage(requestedTimeframe, succeeded, skipped) {
@@ -138,7 +186,7 @@ function computeExpectancy(metrics) {
 async function runBacktest(req, res) {
   try {
     const userId = req.user.id;
-    const { name, universe, from, to, tf, capital, maxPos } = req.body;
+    const { name, universe, from, to, tf, maxPos } = req.body;
 
     const {
       symbols,
@@ -174,7 +222,11 @@ async function runBacktest(req, res) {
       });
     }
 
-    const initialCapitalTotal = parseCapital(capital);
+    const params = resolveBacktestParams(req.body);
+    if (params.errors.length) {
+      return res.status(400).json({ success: false, error: params.errors.join('; '), errors: params.errors });
+    }
+    const initialCapitalTotal = params.capital;
     const capitalPerSymbol = initialCapitalTotal / symbols.length;
     // Devise dans laquelle l'utilisateur a saisi `capital` / le "Fixed $
     // per trade" (Settings → Language & Region côté frontend). Fallback
@@ -193,7 +245,10 @@ async function runBacktest(req, res) {
         await fetchCandlesForBacktest(symbol, requestedTimeframe, from, to);
 
       if (!candles || candles.length < 50) {
-        throw new Error(`Données insuffisantes pour ${symbol} (${candles?.length || 0} bougies récupérées, 50 minimum).`);
+        throw Object.assign(
+          new Error(`Données insuffisantes pour ${symbol} (${candles?.length || 0} bougies récupérées, 50 minimum).`),
+          { expose: true }
+        );
       }
 
       // Capital et position sizing convertis vers la devise DE CE
@@ -202,11 +257,11 @@ async function runBacktest(req, res) {
       // s'il était déjà dans la bonne devise.
       const [convertedCapital, positionSizing] = await Promise.all([
         convertAmount(capitalPerSymbol, capitalCurrency, quoteCurrency, fxWarnings),
-        resolvePositionSizingForSymbol(req.body, capitalCurrency, quoteCurrency, fxWarnings),
+        resolvePositionSizingForSymbol(params, capitalCurrency, quoteCurrency, fxWarnings),
       ]);
 
       const result = runSimulation(candles, convertedCapital, {
-        maxPositions: parseInt(maxPos) || 5,
+        maxPositions: params.maxPositions,
         ...positionSizing,
         quoteCurrency,
         strategyId: requestedStrategyId,
@@ -217,7 +272,7 @@ async function runBacktest(req, res) {
 
     const succeeded = settled.filter(s => s.status === 'fulfilled').map(s => s.value);
     const skipped = settled
-      .map((s, idx) => (s.status === 'rejected' ? { symbol: symbols[idx], reason: s.reason.message } : null))
+      .map((s, idx) => (s.status === 'rejected' ? { symbol: symbols[idx], reason: publicMessage(s.reason) } : null))
       .filter(Boolean);
 
     if (succeeded.length === 0) {
@@ -263,6 +318,18 @@ async function runBacktest(req, res) {
     const fxWarning = fxWarnings.length > 0
       ? `Conversion FX indisponible pour ${[...new Set(fxWarnings)].join(', ')} — montant(s) utilisé(s) sans conversion (taux 1:1).`
       : '';
+    // Parameters ACTUALLY simulated (after validation/defaults) — shown with every result.
+    const effectiveParams = {
+      capital: params.capital,
+      capitalCurrency,
+      maxPositions: params.maxPositions,
+      positionSizeMode: params.positionSizeMode,
+      positionSizeValue: params.positionSizeValue,
+      strategyId: requestedStrategyId,
+      timeframe: requestedTimeframe,
+      from, to,
+      defaultsApplied: params.defaultsApplied,
+    };
     const warningParts = [buildWarningMessage(requestedTimeframe, succeeded, skipped), universeWarning, fxWarning]
       .filter(Boolean);
     const warning = warningParts.length > 0 ? warningParts.join(' ') : undefined;
@@ -297,12 +364,12 @@ async function runBacktest(req, res) {
        RETURNING id`,
       [
         userId, symbols.join(','), strategyName, requestedStrategyId,
-        JSON.stringify({ metrics, charts, trades, warning, skipped }),
+        JSON.stringify({ metrics, charts, trades, warning, skipped, effectiveParams }),
         JSON.stringify({
           strategyId: requestedStrategyId,
-          maxPositions: parseInt(maxPos) || 5,
-          positionSizeMode: req.body.positionSizeMode,
-          positionSizeValue: req.body.positionSizeValue,
+          maxPositions: params.maxPositions,
+          positionSizeMode: params.positionSizeMode,
+          positionSizeValue: params.positionSizeValue,
         }),
         paramsHash, from, to, expiresAt.toISOString(),
         totalTrades, expectancy, Number.isFinite(sharpe) ? sharpe : null, gateEligible,
@@ -321,14 +388,11 @@ async function runBacktest(req, res) {
       warning,
       skipped: skipped.length > 0 ? skipped : undefined,
       gateEligible,
+      effectiveParams,
     });
 
   } catch (err) {
-    logger.error(`[backtest.controller] Error: ${err.message}`);
-    return res.status(500).json({
-      success: false,
-      error: err.message || 'Le backtest a échoué pendant l\'exécution',
-    });
+    return sendServerError(res, err, '[backtest.controller]');
   }
 }
 
@@ -362,6 +426,7 @@ async function getBacktestById(req, res) {
       trades: result.trades,
       warning: result.warning,
       skipped: result.skipped,
+      effectiveParams: result.effectiveParams,
       gateEligible: record.gate_eligible,
       expiresAt: record.expires_at,
       expectancy: record.expectancy,
@@ -451,6 +516,7 @@ async function deleteBacktestConfig(req, res) {
 
 module.exports = {
   runBacktest,
+  _resolveBacktestParams: resolveBacktestParams, // exported for unit tests
   getBacktestById,
   saveBacktestConfig,
   listBacktestConfigs,

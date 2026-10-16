@@ -6,6 +6,7 @@
  */
 const db     = require('../config/db');
 const logger = require('../utils/logger');
+const { sendServerError } = require('../utils/httpError');
 
 /** GET /api/screener/presets */
 async function listPresets(req, res) {
@@ -18,7 +19,7 @@ async function listPresets(req, res) {
     res.json({ success: true, presets: rows });
   } catch (err) {
     logger.error(`[screener] listPresets: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -37,7 +38,7 @@ async function savePreset(req, res) {
     res.json({ success: true, preset });
   } catch (err) {
     logger.error(`[screener] savePreset: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -51,7 +52,7 @@ async function deletePreset(req, res) {
     res.json({ success: true });
   } catch (err) {
     logger.error(`[screener] deletePreset: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 

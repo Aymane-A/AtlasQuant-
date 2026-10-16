@@ -7,6 +7,7 @@ const archiver = require('archiver');
 const db       = require('../config/db');
 const logger   = require('../utils/logger');
 const { logAuditEvent } = require('../utils/auditLog');
+const { sendServerError } = require('../utils/httpError');
 
 const SUPPORTED_CURRENCIES = ['USD', 'EUR', 'MAD', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'CNY', 'AED'];
 const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
@@ -62,7 +63,7 @@ async function getSettings(req, res) {
     res.json({ success: true, profile: userRows[0] || {}, settings });
   } catch (err) {
     logger.error(`[settings] getSettings: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -268,7 +269,7 @@ async function updateSettings(req, res) {
 
   } catch (err) {
     logger.error(`[settings] updateSettings: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -314,7 +315,7 @@ async function testWebhook(req, res) {
     }
   } catch (err) {
     logger.error(`[settings] testWebhook: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -351,7 +352,7 @@ async function testTelegram(req, res) {
     res.json({ success: true, message: 'Message de test envoyé' });
   } catch (err) {
     logger.error(`[settings] testTelegram: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -389,7 +390,7 @@ async function sendVerificationEmail(req, res) {
     res.json({ success: true, message: 'Email de vérification envoyé' });
   } catch (err) {
     logger.error(`[settings] resendVerification: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 // ── POST /api/settings/email/verify (public, sans auth) ───
@@ -418,7 +419,7 @@ async function verifyEmail(req, res) {
     res.json({ success: true, message: 'Email vérifié avec succès' });
   } catch (err) {
     logger.error(`[settings] verifyEmail: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -435,7 +436,7 @@ async function getAuditLog(req, res) {
     res.json({ success: true, events: rows });
   } catch (err) {
     logger.error(`[settings] getAuditLog: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -467,7 +468,7 @@ async function changePassword(req, res) {
     res.json({ success: true, message: 'Mot de passe mis à jour' });
   } catch (err) {
     logger.error(`[settings] changePassword: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -546,7 +547,7 @@ async function exportUserData(req, res) {
     await archive.finalize();
   } catch (err) {
     logger.error(`[settings] exportUserData: ${err.message}`);
-    if (!res.headersSent) res.status(500).json({ success: false, error: err.message });
+    if (!res.headersSent) sendServerError(res, err);
   }
 }
 
@@ -573,7 +574,7 @@ async function deleteAccount(req, res) {
     res.json({ success: true, message: 'Compte supprimé définitivement' });
   } catch (err) {
     logger.error(`[settings] deleteAccount: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 

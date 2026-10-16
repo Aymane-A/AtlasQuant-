@@ -5,7 +5,7 @@
   "scripts": {
     "start": "node src/app.js",
     "dev": "node --max-old-space-size=4096 node_modules/nodemon/bin/nodemon.js src/app.js",
-    "test": "node --test tests/security.test.js tests/paper-guard.test.js"
+    "test": "node --test tests/security.test.js tests/paper-guard.test.js tests/audit-fixes.test.js tests/paper-close.test.js"
   },
   "dependencies": {
     "archiver": "^8.0.0",

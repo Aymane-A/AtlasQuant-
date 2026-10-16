@@ -3,6 +3,7 @@
  */
 const db     = require('../config/db');
 const logger = require('../utils/logger');
+const { sendServerError, publicMessage } = require('../utils/httpError');
 
 function parseRR(val) {
     if (!val) return 0;
@@ -83,7 +84,7 @@ async function getAllSignals(req, res) {
                     updateJob(jobId, { status: 'done', signals: filtered });
                 } catch (err) {
                     logger.error(`[getAllSignals] scan job ${jobId} failed: ${err.message}`);
-                    updateJob(jobId, { status: 'error', error: err.message });
+                    updateJob(jobId, { status: 'error', error: publicMessage(err) });
                 }
             })();
 
@@ -119,7 +120,7 @@ async function getAllSignals(req, res) {
 
     } catch (err) {
         logger.error(`[getAllSignals] ${err.message}`);
-        res.status(500).json({ success: false, error: err.message });
+        sendServerError(res, err);
     }
 }
 
@@ -162,7 +163,7 @@ async function getSignalBySymbol(req, res) {
         );
         res.json({ success: true, signals: rows });
     } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
+        sendServerError(res, err);
     }
 }
 
@@ -172,7 +173,7 @@ async function getSupportedSymbols(req, res) {
         const { rows } = await db.query('SELECT DISTINCT symbol, asset_class FROM signals ORDER BY asset_class, symbol');
         res.json({ success: true, symbols: rows });
     } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
+        sendServerError(res, err);
     }
 }
 

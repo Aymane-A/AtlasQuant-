@@ -17,6 +17,7 @@ const logger       = require('../utils/logger');
 const exchangesSvc = require('../services/exchanges.service');
 const { getBenchmarkHistory } = require('../services/marketData.service');
 const { buildBenchmarkCurve } = require('../services/benchmarkComparison.service');
+const { sendServerError } = require('../utils/httpError');
 
 const COLORS = ['#00f5d4','#a78bfa','#f59e0b','#f43f5e','#38bdf8','#34d399','#fb923c','#e879f9'];
 
@@ -582,7 +583,7 @@ async function addPosition(req, res) {
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     logger.error(`[portfolio.addPosition] ${err.message}`);
-    res.status(500).json({ success:false, error:err.message });
+    sendServerError(res, err);
   } finally {
     client.release();
   }
@@ -695,7 +696,7 @@ async function executeClose(req, res, requestedQty) {
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     logger.error(`[portfolio.executeClose] ${err.message}`);
-    res.status(500).json({ success:false, error:err.message });
+    sendServerError(res, err);
   } finally {
     client.release();
   }
@@ -777,7 +778,7 @@ async function getTradeHistory(req, res) {
     });
   } catch (err) {
     logger.error(`[portfolio.getTradeHistory] ${err.message}`);
-    res.status(500).json({ success:false, error:err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -794,7 +795,7 @@ async function updateCash(req, res) {
     );
     res.status(200).json({ success:true, cashBalance });
   } catch (err) {
-    res.status(500).json({ success:false, error:err.message });
+    sendServerError(res, err);
   }
 }
 

@@ -7,6 +7,7 @@ const {
   getForexPrices, getCommodityPrices,
 } = require('../services/marketData.service');
 const logger = require('../utils/logger');
+const { sendServerError } = require('../utils/httpError');
 
 // Cache بسيط (5 ثواني) لكل نوع أصول على حدة
 const cache = { crypto: null, forex: null, commodity: null };
@@ -39,7 +40,7 @@ async function getPrices(req, res) {
     res.json({ success: true, prices, timestamp: new Date().toISOString() });
   } catch (err) {
     logger.error(`[market.controller] getPrices: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -54,7 +55,7 @@ async function getForex(req, res) {
     res.json({ success: true, prices, timestamp: new Date().toISOString() });
   } catch (err) {
     logger.error(`[market.controller] getForex: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -69,7 +70,7 @@ async function getCommodities(req, res) {
     res.json({ success: true, prices, timestamp: new Date().toISOString() });
   } catch (err) {
     logger.error(`[market.controller] getCommodities: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -81,7 +82,7 @@ async function getStats(req, res) {
     res.json({ success: true, stats });
   } catch (err) {
     logger.error(`[market.controller] getStats: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -95,7 +96,7 @@ async function getCandle(req, res) {
     res.json({ success: true, symbol, interval, candles });
   } catch (err) {
     logger.error(`[market.controller] getCandle: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 

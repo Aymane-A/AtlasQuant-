@@ -89,6 +89,7 @@ export default function Backtester() {
   const [progress, setProgress] = useState(0);
   const [error, setError]       = useState(null);
   const [warning, setWarning]   = useState(null);
+  const [effectiveParams, setEffectiveParams] = useState(null);
   const [skipped, setSkipped]   = useState(null);
   const [settingsCurrency, setSettingsCurrency] = useState('$');
   const [settingsCurrencyCode, setSettingsCurrencyCode] = useState('USD');
@@ -165,6 +166,7 @@ export default function Backtester() {
     setRunning(true);
     setError(null);
     setWarning(null);
+    setEffectiveParams(null);
     setSkipped(null);
     setProgress(5);
     // ✅ Reset état Auto-Trade à chaque nouveau run — un backtest précédent
@@ -214,6 +216,7 @@ export default function Backtester() {
         setProgress(100);
         setMetrics(result.metrics);
         setWarning(result.warning || null);
+        setEffectiveParams(result.effectiveParams || null);
         setSkipped(result.skipped || null);
         setBacktestData({
           stratData: result.charts?.stratData || [],
@@ -439,6 +442,22 @@ export default function Backtester() {
         }}>
           <span>{warning}</span>
           <button onClick={() => setWarning(null)} style={{ background: 'transparent', border: 'none', color: 'var(--amber)', cursor: 'pointer', fontSize: 14, lineHeight: 1 }} aria-label="dismiss">×</button>
+        </div>
+      )}
+
+      {effectiveParams && (
+        <div style={{
+          marginBottom: 16, padding: '10px 16px', borderRadius: 10,
+          background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)',
+          color: 'var(--text-2, var(--text))', fontSize: 11, fontFamily: 'JetBrains Mono,monospace',
+        }}>
+          Simulated with: capital {Number(effectiveParams.capital).toLocaleString('en-US')} {effectiveParams.capitalCurrency}
+          {' · '}max positions {effectiveParams.maxPositions}
+          {' · '}sizing {effectiveParams.positionSizeMode}
+          {effectiveParams.positionSizeValue != null ? ` (${effectiveParams.positionSizeValue}${effectiveParams.positionSizeMode === 'fixed_pct' ? '%' : ''})` : ''}
+          {effectiveParams.defaultsApplied?.length > 0 && (
+            <span style={{ color: 'var(--amber)' }}> · defaults applied: {effectiveParams.defaultsApplied.join(', ')}</span>
+          )}
         </div>
       )}
 

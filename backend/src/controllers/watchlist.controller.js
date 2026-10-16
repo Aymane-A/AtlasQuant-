@@ -10,6 +10,7 @@ const yahooFinance = new YahooFinance({ suppressNotices: ['yahooSurvey'] });
 
 const { getLivePrices } = require('../services/livePrices.service');
 const { resolveSymbol } = require('../services/symbolResolver.service');
+const { sendServerError } = require('../utils/httpError');
 
 // ── Symbol mapping (Binance → Display) ────────────────────
 function toDisplaySymbol(sym) {
@@ -155,7 +156,7 @@ async function getWatchlist(req, res) {
         res.json({ success: true, stocks });
     } catch (err) {
         logger.error(`[watchlist] getWatchlist: ${err.message}`);
-        res.status(500).json({ success: false, error: err.message });
+        sendServerError(res, err);
     }
 }
 
@@ -201,7 +202,7 @@ async function addSymbol(req, res) {
         });
     } catch (err) {
         logger.error(`[watchlist] addSymbol: ${err.message}`);
-        res.status(500).json({ success: false, error: err.message });
+        sendServerError(res, err);
     }
 }
 
@@ -215,7 +216,7 @@ async function removeSymbol(req, res) {
         res.json({ success: true, message: 'Symbole supprimé' });
     } catch (err) {
         logger.error(`[watchlist] removeSymbol: ${err.message}`);
-        res.status(500).json({ success: false, error: err.message });
+        sendServerError(res, err);
     }
 }
 

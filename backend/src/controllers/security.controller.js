@@ -8,6 +8,7 @@ const crypto     = require('crypto');
 const db         = require('../config/db');
 const logger     = require('../utils/logger');
 const { logAuditEvent } = require('../utils/auditLog');
+const { sendServerError } = require('../utils/httpError');
 
 // ═══════════════════════════════════════════════════════════
 // 2FA (TOTP)
@@ -35,7 +36,7 @@ async function setup2FA(req, res) {
     res.json({ success: true, qrCode: qrDataUrl, secret: secret.base32 });
   } catch (err) {
     logger.error(`[security] setup2FA: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -76,7 +77,7 @@ async function verify2FA(req, res) {
     res.json({ success: true, message: '2FA activé', backupCodes });
   } catch (err) {
     logger.error(`[security] verify2FA: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -103,7 +104,7 @@ async function disable2FA(req, res) {
     res.json({ success: true, message: '2FA désactivé' });
   } catch (err) {
     logger.error(`[security] disable2FA: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -114,7 +115,7 @@ async function get2FAStatus(req, res) {
     res.json({ success: true, enabled: rows[0]?.twofa_enabled || false });
   } catch (err) {
     logger.error(`[security] get2FAStatus: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -158,7 +159,7 @@ async function listSessions(req, res) {
     res.json({ success: true, sessions });
   } catch (err) {
     logger.error(`[security] listSessions: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -178,7 +179,7 @@ async function revokeSession(req, res) {
     res.json({ success: true, message: 'Session révoquée' });
   } catch (err) {
     logger.error(`[security] revokeSession: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -198,7 +199,7 @@ async function revokeAllOtherSessions(req, res) {
     res.json({ success: true, message: 'Toutes les autres sessions ont été déconnectées' });
   } catch (err) {
     logger.error(`[security] revokeAllOtherSessions: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -218,7 +219,7 @@ async function listApiKeys(req, res) {
     res.json({ success: true, keys: rows });
   } catch (err) {
     logger.error(`[security] listApiKeys: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -253,7 +254,7 @@ async function createApiKey(req, res) {
     res.json({ success: true, key: rawKey, meta: rows[0] });
   } catch (err) {
     logger.error(`[security] createApiKey: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -273,7 +274,7 @@ async function revokeApiKey(req, res) {
     res.json({ success: true, message: 'Clé révoquée' });
   } catch (err) {
     logger.error(`[security] revokeApiKey: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    sendServerError(res, err);
   }
 }
 

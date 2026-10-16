@@ -8,6 +8,7 @@ const logger        = require('../utils/logger');
 const exchangesSvc  = require('../services/exchanges.service');
 const riskGuard     = require('../services/riskGuard.service');
 const { requireVerifiedEmailForLive } = require('../utils/emailVerified');
+const { sendServerError } = require('../utils/httpError');
 
 // Reference price used for risk checks and paper fills: the limit price for limit
 // orders, otherwise the current market price. Returns null if it can't be fetched.
@@ -168,7 +169,7 @@ async function placeOrder(req, res) {
 
   } catch (err) {
     logger.error(`[trading.placeOrder] ${err.message}`);
-    res.status(err.status || 500).json({ success:false, ...(err.code ? { code: err.code } : {}), error: err.message });
+    sendServerError(res, err, '[trading.placeOrder]');
   }
 }
 
@@ -212,7 +213,7 @@ async function getOrders(req, res) {
     res.json({ success:true, orders: results });
   } catch (err) {
     logger.error(`[trading.getOrders] ${err.message}`);
-    res.status(500).json({ success:false, error: err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -248,7 +249,7 @@ async function cancelOrder(req, res) {
     res.json({ success:true, message:'Order cancelled' });
   } catch (err) {
     logger.error(`[trading.cancelOrder] ${err.message}`);
-    res.status(500).json({ success:false, error: err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -316,7 +317,7 @@ async function getTicker(req, res) {
 
     } catch (err) {
       logger.error(`[trading.getTicker] oanda(${symbol}): ${err.message}`);
-      return res.status(500).json({ success:false, error: err.message });
+      return sendServerError(res, err);
     }
   }
 
@@ -379,7 +380,7 @@ async function getTicker(req, res) {
 
     } catch (err) {
       logger.error(`[trading.getTicker] alpaca(${symbol}): ${err.message}`);
-      return res.status(500).json({ success:false, error: err.message });
+      return sendServerError(res, err);
     }
   }
 
@@ -425,7 +426,7 @@ async function getTicker(req, res) {
     res.json({ success:true, ticker, candles });
   } catch (err) {
     logger.error(`[trading.getTicker] ${err.message}`);
-    res.status(500).json({ success:false, error: err.message });
+    sendServerError(res, err);
   }
 }
 
@@ -442,31 +443,27 @@ async function getBalance(req, res) {
     if (!creds) return res.status(404).json({ success:false, error:'Exchange not connected' });
 
     if (creds.mode === 'paper') {
-      // OANDA/Alpaca paper: still hit the free practice API for a realistic
-      // simulated balance instead of a hardcoded crypto-style fixture.
-      if (exchangeId === 'oanda') {
+      // OANDA/Alpaca paper: balance comes from the broker's free practice API ("source: 'exchange'").
+      // If that sync fails we say so explicitly (balanceUnavailable) — we NEVER invent a balance
+      // and present it as the connected account's.
+      if (exchangeId === 'oanda' || exchangeId === 'alpaca') {
         try {
-          const balances = await exchangesSvc.fetchPortfolio('oanda', creds);
-          return res.json({ success:true, mode:'paper', balances });
+          const balances = await exchangesSvc.fetchPortfolio(exchangeId, creds);
+          return res.json({ success:true, mode:'paper', source:'exchange', simulated:false, balances });
         } catch (err) {
-          logger.error(`[trading.getBalance] oanda paper: ${err.message}`);
-          return res.json({ success:true, mode:'paper', balances: [{ symbol:'USD', free:10000, locked:0, total:10000 }] });
+          logger.error(`[trading.getBalance] ${exchangeId} paper: ${err.message}`);
+          return res.status(502).json({
+            success: false, mode: 'paper', source: 'unavailable', balanceUnavailable: true, balances: [],
+            error: 'Could not sync the practice-account balance from the broker. Try again shortly.',
+          });
         }
       }
-      if (exchangeId === 'alpaca') {
-        try {
-          const balances = await exchangesSvc.fetchPortfolio('alpaca', creds);
-          return res.json({ success:true, mode:'paper', balances });
-        } catch (err) {
-          logger.error(`[trading.getBalance] alpaca paper: ${err.message}`);
-          return res.json({ success:true, mode:'paper', balances: [{ symbol:'USD', free:100000, locked:0, total:100000 }] });
-        }
-      }
-      // Return simulated $10,000 paper balance
+      // Other exchanges in paper mode have no remote account: this is a SIMULATED wallet, flagged as such.
+      const start = exchangesSvc.PAPER_START_CAPITAL;
       return res.json({
-        success: true, mode:'paper',
+        success: true, mode:'paper', source:'simulated', simulated:true,
         balances: [
-          { symbol:'USDT', free:10000, locked:0, total:10000 },
+          { symbol:'USDT', free:start, locked:0, total:start },
           { symbol:'BTC',  free:0.1,   locked:0, total:0.1   },
           { symbol:'ETH',  free:1.0,   locked:0, total:1.0   },
         ]
@@ -474,11 +471,11 @@ async function getBalance(req, res) {
     }
 
     const balances = await exchangesSvc.fetchPortfolio(exchangeId, creds);
-    res.json({ success:true, mode: creds.mode, balances });
+    res.json({ success:true, mode: creds.mode, source:'exchange', simulated:false, balances });
 
   } catch (err) {
     logger.error(`[trading.getBalance] ${err.message}`);
-    res.status(500).json({ success:false, error: err.message });
+    sendServerError(res, err);
   }
 }
 

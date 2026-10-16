@@ -24,7 +24,9 @@
 const db = require('../config/db');
 const logger = require('../utils/logger');
 const { computeParamsHash } = require('../utils/paramsHash');
+const { validateAutoTradeParams, toId } = require('../utils/validate');
 const { listStrategies } = require('../services/backtestStrategies.service');
+const { sendServerError } = require('../utils/httpError');
 
 async function findMatchingBacktest(userId, symbol, strategyId, paramsHash) {
   const { rows } = await db.query(
@@ -57,6 +59,12 @@ async function createConfig(req, res) {
         success: false,
         error: 'symbol, strategyId et exchangeId sont requis',
       });
+    }
+
+    // Strict validation of the risk parameters (finite, in range, right type) — never trust the UI.
+    const { errors: paramErrors, values: pv } = validateAutoTradeParams(req.body);
+    if (paramErrors.length) {
+      return res.status(400).json({ success: false, error: paramErrors.join('; '), errors: paramErrors });
     }
 
     const availableStrategies = listStrategies();
@@ -96,9 +104,9 @@ async function createConfig(req, res) {
       [
         userId, cleanSymbol, strategyId, paramsHash, exchangeId,
         backtestId, 'backtest_required', // status réel décidé par le prochain cycle autoTrader
-        parseInt(probationTradesRequired, 10) || 5,
-        maxPositionSize ? parseFloat(maxPositionSize) : null,
-        maxDailyLossPct ? parseFloat(maxDailyLossPct) : null,
+        pv.probationTradesRequired ?? 5,
+        pv.maxPositionSize ?? null,
+        pv.maxDailyLossPct ?? null,
       ]
     );
 
@@ -107,7 +115,7 @@ async function createConfig(req, res) {
     return res.status(201).json({ success: true, config: rows[0] });
   } catch (err) {
     logger.error(`[autoTrade.createConfig] ${err.message}`);
-    return res.status(500).json({ success: false, error: err.message });
+    return sendServerError(res, err);
   }
 }
 
@@ -134,7 +142,7 @@ async function listConfigs(req, res) {
     return res.status(200).json({ success: true, configs: rows });
   } catch (err) {
     logger.error(`[autoTrade.listConfigs] ${err.message}`);
-    return res.status(500).json({ success: false, error: err.message });
+    return sendServerError(res, err);
   }
 }
 
@@ -146,8 +154,16 @@ async function listConfigs(req, res) {
 async function updateConfig(req, res) {
   try {
     const userId = req.user.id;
-    const { id } = req.params;
-    const { enabled, backtestId, probationTradesRequired, maxPositionSize, maxDailyLossPct } = req.body;
+    const id = toId(req.params.id);
+    if (!id) return res.status(400).json({ success: false, error: 'invalid config id' });
+    const { enabled, backtestId } = req.body;
+
+    const { errors: paramErrors, values: pv } = validateAutoTradeParams(req.body);
+    if (enabled !== undefined && typeof enabled !== 'boolean') paramErrors.push('enabled must be true or false');
+    if (backtestId !== undefined && backtestId !== null && !toId(backtestId)) paramErrors.push('backtestId must be a positive integer or null');
+    if (paramErrors.length) {
+      return res.status(400).json({ success: false, error: paramErrors.join('; '), errors: paramErrors });
+    }
 
     const { rows: existing } = await db.query(
       `SELECT * FROM auto_trade_configs WHERE id = $1 AND user_id = $2`,
@@ -191,11 +207,11 @@ async function updateConfig(req, res) {
        RETURNING *`,
       [
         id, userId,
-        enabled !== undefined ? !!enabled : null,
+        enabled !== undefined ? enabled : null,
         newBacktestId,
-        probationTradesRequired !== undefined ? parseInt(probationTradesRequired, 10) : null,
-        maxPositionSize !== undefined ? parseFloat(maxPositionSize) : null,
-        maxDailyLossPct !== undefined ? parseFloat(maxDailyLossPct) : null,
+        pv.probationTradesRequired ?? null,
+        pv.maxPositionSize ?? null,
+        pv.maxDailyLossPct ?? null,
       ]
     );
 
@@ -203,7 +219,7 @@ async function updateConfig(req, res) {
     return res.status(200).json({ success: true, config: rows[0] });
   } catch (err) {
     logger.error(`[autoTrade.updateConfig] ${err.message}`);
-    return res.status(500).json({ success: false, error: err.message });
+    return sendServerError(res, err);
   }
 }
 
@@ -213,7 +229,8 @@ async function updateConfig(req, res) {
 async function deleteConfig(req, res) {
   try {
     const userId = req.user.id;
-    const { id } = req.params;
+    const id = toId(req.params.id);
+    if (!id) return res.status(400).json({ success: false, error: 'invalid config id' });
 
     const { rowCount } = await db.query(
       `DELETE FROM auto_trade_configs WHERE id = $1 AND user_id = $2`,
@@ -226,7 +243,7 @@ async function deleteConfig(req, res) {
     return res.status(200).json({ success: true });
   } catch (err) {
     logger.error(`[autoTrade.deleteConfig] ${err.message}`);
-    return res.status(500).json({ success: false, error: err.message });
+    return sendServerError(res, err);
   }
 }
 
@@ -246,7 +263,7 @@ async function pauseAll(req, res) {
     return res.status(200).json({ success: true, affected: rowCount });
   } catch (err) {
     logger.error(`[autoTrade.pauseAll] ${err.message}`);
-    return res.status(500).json({ success: false, error: err.message });
+    return sendServerError(res, err);
   }
 }
 
@@ -268,7 +285,7 @@ async function resumeAll(req, res) {
     return res.status(200).json({ success: true, affected: rowCount });
   } catch (err) {
     logger.error(`[autoTrade.resumeAll] ${err.message}`);
-    return res.status(500).json({ success: false, error: err.message });
+    return sendServerError(res, err);
   }
 }
 
