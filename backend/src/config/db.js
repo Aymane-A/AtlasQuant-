@@ -427,6 +427,8 @@ async function migrate() {
     ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS webhook_enabled BOOLEAN NOT NULL DEFAULT false;
     ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS risk_max_daily_loss_pct NUMERIC NOT NULL DEFAULT 5;
     ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS risk_max_position_pct NUMERIC NOT NULL DEFAULT 20;
+    -- Audit 3: plafond d'exposition cumulée (somme des positions ouvertes), % de l'equity
+    ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS risk_max_total_exposure_pct NUMERIC NOT NULL DEFAULT 100;
     ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS risk_default_stoploss_pct NUMERIC NOT NULL DEFAULT 2;
 
     -- Email verification

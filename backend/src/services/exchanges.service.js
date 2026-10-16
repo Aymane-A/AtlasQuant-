@@ -43,7 +43,6 @@ const db     = require('../config/db');
 const logger = require('../utils/logger');
 const env    = require('../config/env');
 
-const ALGO = 'aes-256-gcm';
 const VALID_MODES = ['readonly', 'paper', 'live'];
 
 // Capital de départ du compte paper (simulé). Utilisé par getBalance() pour le
@@ -59,34 +58,8 @@ const CCXT_EXCHANGES = new Set([
 ]);
 
 // ── Encryption helpers ──────────────────────────────────────────
-// Format stocké : iv(hex):authTag(hex):ciphertext(hex)
-function getEncryptionKey() {
-  const hex = process.env.EXCHANGE_ENCRYPTION_KEY;
-  if (!hex || hex.length !== 64) {
-    throw new Error('EXCHANGE_ENCRYPTION_KEY manquante/invalide dans .env (64 caractères hex attendus)');
-  }
-  return Buffer.from(hex, 'hex');
-}
-
-function encrypt(plainText) {
-  if (plainText == null) return null;
-  const key = getEncryptionKey();
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv(ALGO, key, iv);
-  const encrypted = Buffer.concat([cipher.update(String(plainText), 'utf8'), cipher.final()]);
-  const authTag = cipher.getAuthTag();
-  return `${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted.toString('hex')}`;
-}
-
-function decrypt(payload) {
-  if (!payload) return null;
-  const key = getEncryptionKey();
-  const [ivHex, authTagHex, dataHex] = payload.split(':');
-  if (!ivHex || !authTagHex || !dataHex) throw new Error('Format de payload chiffré invalide');
-  const decipher = crypto.createDecipheriv(ALGO, key, Buffer.from(ivHex, 'hex'));
-  decipher.setAuthTag(Buffer.from(authTagHex, 'hex'));
-  return Buffer.concat([decipher.update(Buffer.from(dataHex, 'hex')), decipher.final()]).toString('utf8');
-}
+// ✅ Audit 3: déplacés dans utils/secretBox.js (partagés avec le 2FA, sans charger ccxt).
+const { encrypt, decrypt } = require('../utils/secretBox');
 
 // ── ccxt helpers ──────────────────────────────────────────────
 function getCcxtInstance(exchangeId, creds) {

@@ -29,6 +29,7 @@ async function getSettings(req, res) {
               language, timezone, currency,
               webhook_url, webhook_enabled,
               risk_max_daily_loss_pct, risk_max_position_pct, risk_default_stoploss_pct,
+              risk_max_total_exposure_pct,
               telegram_chat_id, telegram_enabled,
               quiet_hours_enabled, quiet_hours_start, quiet_hours_end
        FROM user_settings WHERE user_id = $1`,
@@ -53,6 +54,7 @@ async function getSettings(req, res) {
       risk_max_daily_loss_pct: 5,
       risk_max_position_pct: 20,
       risk_default_stoploss_pct: 2,
+      risk_max_total_exposure_pct: 100,
       telegram_chat_id: null,
       telegram_enabled: false,
       quiet_hours_enabled: false,
@@ -108,12 +110,20 @@ async function updateSettings(req, res) {
         ? clampPct(payload.default_stoploss_pct, 2)
         : 2;
 
+      // Exposition cumulée : 0 = désactivé, jusqu'à 500 % (levier) ; défaut 100 %.
+      const maxTotalExposurePct = (() => {
+        if (payload.max_total_exposure_pct === undefined) return 100;
+        const n = parseFloat(payload.max_total_exposure_pct);
+        return Number.isFinite(n) ? Math.min(500, Math.max(0, n)) : 100;
+      })();
+
       await db.query(
         `INSERT INTO user_settings (
            user_id, default_capital, default_risk_pct, default_timeframe,
-           risk_max_daily_loss_pct, risk_max_position_pct, risk_default_stoploss_pct
+           risk_max_daily_loss_pct, risk_max_position_pct, risk_default_stoploss_pct,
+           risk_max_total_exposure_pct
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          ON CONFLICT (user_id) DO UPDATE SET
            default_capital            = EXCLUDED.default_capital,
            default_risk_pct           = EXCLUDED.default_risk_pct,
@@ -121,9 +131,10 @@ async function updateSettings(req, res) {
            risk_max_daily_loss_pct    = EXCLUDED.risk_max_daily_loss_pct,
            risk_max_position_pct      = EXCLUDED.risk_max_position_pct,
            risk_default_stoploss_pct  = EXCLUDED.risk_default_stoploss_pct,
+           risk_max_total_exposure_pct = EXCLUDED.risk_max_total_exposure_pct,
            updated_at                 = NOW()`,
         [userId, payload.default_capital, payload.default_risk_pct, payload.default_timeframe,
-         maxDailyLossPct, maxPositionPct, defaultStoplossPct]
+         maxDailyLossPct, maxPositionPct, defaultStoplossPct, maxTotalExposurePct]
       );
       return res.json({ success: true, message: 'Trading mis à jour' });
     }

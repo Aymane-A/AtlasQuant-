@@ -453,6 +453,7 @@ function TradingSection({ data, onToast }) {
   const [maxDailyLoss, setMaxDailyLoss] = useState(s.risk_max_daily_loss_pct ?? 5);
   const [maxPosition,  setMaxPosition]  = useState(s.risk_max_position_pct ?? 20);
   const [defaultStoploss, setDefaultStoploss] = useState(s.risk_default_stoploss_pct ?? 2);
+  const [maxExposure, setMaxExposure] = useState(s.risk_max_total_exposure_pct ?? 100);
   const [saving,    setSaving]    = useState(false);
 
   const save = async () => {
@@ -460,6 +461,7 @@ function TradingSection({ data, onToast }) {
     if (riskPct <= 0 || riskPct > 100) return onToast('Risk % must be between 0 and 100', false);
     if (maxDailyLoss <= 0 || maxDailyLoss > 100) return onToast('Max daily loss must be between 0 and 100', false);
     if (maxPosition <= 0 || maxPosition > 100) return onToast('Max position size must be between 0 and 100', false);
+    if (maxExposure < 0 || maxExposure > 500) return onToast('Max total exposure must be between 0 and 500', false);
 
     setSaving(true);
     try {
@@ -468,6 +470,7 @@ function TradingSection({ data, onToast }) {
         payload:{
           default_capital: capital, default_risk_pct: riskPct, default_timeframe: timeframe,
           max_daily_loss_pct: maxDailyLoss, max_position_pct: maxPosition, default_stoploss_pct: defaultStoploss,
+          max_total_exposure_pct: maxExposure,
         },
       });
       onToast('Trading preferences updated', true);
@@ -509,9 +512,14 @@ function TradingSection({ data, onToast }) {
             <Input value={maxPosition} onChange={e => setMaxPosition(Number(e.target.value))} type="number" min="0.1" max="100" step="1" />
           </Field>
         </div>
-        <Field label="Default Stop-Loss (%)">
-          <Input value={defaultStoploss} onChange={e => setDefaultStoploss(Number(e.target.value))} type="number" min="0.1" max="100" step="0.1" />
-        </Field>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 }}>
+          <Field label="Default Stop-Loss (%)">
+            <Input value={defaultStoploss} onChange={e => setDefaultStoploss(Number(e.target.value))} type="number" min="0.1" max="100" step="0.1" />
+          </Field>
+          <Field label="Max Total Exposure (% of equity, 0 = off)">
+            <Input value={maxExposure} onChange={e => setMaxExposure(Number(e.target.value))} type="number" min="0" max="500" step="5" />
+          </Field>
+        </div>
       </div>
 
       <SaveBtn onClick={save} saving={saving} />
@@ -1037,7 +1045,6 @@ function ApiKeysSection({ onToast }) {
   const [keys,    setKeys]    = useState([]);
   const [loading, setLoading] = useState(true);
   const [name,    setName]    = useState('');
-  const [scopeTrade, setScopeTrade] = useState(false);
   const [newKey,  setNewKey]  = useState(null);
   const [creating, setCreating] = useState(false);
 
@@ -1055,10 +1062,9 @@ function ApiKeysSection({ onToast }) {
     if (!name.trim()) return onToast('Give your key a name', false);
     setCreating(true);
     try {
-      const scopes = scopeTrade ? ['read', 'trade'] : ['read'];
-      const res = await api.post('/security/api-keys', { name: name.trim(), scopes });
+      const res = await api.post('/security/api-keys', { name: name.trim(), scopes: ['read'] });
       setNewKey(res.data.key);
-      setName(''); setScopeTrade(false);
+      setName('');
       load();
     } catch { onToast('Could not create API key', false); }
     finally { setCreating(false); }
@@ -1112,10 +1118,10 @@ function ApiKeysSection({ onToast }) {
             {creating ? 'Creating...' : 'Create Key'}
           </button>
         </div>
-        <label style={{ display:'flex', alignItems:'center', gap:8, ...monoSm, color:'var(--text-secondary)', cursor:'pointer' }}>
-          <input type="checkbox" checked={scopeTrade} onChange={e => setScopeTrade(e.target.checked)} />
-          Allow trade execution (not just read access)
-        </label>
+        <div style={{ ...monoSm, color:'var(--text-secondary)' }}>
+          Read-only access: GET requests to your data (signals, portfolio, alerts…). Keys cannot trade or change settings.
+          Send as <code>Authorization: Bearer aq_live_…</code>
+        </div>
       </Field>
 
       <label style={label10}>Active Keys</label>

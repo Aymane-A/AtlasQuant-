@@ -6,6 +6,8 @@
  * Before this module those values were stored but never applied anywhere.
  *
  *  1. Max position size  — order notional must be <= X% of account equity.
+ *  1b. Max total exposure — SUM of all open paper positions + this order <= X% of equity
+ *                          (cumulative: 10 orders of 18% no longer slip through a 20% per-order cap).
  *  2. Max daily loss     — once today's realised paper loss reaches X% of equity,
  *                          NEW positions are refused until tomorrow (paper only:
  *                          live P&L is not tracked in this codebase).
@@ -27,7 +29,7 @@ const env          = require('../config/env');
 const logger       = require('../utils/logger');
 const exchangesSvc = require('./exchanges.service');
 
-const DEFAULTS = { maxPositionPct: 20, maxDailyLossPct: 5, defaultStopLossPct: 2 };
+const DEFAULTS = { maxPositionPct: 20, maxDailyLossPct: 5, defaultStopLossPct: 2, maxTotalExposurePct: 100 };
 const STABLES  = new Set(['USDT', 'USDC', 'USD', 'BUSD', 'FDUSD', 'TUSD', 'DAI']);
 
 const isCex = (exchangeId) => exchangeId !== 'oanda' && exchangeId !== 'alpaca';
@@ -39,7 +41,7 @@ const num = (v, fallback) => {
 
 async function getRiskSettings(userId) {
   const { rows } = await db.query(
-    `SELECT risk_max_position_pct, risk_max_daily_loss_pct, risk_default_stoploss_pct
+    `SELECT risk_max_position_pct, risk_max_daily_loss_pct, risk_default_stoploss_pct, risk_max_total_exposure_pct
      FROM user_settings WHERE user_id = $1`,
     [userId]
   );
@@ -49,6 +51,7 @@ async function getRiskSettings(userId) {
     maxPositionPct:     num(r.risk_max_position_pct,     DEFAULTS.maxPositionPct),
     maxDailyLossPct:    num(r.risk_max_daily_loss_pct,   DEFAULTS.maxDailyLossPct),
     defaultStopLossPct: num(r.risk_default_stoploss_pct, DEFAULTS.defaultStopLossPct),
+    maxTotalExposurePct: num(r.risk_max_total_exposure_pct, DEFAULTS.maxTotalExposurePct),
   };
 }
 
@@ -67,6 +70,16 @@ async function getEquity({ userId, exchangeId, mode, creds }) {
   const total = positions.filter(p => STABLES.has(String(p.symbol).toUpperCase()))
                          .reduce((a, p) => a + num(p.total, 0), 0);
   return total > 0 ? total : null;
+}
+
+/** Gross notional of the user's currently open paper positions on this exchange. */
+async function openPaperNotional(userId, exchangeId) {
+  const { rows } = await db.query(
+    `SELECT COALESCE(SUM(quantity * price), 0) AS notional
+       FROM paper_trades WHERE user_id = $1 AND exchange_id = $2 AND status = 'open'`,
+    [userId, exchangeId]
+  );
+  return num(rows[0]?.notional, 0);
 }
 
 async function todayRealisedPaperPnl(userId) {
@@ -138,6 +151,20 @@ async function checkOrder(o) {
         `Order size is ${pct.toFixed(1)}% of your equity (${equity.toFixed(2)}); your limit is ${s.maxPositionPct}%. ` +
         `Max quantity at this price ≈ ${maxQty}.`,
         { equity, notional, positionPct: pct, limitPct: s.maxPositionPct, maxQuantity: maxQty });
+    }
+  }
+
+  // 1b) Max TOTAL exposure (paper: open positions are tracked; live exposure isn't)
+  if (mode === 'paper' && equity != null && equity > 0 && s.maxTotalExposurePct > 0) {
+    const openNotional = await openPaperNotional(userId, exchangeId);
+    const totalPct = ((openNotional + notional) / equity) * 100;
+    if (totalPct > s.maxTotalExposurePct) {
+      const room = Math.max(0, (equity * s.maxTotalExposurePct) / 100 - openNotional);
+      const maxQty = Math.floor((room / refPrice) * 1e8) / 1e8;
+      return fail(403, 'RISK_MAX_EXPOSURE',
+        `Total open exposure would be ${totalPct.toFixed(1)}% of your equity (${equity.toFixed(2)}); your limit is ${s.maxTotalExposurePct}%. ` +
+        `Max quantity at this price ≈ ${maxQty}.`,
+        { equity, openNotional, notional, totalPct, limitPct: s.maxTotalExposurePct, maxQuantity: maxQty });
     }
   }
 

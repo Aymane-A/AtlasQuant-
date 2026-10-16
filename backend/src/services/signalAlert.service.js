@@ -7,7 +7,7 @@ const db                    = require('../config/db');
 const APP_URL = require('../config/env').FRONTEND_URL;
 const logger                = require('../utils/logger');
 const { sendAlertEmail }    = require('./email.service');
-const { sendTelegramAlert } = require('./telegram.service');
+const { sendTelegramMessage } = require('./telegram.service');
 
 // ✅ Fix: MIN_CONFIDENCE était un seuil global fixe (75%), identique pour
 // tout le monde — impossible à changer depuis le slider "Minimum confidence"
@@ -106,10 +106,9 @@ async function sendSignalEmail({ to, symbol, signal, confidence, entry, stop_los
 }
 
 // ── Telegram message for AI signals ──────────────────────
-async function sendSignalTelegram({ symbol, signal, confidence, entry, stop_loss, take_profit, risk_reward, reasoning }) {
-  const TOKEN   = process.env.TELEGRAM_BOT_TOKEN;
-  const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-  if (!TOKEN || !CHAT_ID) return;
+// ✅ Audit 3: envoi vers le chat de l'utilisateur (plus TELEGRAM_CHAT_ID global).
+async function sendSignalTelegram(chatId, { symbol, signal, confidence, entry, stop_loss, take_profit, risk_reward, reasoning }) {
+  if (!chatId) return;
 
   const emoji  = signal === 'BUY' ? '🟢' : signal === 'SELL' ? '🔴' : '🟡';
   const action = signal === 'BUY' ? 'BUY / LONG' : signal === 'SELL' ? 'SELL / SHORT' : 'HOLD';
@@ -129,15 +128,8 @@ async function sendSignalTelegram({ symbol, signal, confidence, entry, stop_loss
     `[Open AtlasQuant](${APP_URL}/signals)`,
   ].filter(Boolean).join('\n');
 
-  const res = await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: CHAT_ID, text: lines, parse_mode: 'Markdown' }),
-  });
-
-  const data = await res.json();
-  if (data.ok) logger.info(`[signalAlert] ✅ Telegram signal → ${symbol} ${signal} ${confidence}%`);
-  else logger.error(`[signalAlert] Telegram error: ${JSON.stringify(data)}`);
+  const ok = await sendTelegramMessage(chatId, lines);
+  if (ok) logger.info(`[signalAlert] ✅ Telegram signal → ${symbol} ${signal} ${confidence}%`);
 }
 
 // ── Main: check new high-confidence signals ───────────────
@@ -154,7 +146,8 @@ async function checkSignalAlerts() {
        COALESCE((us.notifications->>'email_alerts')::boolean, true)  AS notifications,
        COALESCE(us.signal_alert_mode, 'all')          AS alert_mode,
        COALESCE(us.signal_alert_symbols, '[]'::jsonb) AS alert_symbols,
-       COALESCE(us.signal_alert_min_confidence, ${DEFAULT_MIN_CONFIDENCE}) AS min_confidence
+       COALESCE(us.signal_alert_min_confidence, ${DEFAULT_MIN_CONFIDENCE}) AS min_confidence,
+       CASE WHEN COALESCE(us.telegram_enabled, false) THEN us.telegram_chat_id END AS telegram_chat_id
       FROM users u
       LEFT JOIN user_settings us ON us.user_id = u.id
       WHERE COALESCE((us.notifications->>'email_alerts')::boolean, true) = true
@@ -247,7 +240,7 @@ async function checkSignalAlerts() {
         }
 
         try {
-          await sendSignalTelegram(payload);
+          if (user.telegram_chat_id) await sendSignalTelegram(String(user.telegram_chat_id), payload);
         } catch (e) {
           logger.error(`[signalAlert] Telegram failed: ${e.message}`);
         }

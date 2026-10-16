@@ -13,6 +13,8 @@ const path       = require('path');
 require('dotenv').config();
 const env    = require('./config/env');
 const logger = require('./utils/logger');
+// ✅ Audit 3: une promesse rejetée sans catch ne doit plus tuer tout le backend
+require('./utils/processHandlers').installProcessHandlers();
 const db     = require('./config/db');
 const { initCronJobs }      = require('./services/cron.service');
 const { startMarketSocket } = require('./ws/marketSocket.server');

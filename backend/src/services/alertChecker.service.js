@@ -25,7 +25,7 @@
 const db                                    = require('../config/db');
 const logger                                = require('../utils/logger');
 const { sendAlertEmail, sendDigestEmail }   = require('./email.service');
-const { sendTelegramAlert }                 = require('./telegram.service');
+const { sendTelegramAlert, getUserTelegramChat } = require('./telegram.service');
 
 const PRICE_FETCH_TIMEOUT_MS = 6000;
 
@@ -226,7 +226,9 @@ async function checkAlerts() {
             logger.info(`[alertChecker] Quiet hours active for user ${alert.user_id} — ${symbol} Telegram suppressed`);
           } else {
             try {
-              await sendTelegramAlert(payload);
+              // ✅ Audit 3: chat_id de CET utilisateur (jamais celui du propriétaire du bot)
+              const chatId = await getUserTelegramChat(alert.user_id);
+              if (chatId) await sendTelegramAlert({ chatId, ...payload });
             } catch (e) {
               logger.error(`[alertChecker] Telegram failed: ${e.message}`);
             }

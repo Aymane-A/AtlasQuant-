@@ -9,6 +9,7 @@ const db         = require('../config/db');
 const logger     = require('../utils/logger');
 const { logAuditEvent } = require('../utils/auditLog');
 const { sendServerError } = require('../utils/httpError');
+const { encryptTotpSecret, decryptTotpSecret } = require('../utils/secretBox');
 
 // ═══════════════════════════════════════════════════════════
 // 2FA (TOTP)
@@ -28,7 +29,7 @@ async function setup2FA(req, res) {
     // l'utilisateur n'a pas confirmé un code valide (évite le lockout).
     await db.query(
       'UPDATE users SET twofa_secret = $1 WHERE id = $2',
-      [secret.base32, userId]
+      [encryptTotpSecret(secret.base32), userId]
     );
 
     const qrDataUrl = await qrcode.toDataURL(secret.otpauth_url);
@@ -49,7 +50,8 @@ async function verify2FA(req, res) {
     if (!token) return res.status(400).json({ success: false, error: 'Code requis' });
 
     const { rows } = await db.query('SELECT twofa_secret FROM users WHERE id = $1', [userId]);
-    const secret = rows[0]?.twofa_secret;
+    const stored = rows[0]?.twofa_secret;
+    const secret = stored ? decryptTotpSecret(stored) : null;
     if (!secret) return res.status(400).json({ success: false, error: 'Lancez d\'abord la configuration 2FA' });
 
     const isValid = speakeasy.totp.verify({
@@ -232,11 +234,13 @@ async function createApiKey(req, res) {
     if (!name || !name.trim())
       return res.status(400).json({ success: false, error: 'Un nom est requis' });
 
-    const validScopes = ['read', 'trade'];
-    const cleanScopes = Array.isArray(scopes)
-      ? scopes.filter(s => validScopes.includes(s))
-      : ['read'];
-    if (cleanScopes.length === 0) cleanScopes.push('read');
+    // ✅ Audit 3: seules les clés en lecture seule sont supportées. Une clé
+    // "trade" donnerait un accès d'exécution sans 2FA ni confirmation : refusée
+    // plutôt que créée en silence avec un scope qui ne fait rien.
+    if (Array.isArray(scopes) && scopes.includes('trade')) {
+      return res.status(400).json({ success: false, error: 'Trade-scoped API keys are not supported yet. API keys are read-only.', code: 'API_KEY_SCOPE_UNSUPPORTED' });
+    }
+    const cleanScopes = ['read'];
 
     const rawKey = `aq_live_${crypto.randomBytes(24).toString('hex')}`;
     const prefix = rawKey.slice(0, 12);

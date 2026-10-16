@@ -17,6 +17,7 @@ const { recordSession } = require('./security.controller');
 const crypto  = require('crypto');
 const speakeasy = require('speakeasy');
 const { isSessionRevoked } = require('../middleware/auth.middleware');
+const { decryptTotpSecret, encryptTotpSecret, isEncryptedTotpSecret, hasEncryptionKey } = require('../utils/secretBox');
 
 const PASSWORD_MIN = 8;
 
@@ -178,10 +179,21 @@ async function login(req, res) {
       let ok = false;
 
       if (totp && user.twofa_secret) {
-        ok = speakeasy.totp.verify({
-          secret: user.twofa_secret, encoding: 'base32',
-          token: String(totp).replace(/\s/g, ''), window: 1,
-        });
+        // ✅ Audit 3: secret chiffré au repos (les anciens secrets en clair restent valides)
+        let totpSecret = null;
+        try { totpSecret = decryptTotpSecret(user.twofa_secret); }
+        catch (e) { logger.error(`[auth] 2FA secret undecryptable for user ${user.id}: ${e.message}`); }
+        if (totpSecret) {
+          ok = speakeasy.totp.verify({
+            secret: totpSecret, encoding: 'base32',
+            token: String(totp).replace(/\s/g, ''), window: 1,
+          });
+          // Migration au fil de l'eau : un secret legacy en clair est rechiffré au 1er login réussi.
+          if (ok && !isEncryptedTotpSecret(user.twofa_secret) && hasEncryptionKey()) {
+            query('UPDATE users SET twofa_secret = $1 WHERE id = $2', [encryptTotpSecret(totpSecret), user.id])
+              .catch(e => logger.warn(`[auth] 2FA secret re-encryption failed: ${e.message}`));
+          }
+        }
       }
 
       if (!ok && backupCode) {

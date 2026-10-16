@@ -26,8 +26,55 @@ async function isSessionRevoked(userId, token) {
   return rows.length > 0 && rows[0].revoked_at !== null;
 }
 
+// ── API keys (aq_live_…) ─────────────────────────────────────
+// ✅ Audit 3: les clés créées dans Settings → API Keys étaient stockées mais
+// jamais acceptées. Elles sont maintenant honorées en LECTURE SEULE :
+//   - GET/HEAD uniquement (aucune écriture, aucun ordre, même avec scope "trade")
+//   - jamais sur les routes de compte/sécurité (clés, 2FA, sessions, réglages,
+//     exchanges, auth) : une clé volée ne doit pas pouvoir en créer d'autres
+//     ni exporter les données du compte.
+const API_KEY_PREFIX = 'aq_live_';
+const API_KEY_BLOCKED_PREFIXES = ['/api/security', '/api/settings', '/api/exchanges', '/api/auth'];
+
+function isApiKeyToken(token) { return typeof token === 'string' && token.startsWith(API_KEY_PREFIX); }
+
+function apiKeyPathBlocked(req) {
+  const url = String(req.originalUrl || (req.baseUrl || '') + (req.path || '')).split('?')[0].toLowerCase();
+  return API_KEY_BLOCKED_PREFIXES.some((p) => url === p || url.startsWith(p + '/'));
+}
+
+async function authenticateApiKey(req, res, next, token) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    return res.status(403).json({ success: false, error: 'API keys are read-only (GET requests only)', code: 'API_KEY_READ_ONLY' });
+  }
+  if (apiKeyPathBlocked(req)) {
+    return res.status(403).json({ success: false, error: 'API keys cannot access this endpoint', code: 'API_KEY_FORBIDDEN' });
+  }
+  let row;
+  try {
+    const { rows } = await db.query(
+      `SELECT k.id AS key_id, k.user_id, u.email, u.plan
+         FROM api_keys k JOIN users u ON u.id = k.user_id
+        WHERE k.key_hash = $1 AND k.revoked_at IS NULL`,
+      [hashToken(token)]
+    );
+    row = rows[0];
+  } catch (err) {
+    logger.error(`[auth.middleware] API key lookup failed: ${err.message}`);
+    return res.status(503).json({ success: false, error: 'Auth service temporarily unavailable' });
+  }
+  if (!row) return res.status(401).json({ success: false, error: 'Invalid or expired token' });
+
+  db.query('UPDATE api_keys SET last_used_at = NOW() WHERE id = $1', [row.key_id])
+    .catch((e) => logger.warn(`[auth.middleware] last_used_at update failed: ${e.message}`));
+
+  req.user = { id: row.user_id, email: row.email, plan: row.plan, via: 'api_key', scopes: ['read'] };
+  req.currentSessionHash = null;
+  return next();
+}
+
 /**
- * protect — require valid, non-revoked JWT
+ * protect — require valid, non-revoked JWT (or a read-only API key)
  * Add to any route: router.get('/protected', protect, handler)
  *
  * req.currentSessionHash = sha256(token): same algorithm as recordSession()
@@ -40,6 +87,8 @@ async function protect(req, res, next) {
   }
 
   const token = authHeader.split(' ')[1];
+  if (isApiKeyToken(token)) return authenticateApiKey(req, res, next, token);
+
   let decoded;
   try {
     decoded = jwt.verify(token, env.JWT_SECRET);
@@ -81,4 +130,4 @@ async function optionalAuth(req, res, next) {
   next();
 }
 
-module.exports = { protect, optionalAuth, isSessionRevoked, hashToken };
+module.exports = { protect, optionalAuth, isSessionRevoked, hashToken, isApiKeyToken };

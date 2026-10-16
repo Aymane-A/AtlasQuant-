@@ -18,6 +18,7 @@
 const db     = require('../config/db');
 const logger = require('../utils/logger');
 const { sendTradeEmail } = require('./tradeEmail.service');
+const { sendTelegramMessage } = require('./telegram.service');
 
 async function getUserNotifyPrefs(userId) {
   const { rows } = await db.query(`
@@ -33,8 +34,7 @@ async function getUserNotifyPrefs(userId) {
 }
 
 async function sendTradeTelegram(chatId, { symbol, side, price, reason, pnl, pnlPct }) {
-  const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-  if (!TOKEN || !chatId) return;
+  if (!chatId) return;
 
   const isOpen = pnl === undefined || pnl === null;
   const isWin  = !isOpen && Number(pnl) > 0;
@@ -48,17 +48,8 @@ async function sendTradeTelegram(chatId, { symbol, side, price, reason, pnl, pnl
         reason ? `Reason: ${reason}` : null,
       ].filter(Boolean);
 
-  try {
-    const res  = await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text: lines.join('\n'), parse_mode: 'Markdown' }),
-    });
-    const data = await res.json();
-    if (!data.ok) logger.error(`[tradeNotify] Telegram error: ${JSON.stringify(data)}`);
-  } catch (e) {
-    logger.error(`[tradeNotify] Telegram failed: ${e.message}`);
-  }
+  // ✅ Audit 3: un seul chemin d'envoi Telegram (telegram.service), jamais d'exception
+  await sendTelegramMessage(chatId, lines.join('\n'));
 }
 
 async function notifyTradeOpened(userId, { symbol, side, price }) {

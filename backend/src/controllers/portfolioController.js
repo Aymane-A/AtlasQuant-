@@ -15,6 +15,7 @@ const db           = require('../config/db');
 const axios        = require('axios');
 const logger       = require('../utils/logger');
 const exchangesSvc = require('../services/exchanges.service');
+const { getStockQuotes } = require('../services/stockQuotes.service');
 const { getBenchmarkHistory } = require('../services/marketData.service');
 const { buildBenchmarkCurve } = require('../services/benchmarkComparison.service');
 const { sendServerError } = require('../utils/httpError');
@@ -106,18 +107,23 @@ async function fetchCryptoQuotes(list) {
   return { out, failed };
 }
 
+// ✅ Audit 3: appel direct du service (plus de HTTP sur localhost, plus de
+// plafond à 9 symboles). Les cotations isDemo / isStale ne sont JAMAIS prises
+// pour des prix live : elles reviennent flaguées `stale` (changement 24h = 0) et
+// ne sont pas écrites dans PRICE_CACHE comme des prix frais.
 async function fetchStockQuotes(list) {
   const out = {};
   if (!list.length) return out;
   try {
-    const { data } = await axios.get(
-      `http://localhost:${process.env.PORT || 5000}/api/prices/stocks`,
-      { params: { symbols: list.join(',') }, timeout: 12000 }
-    );
-    if (data?.success && Array.isArray(data.data)) {
-      data.data.forEach(q => {
-        if (q?.symbol && q.price > 0) out[q.symbol] = { price: q.price, changeRaw: Number.isFinite(q.change) ? q.change : 0 };
-      });
+    const { quotes } = await getStockQuotes(list);
+    for (const q of quotes) {
+      if (!q?.symbol || !(q.price > 0)) continue;
+      const flagged = !!(q.isDemo || q.isStale);
+      out[q.symbol] = {
+        price:     q.price,
+        changeRaw: flagged ? 0 : (Number.isFinite(q.change) ? q.change : 0),
+        ...(flagged ? { stale: true, demo: !!q.isDemo } : {}),
+      };
     }
   } catch (e) {
     logger.warn(`[portfolio] Stock prices fetch failed: ${e.message}`);
@@ -134,7 +140,8 @@ async function fetchLivePrices(symbols, hints = {}) {
   const priceMap = {};
   const cryptoList = [], stockList = [];
 
-  const put = (sym, price, changeRaw) => {
+  const put = (sym, price, changeRaw, flags) => {
+    if (flags && flags.stale) { priceMap[sym] = { price, changeRaw, ...flags }; return; }   // demo/stale: jamais en cache "frais"
     priceMap[sym] = { price, changeRaw };
     PRICE_CACHE.set(sym, { price, changeRaw, cachedAt: now });
   };
@@ -149,12 +156,12 @@ async function fetchLivePrices(symbols, hints = {}) {
 
   const [crypto, stocks] = await Promise.all([fetchCryptoQuotes(cryptoList), fetchStockQuotes(stockList)]);
   Object.entries(crypto.out).forEach(([s, q]) => put(s, q.price, q.changeRaw));
-  Object.entries(stocks).forEach(([s, q]) => put(s, q.price, q.changeRaw));
+  Object.entries(stocks).forEach(([s, q]) => put(s, q.price, q.changeRaw, q));
 
   // Not on Binance? It may be a stock ticker that isn't in STOCK_SYMBOLS.
   if (crypto.failed.length) {
     const extra = await fetchStockQuotes(crypto.failed);
-    Object.entries(extra).forEach(([s, q]) => put(s, q.price, q.changeRaw));
+    Object.entries(extra).forEach(([s, q]) => put(s, q.price, q.changeRaw, q));
   }
 
   // Last resort: stale cache (any age), flagged so callers don't trust 24h change.
@@ -483,6 +490,7 @@ async function getPortfolioData(req, res) {
       _meta: {
         pricesFrom:       Object.keys(livePrices),
         stale:            Object.entries(livePrices).filter(([, d]) => d.stale).map(([s]) => s),
+        demo:             Object.entries(livePrices).filter(([, d]) => d.demo).map(([s]) => s),
         cacheSize:        PRICE_CACHE.size,
         exchangeBalances: exchangeBalances.length,
         dbPositions:      dbPositions.length,

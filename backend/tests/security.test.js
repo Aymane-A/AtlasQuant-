@@ -284,7 +284,8 @@ test('risk: a gain today or a loss under the limit does not block', async () => 
 });
 
 test('risk: limits set to 0 are disabled; noStopLoss opts out; explicit SL is kept', async () => {
-  fake.handler = riskDb({ settings: { risk_max_position_pct: 0, risk_max_daily_loss_pct: 0, risk_default_stoploss_pct: 0 } });
+  // Audit 3 added a 4th limit (cumulative exposure): "all limits off" now also means exposure 0.
+  fake.handler = riskDb({ settings: { risk_max_position_pct: 0, risk_max_daily_loss_pct: 0, risk_default_stoploss_pct: 0, risk_max_total_exposure_pct: 0 } });
   const big = await riskGuard.checkOrder(paper({ quantity: 50 }));
   assert.equal(big.ok, true); assert.equal(big.stopLoss, null);
   fake.handler = riskDb();
