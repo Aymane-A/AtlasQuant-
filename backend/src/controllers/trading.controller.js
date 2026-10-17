@@ -9,6 +9,7 @@ const exchangesSvc  = require('../services/exchanges.service');
 const riskGuard     = require('../services/riskGuard.service');
 const { requireVerifiedEmailForLive } = require('../utils/emailVerified');
 const { sendServerError } = require('../utils/httpError');
+const killSwitch    = require('../utils/killSwitch');
 
 // Reference price used for risk checks and paper fills: the limit price for limit
 // orders, otherwise the current market price. Returns null if it can't be fetched.
@@ -37,6 +38,10 @@ async function getReferencePrice(exchangeId, creds, symbol, orderType, price) {
 // (e.g. "EUR_USD") and is used as-is. For Alpaca, `symbol` is the stock
 // ticker (e.g. "AAPL") and is used as-is.
 async function placeOrder(req, res) {
+  if (killSwitch.isEngaged()) {
+    const b = killSwitch.blockedResponse();
+    return res.status(b.status).json(b.body);
+  }
   const userId = req.user.id;
   const {
     exchangeId, symbol, side, orderType = 'market', quantity, price, stopPrice, noStopLoss,

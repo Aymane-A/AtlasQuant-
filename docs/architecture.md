@@ -22,7 +22,14 @@ frontend (React/Vite)  ──HTTP /api──►  backend (Express, Node 22)  ─
 4. **No invented data:** balances are never fabricated (`balanceUnavailable`), demo prices only with
    `PRICES_DEMO_MODE=true` and always flagged, backtests reject invalid params and report `effectiveParams`.
 
+## Operations
+- `/api/health` reports db / cron / kill-switch state (Docker healthchecks use it). Kill-switch: `utils/killSwitch.js`,
+  checked in `trading.controller.placeOrder` and the auto-trader entry; `TRADING_KILL_SWITCH` env + `/api/admin/kill-switch`.
+- Compose: db, backend, ai-service (internal only), frontend; optional `edge` profile = nginx TLS proxy for SPA + `/api` + `/ws`.
+- Frontend pages are code-split (`React.lazy`), main chunk ~0.5 MB instead of 1.6 MB.
+
 ## Authentication & secrets
+- WebSocket auth: single-use 30 s ticket from `POST /api/auth/ws-ticket` (`utils/wsTicket.js`), not the JWT in the URL.
 
 - JWT + server-side session rows (revocable). 2FA (TOTP + backup codes) at login: `requires2FA` challenge.
 - API keys: read-only bearer tokens (`aq_live_…`), SHA-256 stored, blocked from account/security/exchange routes.

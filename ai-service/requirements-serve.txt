@@ -1,0 +1,9 @@
+# Runtime-only dependencies for the /predict service (used by docker/ai-service.Dockerfile).
+# requirements.txt is a full `pip freeze` of the research environment (Jupyter, matplotlib, ...)
+# and Windows-only packages; the container does not need any of that.
+# Versions are the ones pinned in requirements.txt.
+fastapi==0.143.0
+uvicorn==0.54.0
+pydantic==2.14.0
+numpy==2.5.4
+pandas==3.0.6

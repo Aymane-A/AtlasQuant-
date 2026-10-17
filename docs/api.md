@@ -34,6 +34,14 @@ TOTP secrets are encrypted at rest (AES-256-GCM, `EXCHANGE_ENCRYPTION_KEY`).
 ### Auth — `/auth`
 `POST /register` · `POST /login` · `POST /refresh` · 🔒 `GET /me` · 🔒 `POST /logout`
 
+`POST /auth/ws-ticket` (🔒, JWT only) → `{ticket, expiresInMs: 30000}`. Single-use opaque ticket for `/ws/dashboard?ticket=…&range=30`;
+the JWT is never accepted in the WebSocket URL. In-memory (single backend instance).
+
+### Health & operations
+`GET /health` → `{status: ok|degraded|down, timestamp, db, cron, killSwitch, paperTrading}` (503 only if the DB is down).
+`GET|POST /admin/kill-switch` (header `X-Admin-Key`; 404 if `ADMIN_KEY` unset) → `{engaged, reason, since}`;
+POST body `{enabled: boolean, reason?: string}`. While engaged, `POST /trading/order` and the auto-trader refuse with 503 `TRADING_DISABLED`.
+
 ### Security — `/security` (🔒, JWT only)
 `GET /2fa/status` · `POST /2fa/setup` · `POST /2fa/verify` · `POST /2fa/disable` ·
 `GET /sessions` · `DELETE /sessions/:id` · `DELETE /sessions` ·
@@ -97,6 +105,7 @@ Invalid params → `400` (no silent fallback). Every result carries `effectivePa
 | Code | HTTP | Meaning |
 |---|---|---|
 | `EMAIL_NOT_VERIFIED` | 403 | LIVE trading needs a verified email (`REQUIRE_VERIFIED_EMAIL_FOR_LIVE`, default on). |
+| `TRADING_DISABLED` | 503 | Operator kill-switch is engaged: new orders are refused (cancels still work). |
 | `PAPER_TRADING_ENABLED` | 403 | Server runs with `PAPER_TRADING=true` (default): no real order is ever sent. |
 | `RISK_MAX_POSITION` | 403 | Order notional > `max_position_pct` of equity. `details.maxQuantity` suggests a size. |
 | `RISK_MAX_EXPOSURE` | 403 | Open paper positions + this order > `max_total_exposure_pct` of equity (cumulative cap). |

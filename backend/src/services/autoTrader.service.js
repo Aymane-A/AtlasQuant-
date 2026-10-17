@@ -53,6 +53,7 @@ const db              = require('../config/db');
 const logger          = require('../utils/logger');
 const exchangesSvc    = require('./exchanges.service');
 const riskGuard       = require('./riskGuard.service');
+const killSwitch      = require('../utils/killSwitch');
 const { notifyTradeOpened } = require('./tradeNotify.service');
 
 const GATE_FRESHNESS_DAYS   = 30; // doit rester cohérent avec backtest.controller.js
@@ -286,6 +287,11 @@ async function processConfig(config) {
   // position ouverte dans le sens opposé.
   if (await hasOpposingOpenPosition(config.user_id, config.symbol, side)) {
     logger.warn(`[autoTrader] config #${config.id} — skipping ${side} on ${config.symbol}: opposing open position exists`);
+    return;
+  }
+
+  if (killSwitch.isEngaged()) {
+    logger.warn(`[autoTrader] config #${config.id} — ${side} ${config.symbol} skipped: kill-switch engaged`);
     return;
   }
 

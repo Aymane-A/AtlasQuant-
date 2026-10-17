@@ -6,6 +6,7 @@
  * GET  /api/auth/me         → profil (protégé)
  * POST /api/auth/logout     → déconnexion
  * POST /api/auth/refresh    → renouveler le token
+ * POST /api/auth/ws-ticket  → ticket WebSocket à usage unique (30 s)
  */
 
 const express = require('express');
@@ -17,6 +18,7 @@ const {
   getMe,
   logout,
   refreshToken,
+  issueWsTicket,
 } = require('../controllers/auth.controller');
 
 const { protect }     = require('../middleware/auth.middleware');
@@ -30,5 +32,6 @@ router.post('/refresh',  rateLimiter(10), refreshToken);
 // Routes protégées — nécessite un JWT valide
 router.get('/me',     protect, getMe);
 router.post('/logout', protect, logout);
+router.post('/ws-ticket', protect, rateLimiter(30), issueWsTicket);
 
 module.exports = router;

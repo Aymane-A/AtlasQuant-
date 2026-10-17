@@ -5,10 +5,11 @@
  * everyone), each connection here is authenticated and only ever receives
  * that one user's own data.
  *
- * Auth: the browser WebSocket API can't send custom headers, so the JWT
- * travels in the query string (?token=...) instead of an Authorization
- * header, verified with the exact same jwt.verify() + JWT_SECRET as the
- * REST `protect` middleware.
+ * Auth: the browser WebSocket API can't send custom headers. The client first
+ * calls POST /api/auth/ws-ticket (normal Bearer auth) and connects with the
+ * resulting single-use 30 s ticket (?ticket=...). The JWT itself is never put in
+ * the URL, so it can't leak through proxy/access logs or browser history
+ * (see utils/wsTicket.js).
  *
  * ✅ Fix — `noServer: true`: the HTTP upgrade is routed by
  * ws/upgradeRouter.js. startDashboardSocket() returns the upgrade handler
@@ -19,9 +20,7 @@
  * shorter interval scales badly with concurrent users.
  */
 const { WebSocketServer } = require('ws');
-const jwt    = require('jsonwebtoken');
-const env    = require('../config/env');
-const { isSessionRevoked } = require('../middleware/auth.middleware');
+const { consumeTicket } = require('../utils/wsTicket');
 const logger = require('../utils/logger');
 const { buildDashboardPayload } = require('../services/dashboardData.service');
 
@@ -36,33 +35,21 @@ function startDashboardSocket() {
 
   wss.on('connection', async (socket, request) => {
     const url   = new URL(request.url, 'http://localhost');
-    const token = url.searchParams.get('token');
+    const ticket = url.searchParams.get('ticket');
     const rangeParam = url.searchParams.get('range');
 
-    if (!token) {
-      socket.close(4001, 'No token provided');
+    if (!ticket) {
+      socket.close(4001, 'No ticket provided');
       return;
     }
 
-    let decoded;
-    try {
-      decoded = jwt.verify(token, env.JWT_SECRET);
-    } catch (err) {
-      logger.warn(`[dashboardSocket] Invalid token: ${err.message}`);
-      socket.close(4001, 'Invalid or expired token');
+    const consumed = consumeTicket(ticket);
+    if (!consumed) {
+      logger.warn('[dashboardSocket] Invalid, expired or already used ticket');
+      socket.close(4001, 'Invalid or expired ticket');
       return;
     }
-
-    try {
-      if (await isSessionRevoked(decoded.id, token)) {
-        socket.close(4001, 'Session revoked');
-        return;
-      }
-    } catch (err) {
-      logger.error(`[dashboardSocket] Session check failed: ${err.message}`);
-      socket.close(1011, 'Auth unavailable');
-      return;
-    }
+    const decoded = { id: consumed.userId };
 
     socket.userId = decoded.id;
     socket.range  = VALID_RANGES.has(rangeParam) ? rangeParam : '30';

@@ -313,4 +313,16 @@ async function refreshToken(req, res) {
   }
 }
 
-module.exports = { register, login, getMe, logout, refreshToken };
+// POST /api/auth/ws-ticket  (protégé) → { ticket, expiresInMs }
+// One-time ticket for opening /ws/dashboard without putting the JWT in the URL.
+function issueWsTicketHandler(req, res) {
+  try {
+    const { issueTicket } = require('../utils/wsTicket');
+    const { ticket, expiresInMs } = issueTicket(req.user.id);
+    return res.json({ success: true, ticket, expiresInMs });
+  } catch (err) {
+    return res.status(err.status || 500).json({ success: false, error: err.status ? err.message : 'Could not issue ticket' });
+  }
+}
+
+module.exports = { register, login, getMe, logout, refreshToken, issueWsTicket: issueWsTicketHandler };

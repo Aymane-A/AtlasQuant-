@@ -1,5 +1,5 @@
 import { Routes, Route, Navigate, useNavigate } from 'react-router-dom';
-import { useEffect } from 'react';
+import { lazy, Suspense, useEffect } from 'react';
 import { useAuth } from './context/AuthContext';
 import api from './services/api';
 
@@ -7,25 +7,31 @@ import Layout from './components/Layout';
 import { ProtectedRoute as PrivateRoute } from './components/ProtectedRoute';
 import Cursor from './components/Cursor';
 
-import Login       from './pages/Login';
-import VerifyEmail from './pages/VerifyEmail';
-import Landing     from './pages/Landing';
-import Dashboard   from './pages/Dashboard';
-import Signals     from './pages/signals';
-import Markets     from './pages/Markets';
-import Portfolio   from './pages/Portfolio';
-import Analytics   from './pages/Analytics';
-import Screener    from './pages/Screener';
-import Watchlist   from './pages/Watchlist';
-import Alerts      from './pages/Alerts';
-import RiskMatrix  from './pages/RiskMatrix';
-import Backtester  from './pages/Backtester';
-import AlphaEngine from './pages/AlphaEngine';
-import Settings    from './pages/Settings';
-import Exchanges   from './pages/Exchanges.jsx';
-import Trading     from './pages/Trading.jsx';
-import AutoTradeDashboard from './pages/AutoTradeDashboard';
+// Pages are code-split (React.lazy): one chunk per page instead of a single 1.6 MB bundle.
+const Login       = lazy(() => import('./pages/Login'));
+const VerifyEmail = lazy(() => import('./pages/VerifyEmail'));
+const Landing     = lazy(() => import('./pages/Landing'));
+const Dashboard   = lazy(() => import('./pages/Dashboard'));
+const Signals     = lazy(() => import('./pages/signals'));
+const Markets     = lazy(() => import('./pages/Markets'));
+const Portfolio   = lazy(() => import('./pages/Portfolio'));
+const Analytics   = lazy(() => import('./pages/Analytics'));
+const Screener    = lazy(() => import('./pages/Screener'));
+const Watchlist   = lazy(() => import('./pages/Watchlist'));
+const Alerts      = lazy(() => import('./pages/Alerts'));
+const RiskMatrix  = lazy(() => import('./pages/RiskMatrix'));
+const Backtester  = lazy(() => import('./pages/Backtester'));
+const AlphaEngine = lazy(() => import('./pages/AlphaEngine'));
+const Settings    = lazy(() => import('./pages/Settings'));
+const Exchanges   = lazy(() => import('./pages/Exchanges.jsx'));
+const Trading     = lazy(() => import('./pages/Trading.jsx'));
+const AutoTradeDashboard = lazy(() => import('./pages/AutoTradeDashboard'));
 
+const PageFallback = () => (
+  <div style={{ padding: 32, textAlign: 'center', opacity: 0.6 }} role="status" aria-live="polite">
+    Loading…
+  </div>
+);
 
 export default function App() {
   const { user } = useAuth();
@@ -47,6 +53,7 @@ export default function App() {
   return (
     <>
       <Cursor />
+      <Suspense fallback={<PageFallback />}>
       <Routes>
         {/* Public */}
         <Route path="/"      element={<Landing />} />
@@ -75,6 +82,7 @@ export default function App() {
         {/* Fallback */}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+      </Suspense>
     </>
   );
 }

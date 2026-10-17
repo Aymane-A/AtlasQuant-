@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useNavigate, useLocation, Outlet } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from '../context/AuthContext';
@@ -170,7 +170,11 @@ export default function Layout({ children }) {
 
         {/* ── MAIN ── */}
         <main style={s.main}>
-          {children || <Outlet />}
+          {children || (
+            <Suspense fallback={<div style={{ padding: 32, textAlign: 'center', opacity: 0.6 }} role="status" aria-live="polite">Loading…</div>}>
+              <Outlet />
+            </Suspense>
+          )}
         </main>
 
       </div>

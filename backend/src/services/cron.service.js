@@ -59,6 +59,9 @@ async function getTrackedEquitySymbols() {
     .filter(sym => sym && !looksLikeCrypto(sym) && !NON_EQUITY_DISPLAYS.has(sym));
 }
 
+let cronRunning = false;
+const isCronRunning = () => cronRunning;
+
 const initCronJobs = () => {
 
   // ── Paper trade SL/TP monitor ─────────────────────────
@@ -212,7 +215,8 @@ const initCronJobs = () => {
     }
   });
 
+  cronRunning = true;
   logger.info('[cron] AtlasQuant Background Engine initialized.');
 };
 
-module.exports = { initCronJobs, getTrackedEquitySymbols };
+module.exports = { initCronJobs, isCronRunning, getTrackedEquitySymbols };

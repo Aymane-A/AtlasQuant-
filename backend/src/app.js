@@ -112,16 +112,10 @@ app.use('/api/trading',   require('./routes/trading.routes'));
 app.use('/api/screener',  require('./routes/screener.routes'));
 app.use('/api/security', require('./routes/security.routes'));
 app.use('/api/symbols', require('./routes/symbols.routes'));
+app.use('/api/admin',   require('./routes/admin.routes'));
 
 // ── 4. Health Check ───────────────────────────────────────
-app.get('/api/health', (req, res) => {
-    res.json({
-        status:       'ok',
-        timestamp:    new Date().toISOString(),
-        groq:         !!env.GROQ_API_KEY,
-        paperTrading: env.PAPER_TRADING,
-    });
-});
+app.get('/api/health', require('./utils/health').healthHandler);
 
 // ── 5. Catch-all ──────────────────────────────────────────
 app.use((req, res) => {

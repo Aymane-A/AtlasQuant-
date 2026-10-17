@@ -1,8 +1,8 @@
 import { useEffect, useState, useRef } from 'react';
+import api from '../services/api';
 
-// ⚠️ Assumption — couldn't see services/api.js, so guessing the JWT is
-// stored under localStorage 'token' (same key axios likely reads for the
-// Authorization header). Tell me the real key if this is wrong.
+// The JWT never goes in the WebSocket URL: before each connection we ask the API for a
+// single-use 30 s ticket (POST /auth/ws-ticket, normal Bearer auth) and connect with that.
 const TOKEN_KEY = 'aq_token';
 
 // localhost fallback = dev only; production builds must set VITE_WS_URL.
@@ -23,16 +23,29 @@ export function useDashboardData(range = '30') {
     let ws = null;
     let isComponentMounted = true;
 
-    function connect() {
-      const token = localStorage.getItem(TOKEN_KEY);
-      if (!token) {
+    async function connect() {
+      if (!localStorage.getItem(TOKEN_KEY)) {
         setError('Not authenticated');
         return;
       }
 
+      let ticket;
+      try {
+        const res = await api.post('/auth/ws-ticket');
+        ticket = res.data?.ticket;
+        if (!ticket) throw new Error('no ticket in response');
+      } catch (err) {
+        if (!isComponentMounted) return;
+        setConnected(false);
+        setError('Dashboard stream unavailable');
+        scheduleReconnect();
+        return;
+      }
+      if (!isComponentMounted) return;
+
       if (ws) ws.close();
 
-      ws = new WebSocket(`${WS_BASE}?token=${encodeURIComponent(token)}&range=${range}`);
+      ws = new WebSocket(`${WS_BASE}?ticket=${encodeURIComponent(ticket)}&range=${encodeURIComponent(range)}`);
 
       ws.onopen = () => {
         if (!isComponentMounted) return;
@@ -61,12 +74,16 @@ export function useDashboardData(range = '30') {
         setConnected(false);
         ws = null;
 
-        const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), maxReconnectDelay);
-        reconnectTimerRef.current = setTimeout(() => {
-          reconnectAttemptsRef.current += 1;
-          connect();
-        }, delay);
+        scheduleReconnect();
       };
+    }
+
+    function scheduleReconnect() {
+      const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), maxReconnectDelay);
+      reconnectTimerRef.current = setTimeout(() => {
+        reconnectAttemptsRef.current += 1;
+        connect();
+      }, delay);
     }
 
     connect();
