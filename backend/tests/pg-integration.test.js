@@ -50,10 +50,16 @@ test.after(async () => {
 
 const order = (userId, qty = 18, price = 100) => ({ userId, exchangeId: 'binance', mode: 'paper', side: 'buy', quantity: qty, refPrice: price, noStopLoss: true });
 
+// Deliberately widen the window between "check the limits" and "write the position" (50 ms of pg_sleep).
+// On a fast local database the unlocked orders otherwise run almost one after the other and the race may not
+// show up; with the gap, every unlocked order reads the same exposure before any of them writes.
+const GAP = 'SELECT pg_sleep(0.05)';
+
 async function placeLocked(userId) {
   return orderLock.withUserOrderLock(userId, async (q) => {
     const risk = await riskGuard.checkOrder({ ...order(userId), q });
     if (!risk.ok) return { ok: false, code: risk.code };
+    await q(GAP);
     await exchangesSvc.openPaperTrade(userId, 'binance', { symbol: 'BTC', side: 'buy', orderType: 'limit', quantity: 18, price: 100 }, q);
     return { ok: true };
   });
@@ -69,18 +75,19 @@ test('migration is idempotent and creates idempotency_keys', { skip }, async () 
   assert.ok(rows[0].t);
 });
 
-test('RACE (control, informative): concurrent 18% orders WITHOUT the lock', { skip }, async () => {
+test('RACE (control): without the lock, concurrent 18% orders overshoot the 100% cap', { skip }, async () => {
   const uid = await mkUser('nolock');
   const results = await Promise.all(Array.from({ length: 10 }, async () => {
     const risk = await riskGuard.checkOrder(order(uid));
     if (!risk.ok) return false;
+    await db.query(GAP);                                    // same gap as the locked path
     await exchangesSvc.openPaperTrade(uid, 'binance', { symbol: 'BTC', side: 'buy', orderType: 'limit', quantity: 18, price: 100 });
     return true;
   }));
   const accepted = results.filter(Boolean).length;
-  // Not asserted > 5 (timing dependent => flaky). Without the lock the result is typically 10 here; with it, exactly 5 (next test).
   console.log(`[pg-integration] without lock: ${accepted}/10 accepted (cap allows 5)`);
-  assert.ok(accepted >= 5);
+  assert.ok(accepted > 5, `the race should let more than 5 through without the lock, got ${accepted}`);
+  assert.ok((await openNotional(uid)) > 10000, 'exposure is above 100% of equity: the bug the lock prevents');
 });
 
 test('ATOMIC: 10 concurrent 18% orders WITH the lock => exactly 5 accepted, exposure <= 100%', { skip }, async () => {
