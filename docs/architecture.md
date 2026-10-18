@@ -31,7 +31,7 @@ frontend (React/Vite)  ──HTTP /api──►  backend (Express, Node 22)  ─
 ## Authentication & secrets
 - WebSocket auth: single-use 30 s ticket from `POST /api/auth/ws-ticket` (`utils/wsTicket.js`), not the JWT in the URL.
 
-- JWT + server-side session rows (revocable). 2FA (TOTP + backup codes) at login: `requires2FA` challenge.
+- JWT in an HttpOnly cookie (`aq_session`) + CSRF token (`X-CSRF-Token`, HMAC of the session) + server-side session rows (revocable; logout/refresh revoke the old one). 2FA (TOTP + backup codes) at login: `requires2FA` challenge.
 - API keys: read-only bearer tokens (`aq_live_…`), SHA-256 stored, blocked from account/security/exchange routes.
 - At rest: exchange credentials **and TOTP secrets** are AES-256-GCM encrypted (`utils/secretBox.js`,
   `EXCHANGE_ENCRYPTION_KEY`). Legacy plaintext TOTP secrets still work and are re-encrypted at next login, or in
@@ -61,5 +61,5 @@ linked (`user_settings.telegram_chat_id` + `telegram_enabled`). `TELEGRAM_BOT_TO
   state machine. Keep `PAPER_TRADING=true`; real-money trading is NO-GO until those exist.
 - Idempotency covers retries and double clicks, not "the exchange accepted the order but the response was lost":
   that case stays `in_progress` (409) and needs reconciliation against the broker.
-- WebSocket tickets are in memory (single backend process). The JWT still lives in `localStorage` (XSS exposure).
+- WebSocket tickets are in memory (single backend process). The JWT is in an HttpOnly cookie (not readable by XSS) with a session-bound CSRF token; the CSRF token lives in memory only.
 - The pg-integration tests need a PostgreSQL (`TEST_DATABASE_URL`); without it they are skipped.

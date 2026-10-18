@@ -8,6 +8,7 @@ const db       = require('../config/db');
 const logger   = require('../utils/logger');
 const { logAuditEvent } = require('../utils/auditLog');
 const { sendServerError } = require('../utils/httpError');
+const { clearAuthCookie } = require('../utils/authCookie');
 
 const SUPPORTED_CURRENCIES = ['USD', 'EUR', 'MAD', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'CNY', 'AED'];
 const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
@@ -582,6 +583,7 @@ async function deleteAccount(req, res) {
     await db.query('DELETE FROM users WHERE id = $1', [userId]);
     logger.info(`[settings] Compte supprimé: ${rows[0].email} (id:${userId})`);
 
+    clearAuthCookie(res);
     res.json({ success: true, message: 'Compte supprimé définitivement' });
   } catch (err) {
     logger.error(`[settings] deleteAccount: ${err.message}`);

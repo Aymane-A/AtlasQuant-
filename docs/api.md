@@ -6,7 +6,17 @@ the details stay in the server logs.
 
 ## Authentication
 
-Protected routes (`🔒`) need `Authorization: Bearer <token>`. Two kinds of token are accepted:
+Protected routes (`🔒`) accept the session in two ways:
+
+- **HttpOnly cookie `aq_session`** (what the web app uses). `POST /auth/login`, `/auth/register` and `/auth/refresh` set it and
+  return `{ csrfToken }` — the JWT itself is **not** in the JSON body. Because browsers send cookies automatically, every
+  non-`GET`/`HEAD`/`OPTIONS` request authenticated by the cookie must carry `X-CSRF-Token: <csrfToken>` (HMAC bound to that session;
+  `GET /auth/me` returns a fresh one after a page reload) → otherwise `403 CSRF_INVALID`; a foreign `Origin` → `403 CSRF_ORIGIN`.
+  `POST /auth/logout` revokes the session and clears the cookie. Cookie settings: `COOKIE_SAMESITE`, `COOKIE_SECURE`, `COOKIE_DOMAIN`.
+- **`Authorization: Bearer <token>`** (no CSRF needed — not ambient). Used by API keys and by legacy JWTs issued before the cookie
+  migration: sending one to `POST /auth/refresh` exchanges it for a cookie session and revokes the old token.
+
+Two kinds of token are accepted:
 
 | Token | How to get it | What it can do |
 |---|---|---|

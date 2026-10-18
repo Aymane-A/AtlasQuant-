@@ -29,6 +29,9 @@ const mkRes = () => {
   const r = { statusCode: 200, body: null };
   r.status = (c) => { r.statusCode = c; return r; };
   r.json   = (b) => { r.body = b; return r; };
+  r.cookies = {};
+  r.cookie      = (n, v, o) => { r.cookies[n] = { value: v, options: o }; return r; };
+  r.clearCookie = (n, o) => { r.cleared = { name: n, options: o }; return r; };
   return r;
 };
 const mkReq = (over = {}) => ({ headers: {}, body: {}, ip: '1.2.3.4', ...over });
@@ -104,7 +107,7 @@ test('login: 2FA on + valid TOTP => token', async () => {
   const res = mkRes();
   const totp = speakeasy.totp({ secret: u.twofa_secret, encoding: 'base32' });
   await authCtrl.login(mkReq({ body: { email: 'a@b.co', password: 'hunter22', totp } }), res);
-  assert.ok(res.body.token);
+  assert.ok(res.cookies.aq_session.value);
 });
 
 test('login: backup code works once and is consumed', async () => {
@@ -116,7 +119,7 @@ test('login: backup code works once and is consumed', async () => {
   };
   const res = mkRes();
   await authCtrl.login(mkReq({ body: { email: 'a@b.co', password: 'hunter22', backupCode: 'ABCDE12345' } }), res);
-  assert.ok(res.body.token); assert.deepEqual(saved, []);
+  assert.ok(res.cookies.aq_session.value); assert.deepEqual(saved, []);
 });
 
 test('login: wrong password never reaches 2FA step', async () => {
@@ -130,7 +133,10 @@ test('login: account without 2FA logs in normally', async () => {
   fake.handler = loginDb(await userRow({ twofa_enabled: false }));
   const res = mkRes();
   await authCtrl.login(mkReq({ body: { email: 'a@b.co', password: 'hunter22' } }), res);
-  assert.ok(res.body.token);
+  assert.ok(res.cookies.aq_session.value);
+  assert.ok(res.body.csrfToken);
+  assert.equal(res.body.token, undefined);
+  assert.equal(res.cookies.aq_session.options.httpOnly, true);
 });
 
 // ── refresh() ───────────────────────────────────────────────
@@ -147,7 +153,9 @@ test('refresh: recently-expired token within grace is renewed', async () => {
   fake.handler = async (sql) => (/FROM users WHERE id/.test(sql) ? { rows: [{ id: 7, email: 'a@b.co', plan: 'free' }] } : { rows: [] });
   const res = mkRes();
   await authCtrl.refreshToken(mkReq({ headers: { authorization: `Bearer ${old}` } }), res);
-  assert.ok(res.body.token);
+  assert.ok(res.cookies.aq_session.value);
+  assert.ok(res.body.csrfToken);
+  assert.equal(res.body.token, undefined);
 });
 
 test('refresh: revoked session cannot refresh', async () => {
@@ -227,7 +235,10 @@ test('login: 4 failures do not lock the account yet', async () => {
   fake.handler = loginDb(await userRow({ twofa_enabled: false }), 4);
   const res = mkRes();
   await authCtrl.login(mkReq({ body: { email: 'a@b.co', password: 'hunter22' } }), res);
-  assert.ok(res.body.token);
+  assert.ok(res.cookies.aq_session.value);
+  assert.ok(res.body.csrfToken);
+  assert.equal(res.body.token, undefined);
+  assert.equal(res.cookies.aq_session.options.httpOnly, true);
 });
 
 // ── risk guard ──────────────────────────────────────────────

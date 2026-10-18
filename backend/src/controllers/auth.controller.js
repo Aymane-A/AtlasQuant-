@@ -16,7 +16,8 @@ const { logAuditEvent } = require('../utils/auditLog');
 const { recordSession } = require('./security.controller');
 const crypto  = require('crypto');
 const speakeasy = require('speakeasy');
-const { isSessionRevoked } = require('../middleware/auth.middleware');
+const { isSessionRevoked, revokeToken, extractCredential } = require('../middleware/auth.middleware');
+const { setAuthCookie, clearAuthCookie, csrfFor, csrfProblem } = require('../utils/authCookie');
 const { decryptTotpSecret, encryptTotpSecret, isEncryptedTotpSecret, hasEncryptionKey } = require('../utils/secretBox');
 
 const PASSWORD_MIN = 8;
@@ -101,10 +102,13 @@ async function register(req, res) {
 
     logger.info(`[auth] Nouveau compte : ${user.email}`);
 
+    // The JWT goes in an HttpOnly cookie (never in the JSON body / localStorage).
+    // csrfToken: kept in memory by the SPA and sent as X-CSRF-Token on state-changing requests.
+    setAuthCookie(res, token);
     res.status(201).json({
       success: true,
       message: 'Compte créé avec succès',
-      token,
+      csrfToken: csrfFor(token),
       user: safeUser(user),
     });
 
@@ -220,10 +224,11 @@ async function login(req, res) {
     await logAuditEvent(user.id, 'login_success', req);
     logger.info(`[auth] Connexion : ${user.email}`);
 
+    setAuthCookie(res, token);
     res.json({
       success: true,
       message: 'Connexion réussie',
-      token,
+      csrfToken: csrfFor(token),
       user: safeUser(user),
     });
 
@@ -248,7 +253,9 @@ async function getMe(req, res) {
       return res.status(404).json({ success: false, error: 'Utilisateur introuvable' });
     }
 
-    res.json({ success: true, user: safeUser(result.rows[0]) });
+    // The SPA calls /me on page load: this is how it (re)gets its CSRF token after a reload.
+    const csrfToken = req.authToken ? csrfFor(req.authToken) : undefined;
+    res.json({ success: true, user: safeUser(result.rows[0]), csrfToken });
 
   } catch (err) {
     logger.error(`[auth] getMe error: ${err.message}`);
@@ -258,25 +265,33 @@ async function getMe(req, res) {
 
 // ─────────────────────────────────────────────────────────
 // POST /api/auth/logout  (protégé)
-// Les JWT sont stateless — on informe juste le client
-// de supprimer son token côté frontend.
+// Revokes the current session server-side and clears the cookie.
 // ─────────────────────────────────────────────────────────
-function logout(req, res) {
+async function logout(req, res) {
+  try {
+    if (req.authToken) await revokeToken(req.user.id, req.authToken, req);
+  } catch (err) {
+    logger.error(`[auth] logout revoke failed: ${err.message}`);
+  }
+  clearAuthCookie(res);
   logger.info(`[auth] Déconnexion : ${req.user.email}`);
-  res.json({ success: true, message: 'Déconnecté — supprimez le token côté client' });
+  res.json({ success: true, message: 'Déconnecté' });
 }
 
 // ─────────────────────────────────────────────────────────
 // POST /api/auth/refresh
 // Renouveler le token sans re-saisir le mot de passe
 // ─────────────────────────────────────────────────────────
+// The old token comes from the cookie (normal case) or from `Authorization: Bearer` — the latter is the
+// one-time migration path for sessions that still have their JWT in localStorage: they are exchanged
+// for a cookie session and the legacy token is revoked.
 async function refreshToken(req, res) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith('Bearer ')) {
+  const cred = extractCredential(req);
+  if (!cred) {
     return res.status(401).json({ success: false, error: 'Token manquant' });
   }
 
-  const oldToken = authHeader.split(' ')[1];
+  const oldToken = cred.token;
 
   try {
     // Signature must be valid; expiry is checked manually so we can allow a
@@ -286,6 +301,12 @@ async function refreshToken(req, res) {
     const now = Math.floor(Date.now() / 1000);
     if (!decoded.exp || now > decoded.exp + env.REFRESH_GRACE_SECONDS) {
       return res.status(401).json({ success: false, error: 'Token expiré — reconnectez-vous' });
+    }
+
+    // Cookie-authenticated: this is a state-changing request, so it needs the CSRF token too.
+    if (cred.via === 'cookie') {
+      const problem = csrfProblem(req, oldToken);
+      if (problem) return res.status(problem.status).json({ success: false, error: problem.error, code: problem.code });
     }
 
     // A revoked session (logout-all, "revoke" in Settings) can never refresh.
@@ -304,8 +325,11 @@ async function refreshToken(req, res) {
     const user     = result.rows[0];
     const newToken = signToken(user.id, user.email, user.plan);
     await recordSession(user.id, newToken, req);
+    // Rotation: the previous token (e.g. the one that sat in localStorage) can no longer be used.
+    await revokeToken(user.id, oldToken, req);
 
-    res.json({ success: true, token: newToken });
+    setAuthCookie(res, newToken);
+    res.json({ success: true, csrfToken: csrfFor(newToken) });
 
   } catch (err) {
     logger.error(`[auth] refreshToken error: ${err.message}`);

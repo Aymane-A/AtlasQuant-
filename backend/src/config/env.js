@@ -20,6 +20,17 @@ if (!JWT_SECRET) {
   throw new Error("[env] JWT_SECRET is too short for production (min 32 chars).");
 }
 
+// Session cookie (HttpOnly JWT). Same-site deployments (nginx edge, or localhost dev) use the defaults.
+// Frontend and API on DIFFERENT sites (e.g. app.com + api.other.com): COOKIE_SAMESITE=none (requires Secure/HTTPS).
+const COOKIE_SAMESITE = optional("COOKIE_SAMESITE", "lax").toLowerCase();
+if (!["lax", "strict", "none"].includes(COOKIE_SAMESITE)) {
+  throw new Error("[env] COOKIE_SAMESITE must be lax, strict or none.");
+}
+const COOKIE_SECURE = optional("COOKIE_SECURE", IS_PRODUCTION ? "true" : "false") === "true";
+if (COOKIE_SAMESITE === "none" && !COOKIE_SECURE) {
+  throw new Error("[env] COOKIE_SAMESITE=none requires COOKIE_SECURE=true (browsers reject it otherwise).");
+}
+
 module.exports = {
   PORT:      optional("PORT", "5000"),
   NODE_ENV,
@@ -37,6 +48,9 @@ module.exports = {
   JWT_EXPIRES_IN: optional("JWT_EXPIRES_IN", "7d"),
   // How long after expiry a token may still be exchanged at /auth/refresh.
   REFRESH_GRACE_SECONDS: parseInt(optional("REFRESH_GRACE_SECONDS", "86400"), 10),
+  COOKIE_SAMESITE,
+  COOKIE_SECURE,
+  COOKIE_DOMAIN: optional("COOKIE_DOMAIN", ""),
 
   API_RATE_LIMIT_MAX:      parseInt(optional("API_RATE_LIMIT_MAX", "500"), 10),
   BACKTEST_RATE_LIMIT_MAX: parseInt(optional("BACKTEST_RATE_LIMIT_MAX", "20"), 10),

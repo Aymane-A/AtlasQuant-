@@ -1,9 +1,8 @@
 import { useEffect, useState, useRef } from 'react';
 import api from '../services/api';
 
-// The JWT never goes in the WebSocket URL: before each connection we ask the API for a
-// single-use 30 s ticket (POST /auth/ws-ticket, normal Bearer auth) and connect with that.
-const TOKEN_KEY = 'aq_token';
+// The session cookie never goes in the WebSocket URL: before each connection we ask the API for a
+// single-use 30 s ticket (POST /auth/ws-ticket, cookie + CSRF header added by the api client) and connect with that.
 
 // localhost fallback = dev only; production builds must set VITE_WS_URL.
 const WS_ROOT = import.meta.env.VITE_WS_URL || (import.meta.env.DEV ? 'ws://localhost:5000' : '');
@@ -24,11 +23,6 @@ export function useDashboardData(range = '30') {
     let isComponentMounted = true;
 
     async function connect() {
-      if (!localStorage.getItem(TOKEN_KEY)) {
-        setError('Not authenticated');
-        return;
-      }
-
       let ticket;
       try {
         const res = await api.post('/auth/ws-ticket');
@@ -37,6 +31,7 @@ export function useDashboardData(range = '30') {
       } catch (err) {
         if (!isComponentMounted) return;
         setConnected(false);
+        if (err && err.status === 401) { setError('Not authenticated'); return; }   // no session: don't hammer the API
         setError('Dashboard stream unavailable');
         scheduleReconnect();
         return;

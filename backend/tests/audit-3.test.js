@@ -30,6 +30,9 @@ const mkRes = () => {
   const r = { statusCode: 200, body: null };
   r.status = (c) => { r.statusCode = c; return r; };
   r.json   = (b) => { r.body = b; return r; };
+  r.cookies = {};
+  r.cookie      = (n, v, o) => { r.cookies[n] = { value: v, options: o }; return r; };
+  r.clearCookie = (n, o) => { r.cleared = { name: n, options: o }; return r; };
   return r;
 };
 
@@ -355,11 +358,12 @@ test('login: 2FA secret stored encrypted => valid TOTP gives a token, wrong code
 
   let res = mkRes();
   await auth.login(loginReq(speakeasy.totp({ secret: base32, encoding: 'base32' })), res);
-  assert.ok(res.body.token, 'valid code must log in');
+  assert.ok(res.cookies.aq_session?.value, 'valid code must log in (session cookie set)');
+  assert.equal(res.body.token, undefined, 'JWT must not be in the JSON body');
 
   res = mkRes();
   await auth.login(loginReq('000000'), res);
-  assert.equal(res.statusCode, 401); assert.equal(res.body.token, undefined);
+  assert.equal(res.statusCode, 401); assert.equal(res.cookies.aq_session, undefined);
 });
 
 test('login: legacy plaintext secret still works and is re-encrypted after the first success', async () => {
@@ -368,7 +372,7 @@ test('login: legacy plaintext secret still works and is re-encrypted after the f
   const { auth, writes } = await loginWorld(base32);
   const res = mkRes();
   await auth.login(loginReq(speakeasy.totp({ secret: base32, encoding: 'base32' })), res);
-  assert.ok(res.body.token);
+  assert.ok(res.cookies.aq_session?.value);
   await new Promise(r => setTimeout(r, 10));
   assert.equal(writes.length, 1);
   assert.ok(writes[0][0].startsWith('enc:v1:'));
@@ -386,6 +390,6 @@ test('login: an undecryptable 2FA secret (wrong key) fails closed with 401, neve
     const { auth } = await loginWorld(stored);
     const res = mkRes();
     await auth.login(loginReq(speakeasy.totp({ secret: base32, encoding: 'base32' })), res);
-    assert.equal(res.statusCode, 401); assert.equal(res.body.token, undefined);
+    assert.equal(res.statusCode, 401); assert.equal(res.cookies.aq_session, undefined);
   } finally { process.env.EXCHANGE_ENCRYPTION_KEY = goodKey; }
 });
