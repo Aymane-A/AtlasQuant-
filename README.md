@@ -60,7 +60,10 @@ For a real deployment pass the **public** URLs at build time (Vite inlines them;
 
 ## Tests
 ```bash
-cd backend && npm test                  # auth, 2FA, risk limits, live gates, PAPER_TRADING guard
+cd backend && npm test                  # auth, 2FA, risk limits, live gates, PAPER_TRADING guard, idempotency
+# + real PostgreSQL proof (10 concurrent orders, idempotency claims):
+#   docker run -d --name aq-pg -e POSTGRES_PASSWORD=pw -p 55432:5432 postgres:16-alpine
+#   TEST_DATABASE_URL=postgres://postgres:pw@localhost:55432/postgres npm run test:pg
 cd ai-service && python -m pytest -q tests
 cd frontend && VITE_API_URL=http://localhost:5000/api VITE_WS_URL=ws://localhost:5000 npm run build
 ```

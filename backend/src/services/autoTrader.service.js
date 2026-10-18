@@ -54,6 +54,7 @@ const logger          = require('../utils/logger');
 const exchangesSvc    = require('./exchanges.service');
 const riskGuard       = require('./riskGuard.service');
 const killSwitch      = require('../utils/killSwitch');
+const { withUserOrderLock } = require('../utils/orderLock');
 const { notifyTradeOpened } = require('./tradeNotify.service');
 
 const GATE_FRESHNESS_DAYS   = 30; // doit rester cohérent avec backtest.controller.js
@@ -298,37 +299,74 @@ async function processConfig(config) {
   const quantity = await computeQuantity(config.user_id, config.exchange_id, config.symbol, price, config);
   if (!quantity || quantity <= 0) return;
 
-  // User-level limits from Settings → Risk (max position %, max daily loss %).
-  // The signal's own stop-loss is passed through, so no default SL is injected here.
-  const risk = await riskGuard.checkOrder({
-    userId: config.user_id, exchangeId: config.exchange_id, mode: 'paper',
-    side, quantity, refPrice: price,
-    stopLoss: signal.stop_loss ? parseFloat(signal.stop_loss) : null, noStopLoss: true,
-  }).catch(err => ({ ok: false, code: 'RISK_ERROR', error: err.message }));
-  if (!risk.ok) {
-    logger.warn(`[autoTrader] config #${config.id} - ${side} ${config.symbol} skipped by risk limits (${risk.code}): ${risk.error}`);
+  // ✅ Audit 4: limites de risque + écriture de la position sous un lock par utilisateur (voir
+  // utils/orderLock) : deux ordres simultanés ne peuvent plus lire « 0 % ouvert » en même temps.
+  // Le contrôle anti-doublon (même signal, même config) et le plafond de positions ouvertes sont
+  // revérifiés DANS le lock, donc aussi à l'abri de deux ticks qui se chevauchent.
+  let outcome;
+  try {
+    outcome = await withUserOrderLock(config.user_id, async (q) => {
+      const dup = await q(
+        `SELECT 1 FROM paper_trades WHERE user_id = $1 AND auto_trade_config_id = $2 AND signal_id = $3 LIMIT 1`,
+        [config.user_id, config.id, signal.id]
+      );
+      if (dup.rows.length) return { skipped: 'duplicate_signal' };
+
+      const open = await q(
+        `SELECT COUNT(*)::int AS n FROM paper_trades WHERE auto_trade_config_id = $1 AND status = 'open'`,
+        [config.id]
+      );
+      if (open.rows[0].n >= MAX_OPEN_PER_CONFIG) return { skipped: 'max_open' };
+
+      // User-level limits from Settings → Risk (max position %, max exposure %, max daily loss %).
+      // The signal's own stop-loss is passed through, so no default SL is injected here.
+      const risk = await riskGuard.checkOrder({
+        userId: config.user_id, exchangeId: config.exchange_id, mode: 'paper',
+        side, quantity, refPrice: price,
+        stopLoss: signal.stop_loss ? parseFloat(signal.stop_loss) : null, noStopLoss: true,
+        q,
+      });
+      if (!risk.ok) return { risk };
+
+      const trade = await exchangesSvc.openPaperTrade(config.user_id, config.exchange_id, {
+        symbol:     config.symbol,
+        side,
+        orderType:  'market',
+        quantity,
+        price,
+        limitPrice: null,
+        stopLoss:   signal.stop_loss   ? parseFloat(signal.stop_loss)   : null,
+        takeProfit: signal.take_profit ? parseFloat(signal.take_profit) : null,
+        signalId:   signal.id,
+      }, q);
+
+      // Traçabilité — lie le paper_trade à son config + backtest d'origine (même transaction).
+      await q(
+        `UPDATE paper_trades SET auto_trade_config_id = $1, backtest_id = $2 WHERE id = $3`,
+        [config.id, config.backtest_id, trade.id]
+      );
+      return { trade };
+    });
+  } catch (err) {
+    logger.error(`[autoTrader] config #${config.id} — trade failed: ${err.message}`);
+    return;
+  }
+
+  if (outcome.skipped) {
+    logger.warn(`[autoTrader] config #${config.id} - ${side} ${config.symbol} skipped (${outcome.skipped})`);
+    if (outcome.skipped === 'duplicate_signal') {
+      // Le signal a déjà été traité : on avance le curseur pour ne plus le reprendre.
+      await db.query(`UPDATE auto_trade_configs SET last_signal_at = $1, last_evaluated_at = NOW(), updated_at = NOW() WHERE id = $2`,
+        [signal.created_at, config.id]).catch(() => {});
+    }
+    return;
+  }
+  if (outcome.risk && !outcome.risk.ok) {
+    logger.warn(`[autoTrader] config #${config.id} - ${side} ${config.symbol} skipped by risk limits (${outcome.risk.code}): ${outcome.risk.error}`);
     return;
   }
 
   try {
-    const trade = await exchangesSvc.openPaperTrade(config.user_id, config.exchange_id, {
-      symbol:     config.symbol,
-      side,
-      orderType:  'market',
-      quantity,
-      price,
-      limitPrice: null,
-      stopLoss:   signal.stop_loss   ? parseFloat(signal.stop_loss)   : null,
-      takeProfit: signal.take_profit ? parseFloat(signal.take_profit) : null,
-      signalId:   signal.id,
-    });
-
-    // Traçabilité — lie le paper_trade à son config + backtest d'origine.
-    await db.query(
-      `UPDATE paper_trades SET auto_trade_config_id = $1, backtest_id = $2 WHERE id = $3`,
-      [config.id, config.backtest_id, trade.id]
-    );
-
     await db.query(
       `UPDATE auto_trade_configs
        SET last_signal_at = $1, last_evaluated_at = NOW(), updated_at = NOW()

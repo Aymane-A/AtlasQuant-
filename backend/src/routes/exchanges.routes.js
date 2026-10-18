@@ -2,6 +2,7 @@ const express = require('express');
 const router  = express.Router();
 const { protect } = require('../middleware/auth.middleware');
 const ctrl    = require('../controllers/exchanges.controller');
+const { idempotent } = require('../middleware/idempotency.middleware');
 
 router.use(protect);
 
@@ -20,7 +21,7 @@ router.get   ('/portfolio/all',                             ctrl.getAggregatedPo
 
 // Portfolio & orders
 router.get   ('/:exchangeId/portfolio',                     ctrl.getPortfolio);
-router.post  ('/:exchangeId/order',                         ctrl.placeOrder);
+router.post  ('/:exchangeId/order',                         idempotent('order'), ctrl.placeOrder);
 
 // Paper trades
 router.get   ('/:exchangeId/paper-trades',                  ctrl.getPaperTrades);

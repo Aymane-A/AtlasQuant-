@@ -63,6 +63,8 @@ app.use(cors({
         cb(new Error('CORS blocked'));
     },
     credentials: true,
+    // Idempotency-Key (request) is allowed by reflection; expose the replay marker to the browser.
+    exposedHeaders: ['Idempotent-Replayed', 'Retry-After'],
 }));
 
 app.use(morgan('[:method] :url :status :response-time ms'));

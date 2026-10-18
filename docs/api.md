@@ -80,6 +80,15 @@ never to a server-wide chat.
 ### Trading — `/trading` (🔒)
 `POST /order` · `GET /orders` · `DELETE /orders/:orderId` · `GET /ticker/:symbol` · `GET /balance`
 
+**Idempotency.** `POST /trading/order` and `POST /exchanges/:exchangeId/order` accept an `Idempotency-Key` header
+(8–128 chars: letters, digits, `_ - : .`), one key per order *intent* (a click), not per network attempt.
+- **LIVE orders require it** (`400 IDEMPOTENCY_KEY_REQUIRED`); for paper it is optional (the web app always sends one).
+- Same key + same request → the original response is **replayed** (header `Idempotent-Replayed: true`); no second order.
+- Same key + a different request → `422 IDEMPOTENCY_KEY_REUSED`.
+- Same key while the first request is still running (or died mid-order) → `409 IDEMPOTENCY_IN_PROGRESS`: check
+  `GET /orders` before retrying with a **new** key. A live order is never re-sent automatically.
+- Keys are per user, kept 24 h. If the idempotency store is unavailable the order is refused (`503 IDEMPOTENCY_UNAVAILABLE`).
+
 `GET /balance` never invents a number. If the exchange is unreachable: `502 { balanceUnavailable:true, balances:[] }`.
 Responses include `source` (exchange | simulated) and `simulated` (true for paper wallets).
 
@@ -111,8 +120,16 @@ Invalid params → `400` (no silent fallback). Every result carries `effectivePa
 | `RISK_MAX_EXPOSURE` | 403 | Open paper positions + this order > `max_total_exposure_pct` of equity (cumulative cap). |
 | `RISK_DAILY_LOSS` | 403 | Today's realised paper loss reached `max_daily_loss_pct`; new positions blocked until tomorrow. |
 | `RISK_UNVERIFIABLE` | 403 | Live equity unknown and `RISK_STRICT_LIVE=true` (default): live order refused. |
+| `IDEMPOTENCY_KEY_REQUIRED` | 400 | Live order sent without an `Idempotency-Key`. |
+| `IDEMPOTENCY_KEY_INVALID` | 400 | Key is not 8–128 chars of `[A-Za-z0-9_\-:.]`. |
+| `IDEMPOTENCY_KEY_REUSED` | 422 | Key already used with a different request. |
+| `IDEMPOTENCY_IN_PROGRESS` | 409 | Same key still being processed (or ended without a recorded result). |
+| `IDEMPOTENCY_UNAVAILABLE` | 503 | Idempotency store unreachable: order refused (fail closed). |
+| `ORDER_BUSY` | 503 | Another paper order of the same account held the order lock for > `ORDER_LOCK_TIMEOUT_MS`. Retry. |
 | `API_KEY_READ_ONLY` / `API_KEY_FORBIDDEN` | 403 | See Authentication. |
 | `requires2FA` (field, not a code) | 200 | Login needs a TOTP/backup code. |
 
 Notes: daily-loss is enforced for **paper** only (live P&L isn't tracked); the cumulative-exposure cap is
-also paper-only (open live exposure isn't tracked). The limits are checked per request, not under a lock.
+also paper-only (open live exposure isn't tracked). For paper orders (manual and auto-trade) the risk check and the
+position insert run **atomically under a per-user lock**, so concurrent orders cannot overshoot the limits.
+Live orders are not covered by that reservation (their exposure isn't tracked): per-order limits only.

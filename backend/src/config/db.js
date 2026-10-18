@@ -257,6 +257,21 @@ async function migrate() {
     CREATE INDEX IF NOT EXISTS idx_paper_trades_user   ON paper_trades(user_id);
     CREATE INDEX IF NOT EXISTS idx_paper_trades_status ON paper_trades(user_id, status);
 
+    -- ── Audit 4: idempotence des ordres (Idempotency-Key) ─────────────────────
+    CREATE TABLE IF NOT EXISTS idempotency_keys (
+      user_id         INTEGER     NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      scope           TEXT        NOT NULL,
+      key             TEXT        NOT NULL,
+      request_hash    TEXT        NOT NULL,
+      status          TEXT        NOT NULL DEFAULT 'in_progress',
+      response_status INTEGER,
+      response_body   JSONB,
+      created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      completed_at    TIMESTAMPTZ,
+      PRIMARY KEY (user_id, scope, key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_idempotency_created ON idempotency_keys(created_at);
+
     -- ── Live orders log ───────────────────────────────────────────────────────
     CREATE TABLE IF NOT EXISTS live_orders (
       id                SERIAL PRIMARY KEY,

@@ -3,6 +3,10 @@ import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianG
 import api from '../services/api';
 
 // ── Design tokens ─────────────────────────────────────────
+const newIdemKey = () =>
+  globalThis.crypto?.randomUUID?.() ??
+  `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+
 const mono = { fontFamily:"'JetBrains Mono','Fira Code',monospace" };
 const T    = {
   cyan:'#00f5d4', purple:'#a78bfa', amber:'#f59e0b',
@@ -676,6 +680,9 @@ function OrderForm({ exchange, symbol, ticker, balance, isForex, isCommodity, qu
     }
 
     setConfirm({
+      // One Idempotency-Key per order INTENT (created when the confirmation opens): a double click or a
+      // network retry of this same confirmation can never create a second order on the server.
+      _idemKey:   newIdemKey(),
       exchangeId: exchange.id,
       symbol:     isForexAcct ? symbol : `${symbol}USDT`,
       baseSymbol: symbol,
@@ -692,7 +699,8 @@ function OrderForm({ exchange, symbol, ticker, balance, isForex, isCommodity, qu
   const handleConfirm = async () => {
     setLoading(true);
     try {
-      const res = await api.post('/trading/order', confirm);
+      const { _idemKey, ...orderBody } = confirm;
+      const res = await api.post('/trading/order', orderBody, { headers: { 'Idempotency-Key': _idemKey } });
       if (res.data.success) {
         setResult({ mode: res.data.mode, order: res.data.order, warning: res.data.warning });
         setQuantity(''); setPrice(''); setStopPrice(''); setStopLoss(''); setTakeProfit(''); setPct(null);

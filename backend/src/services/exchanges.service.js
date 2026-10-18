@@ -650,8 +650,8 @@ async function fetchOrderFill(exchangeId, creds, orderId, symbol) {
 }
 
 // ── POST /api/exchanges/:exchangeId/order (mode 'paper') ──────
-async function openPaperTrade(userId, exchangeId, { symbol, side, orderType, quantity, price, limitPrice, stopLoss, takeProfit, signalId }) {
-  const { rows } = await db.query(
+async function openPaperTrade(userId, exchangeId, { symbol, side, orderType, quantity, price, limitPrice, stopLoss, takeProfit, signalId }, q = db.query) {
+  const { rows } = await q(
     `INSERT INTO paper_trades
        (user_id, exchange_id, symbol, side, order_type, quantity, price, limit_price, stop_loss, take_profit, signal_id, status)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'open')

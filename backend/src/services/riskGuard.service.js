@@ -39,8 +39,8 @@ const num = (v, fallback) => {
   return Number.isFinite(n) ? n : fallback;
 };
 
-async function getRiskSettings(userId) {
-  const { rows } = await db.query(
+async function getRiskSettings(userId, q = db.query) {
+  const { rows } = await q(
     `SELECT risk_max_position_pct, risk_max_daily_loss_pct, risk_default_stoploss_pct, risk_max_total_exposure_pct
      FROM user_settings WHERE user_id = $1`,
     [userId]
@@ -56,9 +56,9 @@ async function getRiskSettings(userId) {
 }
 
 /** Account equity in quote currency, or null if it cannot be determined. */
-async function getEquity({ userId, exchangeId, mode, creds }) {
+async function getEquity({ userId, exchangeId, mode, creds, q = db.query }) {
   if (mode === 'paper') {
-    const { rows } = await db.query(
+    const { rows } = await q(
       `SELECT COALESCE(SUM(pnl), 0) AS realised
        FROM paper_trades WHERE user_id = $1 AND exchange_id = $2 AND status = 'closed'`,
       [userId, exchangeId]
@@ -73,8 +73,8 @@ async function getEquity({ userId, exchangeId, mode, creds }) {
 }
 
 /** Gross notional of the user's currently open paper positions on this exchange. */
-async function openPaperNotional(userId, exchangeId) {
-  const { rows } = await db.query(
+async function openPaperNotional(userId, exchangeId, q = db.query) {
+  const { rows } = await q(
     `SELECT COALESCE(SUM(quantity * price), 0) AS notional
        FROM paper_trades WHERE user_id = $1 AND exchange_id = $2 AND status = 'open'`,
     [userId, exchangeId]
@@ -82,8 +82,8 @@ async function openPaperNotional(userId, exchangeId) {
   return num(rows[0]?.notional, 0);
 }
 
-async function todayRealisedPaperPnl(userId) {
-  const { rows } = await db.query(
+async function todayRealisedPaperPnl(userId, q = db.query) {
+  const { rows } = await q(
     `SELECT COALESCE(SUM(pnl), 0) AS pnl FROM paper_trades
      WHERE user_id = $1 AND status = 'closed' AND closed_at >= date_trunc('day', NOW())`,
     [userId]
@@ -114,6 +114,8 @@ const fail = (status, code, error, details) => ({ ok: false, status, code, error
  */
 async function checkOrder(o) {
   const { userId, exchangeId, mode, creds, side, quantity, refPrice } = o;
+  // `q` = exécuteur SQL (client d'une transaction avec lock, voir utils/orderLock) ; sinon le pool.
+  const q = o.q || db.query;
   const warnings = [];
   let stopLoss = o.stopLoss ?? null;
 
@@ -122,11 +124,11 @@ async function checkOrder(o) {
     return { ok: true, stopLoss, warnings, details: { reduceOnly: true } };
   }
 
-  const s = await getRiskSettings(userId);
+  const s = await getRiskSettings(userId, q);
 
   let equity = null;
   try {
-    equity = await getEquity({ userId, exchangeId, mode, creds });
+    equity = await getEquity({ userId, exchangeId, mode, creds, q });
   } catch (err) {
     logger.warn(`[riskGuard] equity lookup failed (${exchangeId}): ${err.message}`);
   }
@@ -156,7 +158,7 @@ async function checkOrder(o) {
 
   // 1b) Max TOTAL exposure (paper: open positions are tracked; live exposure isn't)
   if (mode === 'paper' && equity != null && equity > 0 && s.maxTotalExposurePct > 0) {
-    const openNotional = await openPaperNotional(userId, exchangeId);
+    const openNotional = await openPaperNotional(userId, exchangeId, q);
     const totalPct = ((openNotional + notional) / equity) * 100;
     if (totalPct > s.maxTotalExposurePct) {
       const room = Math.max(0, (equity * s.maxTotalExposurePct) / 100 - openNotional);
@@ -170,7 +172,7 @@ async function checkOrder(o) {
 
   // 2) Max daily loss (paper only — live P&L isn't tracked)
   if (mode === 'paper' && s.maxDailyLossPct > 0) {
-    const todayPnl = await todayRealisedPaperPnl(userId);
+    const todayPnl = await todayRealisedPaperPnl(userId, q);
     if (todayPnl < 0) {
       const base = equity ?? exchangesSvc.PAPER_START_CAPITAL;
       const lossPct = (Math.abs(todayPnl) / base) * 100;

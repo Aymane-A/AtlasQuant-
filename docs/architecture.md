@@ -47,9 +47,19 @@ linked (`user_settings.telegram_chat_id` + `telegram_enabled`). `TELEGRAM_BOT_TO
 - `utils/processHandlers.js`: `unhandledRejection` is logged (process keeps running); `uncaughtException` logs then exits(1)
   so the restart policy brings a clean process back.
 - Paper close is atomic (`UPDATE … WHERE status='open' AND user_id`): a manual close and the SL/TP monitor can't both book P&L.
+- **Order idempotency** (`middleware/idempotency.middleware.js`, table `idempotency_keys`): the claim is an
+  `INSERT … ON CONFLICT DO NOTHING`, so of N simultaneous requests with one key exactly one executes; a finished one is
+  replayed. A key left `in_progress` by a crash is never auto-replayed (a live order may have left).
+- **Atomic exposure reservation** (`utils/orderLock.js`): a Postgres transaction takes `pg_advisory_xact_lock` per user,
+  and the risk reads + the paper-trade insert go through that transaction's client, so the next order sees the committed
+  position. Also used by the auto-trader, which re-checks "same signal already traded" and "max open positions" inside the lock.
 - Cron jobs have overlap guards. Production 5xx never leak internals (`utils/httpError.js`, `requestId`).
 
 ## Known limits
 
-No SQL transaction/idempotency key around order placement; risk checks are not atomic across concurrent orders;
-live P&L isn't tracked; JWT lives in `localStorage` and the WebSocket token goes in the query string.
+- Live orders: no atomic reservation (live exposure and live P&L are not tracked), no broker reconciliation, no order
+  state machine. Keep `PAPER_TRADING=true`; real-money trading is NO-GO until those exist.
+- Idempotency covers retries and double clicks, not "the exchange accepted the order but the response was lost":
+  that case stays `in_progress` (409) and needs reconciliation against the broker.
+- WebSocket tickets are in memory (single backend process). The JWT still lives in `localStorage` (XSS exposure).
+- The pg-integration tests need a PostgreSQL (`TEST_DATABASE_URL`); without it they are skipped.

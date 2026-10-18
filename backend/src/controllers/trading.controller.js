@@ -10,6 +10,7 @@ const riskGuard     = require('../services/riskGuard.service');
 const { requireVerifiedEmailForLive } = require('../utils/emailVerified');
 const { sendServerError } = require('../utils/httpError');
 const killSwitch    = require('../utils/killSwitch');
+const { withUserOrderLock } = require('../utils/orderLock');
 
 // Reference price used for risk checks and paper fills: the limit price for limit
 // orders, otherwise the current market price. Returns null if it can't be fetched.
@@ -108,6 +109,12 @@ async function placeOrder(req, res) {
       if (!v.ok) return res.status(v.status).json({ success:false, code:v.code, error:v.error });
     }
 
+    // ✅ Audit 4: un ordre LIVE exige une Idempotency-Key (un retry réseau ne doit jamais créer un 2e ordre réel).
+    if (isLive && !req.idempotency) {
+      return res.status(400).json({ success:false, code:'IDEMPOTENCY_KEY_REQUIRED',
+        error:'Live orders require an Idempotency-Key header (unique per order intent, 8-128 chars).' });
+    }
+
     // Price used for risk checks (and as the paper fill). Without it we can't
     // enforce the user's limits, and we never guess a price.
     const refPrice = await getReferencePrice(exchangeId, creds, symbol, orderType, price);
@@ -115,9 +122,42 @@ async function placeOrder(req, res) {
       return res.status(502).json({ success:false, error:'Could not fetch a market price for this symbol. Try again shortly.' });
     }
 
-    // ── Risk limits from Settings (max position, daily loss, default stop-loss) ──
+    // ── Paper mode : limites de risque + écriture de la position sous un lock par utilisateur ──
+    // Sans lock, N ordres simultanés lisent tous la même exposition ouverte et passent tous le plafond.
+    if (!isLive) {
+      const out = await withUserOrderLock(userId, async (q) => {
+        const risk = await riskGuard.checkOrder({
+          userId, exchangeId, mode: 'paper', creds,
+          side: sideNorm, quantity: qty, refPrice,
+          stopLoss: stopLoss ? Number(stopLoss) : null,
+          noStopLoss: noStopLoss === true,
+          q,
+        });
+        if (!risk.ok) return { risk };
+        const trade = await exchangesSvc.openPaperTrade(userId, exchangeId, {
+          symbol:      symbol.toUpperCase(),
+          side:        sideNorm,
+          orderType,
+          quantity:    qty,
+          price:       refPrice,
+          limitPrice:  orderType === 'limit' ? parseFloat(price) : null,
+          stopLoss:    risk.stopLoss,
+          takeProfit:  takeProfit ? parseFloat(takeProfit) : null,
+          signalId:    signalId ? parseInt(signalId, 10) : null,
+        }, q);
+        return { risk, trade };
+      });
+
+      if (!out.risk.ok) {
+        return res.status(out.risk.status).json({ success:false, code:out.risk.code, error:out.risk.error, details:out.risk.details });
+      }
+      const paperRiskInfo = { appliedStopLoss: stopLoss ? null : out.risk.stopLoss, warnings: out.risk.warnings };
+      return res.json({ success:true, mode:'paper', order: out.trade, risk: paperRiskInfo });
+    }
+
+    // ── Live : limites par ordre (l'exposition live n'est pas suivie, donc pas de réservation atomique) ──
     const risk = await riskGuard.checkOrder({
-      userId, exchangeId, mode: isLive ? 'live' : 'paper', creds,
+      userId, exchangeId, mode: 'live', creds,
       side: sideNorm, quantity: qty, refPrice,
       stopLoss: stopLoss ? Number(stopLoss) : null,
       noStopLoss: noStopLoss === true,
@@ -127,23 +167,6 @@ async function placeOrder(req, res) {
     }
     const effStopLoss = risk.stopLoss;
     const riskInfo = { appliedStopLoss: stopLoss ? null : risk.stopLoss, warnings: risk.warnings };
-
-    // ── Paper mode ──
-    if (!isLive) {
-      const trade = await exchangesSvc.openPaperTrade(userId, exchangeId, {
-        symbol:      symbol.toUpperCase(),
-        side:        sideNorm,
-        orderType,
-        quantity:    qty,
-        price:       refPrice,
-        limitPrice:  orderType === 'limit' ? parseFloat(price) : null,
-        stopLoss:    effStopLoss,
-        takeProfit:  takeProfit ? parseFloat(takeProfit) : null,
-        signalId:    signalId ? parseInt(signalId, 10) : null,
-      });
-
-      return res.json({ success:true, mode:'paper', order: trade, risk: riskInfo });
-    }
 
     // ── Live mode ──
     const result = await exchangesSvc.placeLiveOrder(exchangeId, creds, {
