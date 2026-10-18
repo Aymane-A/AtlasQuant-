@@ -69,10 +69,14 @@ api.interceptors.response.use(
       err.retryAfter  = err.response?.headers?.['retry-after'] || 60;
     }
 
+    // `response` is kept on purpose: ~20 call sites read err.response.data.error. Without it they all
+    // fell back to a generic message ("Order failed", "Failed to save…") and hid the real reason.
     return Promise.reject({
       status,
+      code:       err.response?.data?.code,
       error:      err.response?.data?.error || err.message,
       isRateLimit: err.isRateLimit || false,
+      response:   err.response,
     });
   }
 );
