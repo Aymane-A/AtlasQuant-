@@ -5,8 +5,8 @@
   "scripts": {
     "start": "node src/app.js",
     "dev": "node --max-old-space-size=4096 node_modules/nodemon/bin/nodemon.js src/app.js",
-    "test": "node --test tests/security.test.js tests/auth-cookie.test.js tests/paper-guard.test.js tests/audit-fixes.test.js tests/paper-close.test.js tests/audit-3.test.js tests/audit-4.test.js tests/idempotency.test.js tests/pg-integration.test.js",
-    "test:pg": "node --test tests/pg-integration.test.js"
+    "test": "node --test --test-force-exit tests/security.test.js tests/auth-cookie.test.js tests/paper-guard.test.js tests/audit-fixes.test.js tests/paper-close.test.js tests/audit-3.test.js tests/audit-4.test.js tests/idempotency.test.js tests/pg-integration.test.js",
+    "test:pg": "node --test --test-force-exit tests/pg-integration.test.js"
   },
   "dependencies": {
     "archiver": "^8.0.0",
