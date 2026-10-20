@@ -752,6 +752,7 @@ function SecuritySection({ onToast }) {
   const [verifying, setVerifying] = useState(false);
   const [backupCodes, setBackupCodes] = useState(null);
   const [disablePwd, setDisablePwd] = useState('');
+  const [disableCode, setDisableCode] = useState('');
   const [showDisable, setShowDisable] = useState(false);
 
   useEffect(() => {
@@ -803,11 +804,13 @@ function SecuritySection({ onToast }) {
 
   const disable2FA = async () => {
     if (!disablePwd) return onToast('Enter your password to disable 2FA', false);
+    if (!disableCode.trim()) return onToast('Enter your 2FA code (or a backup code) to disable 2FA', false);
     try {
-      await api.post('/security/2fa/disable', { password: disablePwd });
+      await api.post('/security/2fa/disable', { password: disablePwd, code: disableCode.trim() });
       setTwofaEnabled(false);
       setShowDisable(false);
       setDisablePwd('');
+      setDisableCode('');
       onToast('2FA disabled', true);
     } catch (err) {
       onToast(err?.error || 'Incorrect password', false);
@@ -929,6 +932,9 @@ function SecuritySection({ onToast }) {
           <div style={{ marginTop:12, display:'flex', gap:8 }}>
             <div style={{ flex:1 }}>
               <Input value={disablePwd} onChange={e => setDisablePwd(e.target.value)} type="password" placeholder="Confirm your password" />
+            </div>
+            <div style={{ flex:1 }}>
+              <Input value={disableCode} onChange={e => setDisableCode(e.target.value)} type="text" placeholder="2FA code or backup code" />
             </div>
             <button onClick={disable2FA} style={{
               padding:'0 20px', borderRadius:8, border:'1px solid rgba(248,113,113,0.3)',

@@ -10,6 +10,7 @@ const logger     = require('../utils/logger');
 const { logAuditEvent } = require('../utils/auditLog');
 const { sendServerError } = require('../utils/httpError');
 const { encryptTotpSecret, decryptTotpSecret } = require('../utils/secretBox');
+const { isLocked, recordFailure, lockedResponse } = require('../utils/failLimit');
 
 // ═══════════════════════════════════════════════════════════
 // 2FA (TOTP)
@@ -83,18 +84,49 @@ async function verify2FA(req, res) {
   }
 }
 
-// POST /api/security/2fa/disable — nécessite le mot de passe actuel
+// POST /api/security/2fa/disable — nécessite le mot de passe actuel ET un second facteur
+// (code TOTP ou code de secours). Un cookie de session volé + le mot de passe ne suffisent plus.
+// Verrouillage par compte après 5 échecs / 15 min.
 async function disable2FA(req, res) {
   try {
     const userId = req.user.id;
-    const { password } = req.body;
+    const { password, code } = req.body || {};
     const bcrypt = require('bcryptjs');
 
-    const { rows } = await db.query('SELECT password FROM users WHERE id = $1', [userId]);
-    if (!rows.length) return res.status(404).json({ success: false, error: 'Utilisateur introuvable' });
+    if (await isLocked(userId, '2fa_disable_failed')) return lockedResponse(res);
 
-    const isMatch = await bcrypt.compare(password || '', rows[0].password);
-    if (!isMatch) return res.status(401).json({ success: false, error: 'Mot de passe incorrect' });
+    const { rows } = await db.query(
+      'SELECT password, twofa_enabled, twofa_secret, twofa_backup_codes FROM users WHERE id = $1', [userId]);
+    if (!rows.length) return res.status(404).json({ success: false, error: 'Utilisateur introuvable' });
+    const user = rows[0];
+
+    if (!user.twofa_enabled) return res.status(400).json({ success: false, error: '2FA non activé' });
+
+    const pwOk = await bcrypt.compare(typeof password === 'string' ? password : '', user.password);
+    if (!pwOk) {
+      await recordFailure(userId, '2fa_disable_failed', req);
+      return res.status(401).json({ success: false, error: 'Mot de passe incorrect' });
+    }
+
+    if (typeof code !== 'string' || !code.trim()) {
+      return res.status(400).json({ success: false, code: '2FA_CODE_REQUIRED', error: 'Code 2FA ou code de secours requis' });
+    }
+    const clean = code.replace(/\s/g, '');
+    let second = false;
+    let secret = null;
+    try { secret = user.twofa_secret ? decryptTotpSecret(user.twofa_secret) : null; } catch { secret = null; }
+    if (secret && /^\d{6}$/.test(clean)) {
+      second = speakeasy.totp.verify({ secret, encoding: 'base32', token: clean, window: 1 });
+    }
+    if (!second) {
+      const hash  = crypto.createHash('sha256').update(clean.toLowerCase()).digest('hex');
+      const codes = Array.isArray(user.twofa_backup_codes) ? user.twofa_backup_codes : [];
+      second = codes.includes(hash);
+    }
+    if (!second) {
+      await recordFailure(userId, '2fa_disable_failed', req);
+      return res.status(401).json({ success: false, error: 'Code 2FA invalide' });
+    }
 
     await db.query(
       'UPDATE users SET twofa_enabled = false, twofa_secret = NULL, twofa_backup_codes = \'[]\' WHERE id = $1',

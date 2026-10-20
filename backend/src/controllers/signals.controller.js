@@ -18,7 +18,7 @@ async function getAllSignals(req, res) {
             const { scanAll, CRYPTO_SYMBOLS } = require('../services/signalGenerator.service');
             const { scanAllYF, YF_SYMBOLS }   = require('../services/yahooFinance.service');
 
-            const jobId      = createJob();
+            const jobId      = createJob(req.user && req.user.id);
             const cryptoTotal = CRYPTO_SYMBOLS.length;
             const forexTotal  = Object.keys(YF_SYMBOLS).length;
             updateJob(jobId, { cryptoTotal, forexTotal });
@@ -115,8 +115,8 @@ async function getAllSignals(req, res) {
 // ── getScanStatus ──────────────────────────────────────────
 // GET /api/signals/scan-status/:jobId
 async function getScanStatus(req, res) {
-    const { getJob } = require('../services/scanJob.service');
-    const job = getJob(req.params.jobId);
+    const { getJobForUser } = require('../services/scanJob.service');
+    const job = getJobForUser(req.params.jobId, req.user.id);
 
     if (!job) {
         return res.status(404).json({ success: false, error: 'Job not found or expired' });
