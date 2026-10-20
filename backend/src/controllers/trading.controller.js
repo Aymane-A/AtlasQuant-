@@ -20,8 +20,11 @@ async function getReferencePrice(exchangeId, creds, symbol, orderType, price) {
     const sym = symbol.toUpperCase();
     if (exchangeId === 'oanda')  return (await exchangesSvc.getOandaPrice(creds.apiKey, creds.apiSecret, creds.mode, sym)).mid;
     if (exchangeId === 'alpaca') return (await exchangesSvc.getAlpacaQuote(creds, sym)).mid;
+    // The Trading page already sends the full pair ("BTCUSDT"); other callers send the base asset ("BTC").
+    // Appending USDT blindly gave "BTCUSDTUSDT" => Binance 400 => "Could not fetch a market price".
+    const pair = sym.endsWith('USDT') ? sym : `${sym}USDT`;
     const r = await axios.get(
-      `https://api.binance.com/api/v3/ticker/price?symbol=${encodeURIComponent(sym)}USDT`,
+      `https://api.binance.com/api/v3/ticker/price?symbol=${encodeURIComponent(pair)}`,
       { timeout: 5000 }
     );
     return parseFloat(r.data.price);

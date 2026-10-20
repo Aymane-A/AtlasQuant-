@@ -8,31 +8,58 @@ if (!API_URL) {
   throw new Error('VITE_API_URL is not set. Set it at build time to the public API URL, e.g. https://api.example.com/api');
 }
 
+// ── Session = HttpOnly cookie ─────────────────────────────
+// The JWT lives in an HttpOnly cookie set by the API: JavaScript can't read it (so XSS can't steal it).
+// withCredentials makes the browser send it. The CSRF token (returned by login/register/refresh/me) is
+// kept in memory ONLY and sent as X-CSRF-Token on state-changing requests.
 const api = axios.create({
   baseURL: API_URL,
   timeout: 120000,
+  withCredentials: true,
   headers: { 'Content-Type': 'application/json' },
 });
 
-// ── Request interceptor — attach JWT ─────────────────────
+let csrfToken = null;
+export const setCsrfToken = (t) => { csrfToken = t || null; };
+
+const SAFE_METHODS = new Set(['get', 'head', 'options']);
+// Auth probes whose 401 is an expected answer ("not logged in"), not a reason to bounce to /login.
+const isAuthProbe = (url = '') => /\/auth\/(me|refresh)$/.test(String(url).split('?')[0]);
+
 api.interceptors.request.use(
   (config) => {
-    const token = localStorage.getItem('aq_token');
-    if (token) config.headers.Authorization = `Bearer ${token}`;
+    if (csrfToken && !SAFE_METHODS.has(String(config.method || 'get').toLowerCase())) {
+      config.headers['X-CSRF-Token'] = csrfToken;
+    }
     return config;
   },
   (err) => Promise.reject(err)
 );
 
-// ── Response interceptor — handle 401 / 429 ──────────────
+// ── Response interceptor — keep CSRF token fresh, handle 401 / 403 CSRF / 429 ──
 api.interceptors.response.use(
-  (res) => res,
-  (err) => {
+  (res) => {
+    if (res.data && res.data.csrfToken) csrfToken = res.data.csrfToken;
+    return res;
+  },
+  async (err) => {
     const status = err.response?.status;
+    const cfg = err.config;
+
+    // Stale CSRF token (e.g. the session was refreshed in another tab): fetch a fresh one via /auth/me, retry once.
+    if (status === 403 && err.response?.data?.code === 'CSRF_INVALID' && cfg && !cfg._csrfRetried) {
+      cfg._csrfRetried = true;
+      try {
+        await api.get('/auth/me');
+        return await api(cfg);
+      } catch (retryErr) {
+        if (retryErr && retryErr.status !== undefined) return Promise.reject(retryErr); // already normalised
+      }
+    }
 
     if (status === 401) {
-      localStorage.removeItem('aq_token');
-      if (!window.location.pathname.includes('/login')) {
+      csrfToken = null;
+      if (!isAuthProbe(cfg?.url) && !window.location.pathname.includes('/login')) {
         window.location.href = '/login';
       }
     }
@@ -42,10 +69,14 @@ api.interceptors.response.use(
       err.retryAfter  = err.response?.headers?.['retry-after'] || 60;
     }
 
+    // `response` is kept on purpose: ~20 call sites read err.response.data.error. Without it they all
+    // fell back to a generic message ("Order failed", "Failed to save…") and hid the real reason.
     return Promise.reject({
       status,
+      code:       err.response?.data?.code,
       error:      err.response?.data?.error || err.message,
       isRateLimit: err.isRateLimit || false,
+      response:   err.response,
     });
   }
 );
@@ -57,6 +88,8 @@ export const authAPI = {
   me:       ()                        => api.get('/auth/me'),
   logout:   ()                        => api.post('/auth/logout'),
   refresh:  ()                        => api.post('/auth/refresh'),
+  // One-time migration: exchange a legacy localStorage JWT for a cookie session (the API revokes the old token).
+  upgradeLegacy: (legacyToken)        => api.post('/auth/refresh', null, { headers: { Authorization: `Bearer ${legacyToken}` } }),
 };
 
 // ── Signals API ───────────────────────────────────────────

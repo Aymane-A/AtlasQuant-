@@ -58,12 +58,13 @@ const pool = new Pool({
 
 pool.on('error', (err) => logger.error(`[db] Pool error: ${err.message}`));
 
-setInterval(() => {
+const poolMonitor = setInterval(() => {
   const { totalCount, idleCount, waitingCount } = pool;
   if (waitingCount > 0) {
     logger.warn(`[db] Pool sous pression — total:${totalCount} idle:${idleCount} waiting:${waitingCount}`);
   }
 }, 15000);
+poolMonitor.unref(); // ne doit jamais empêcher le process de se terminer (tests, shutdown)
 
 async function query(text, params) {
   try {
