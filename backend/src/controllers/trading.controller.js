@@ -42,7 +42,7 @@ async function getReferencePrice(exchangeId, creds, symbol, orderType, price) {
 // (e.g. "EUR_USD") and is used as-is. For Alpaca, `symbol` is the stock
 // ticker (e.g. "AAPL") and is used as-is.
 async function placeOrder(req, res) {
-  if (killSwitch.isEngaged()) {
+  if (await killSwitch.isEngagedFresh()) {          // shared + persistent state; unreadable => engaged
     const b = killSwitch.blockedResponse();
     return res.status(b.status).json(b.body);
   }

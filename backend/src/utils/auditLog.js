@@ -12,6 +12,7 @@ const EVENT_TYPES = [
   '2fa_enabled', '2fa_disabled', 'api_key_created', 'api_key_revoked',
   'email_changed', 'login_2fa_failed', '2fa_backup_code_used',
   'password_change_failed', '2fa_disable_failed', 'account_delete_failed',
+  'kill_switch_engaged', 'kill_switch_released',
 ];
 
 async function logAuditEvent(userId, eventType, req, metadata = null) {

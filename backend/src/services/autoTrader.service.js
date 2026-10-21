@@ -291,7 +291,7 @@ async function processConfig(config) {
     return;
   }
 
-  if (killSwitch.isEngaged()) {
+  if (await killSwitch.isEngagedFresh()) {
     logger.warn(`[autoTrader] config #${config.id} — ${side} ${config.symbol} skipped: kill-switch engaged`);
     return;
   }
