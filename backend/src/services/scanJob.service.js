@@ -3,15 +3,17 @@
  * In-memory job tracker for long-running scans (no Redis needed).
  * Jobs auto-expire 5 minutes after creation to avoid memory leaks.
  */
+const crypto = require('crypto');
 const logger = require('../utils/logger');
 
 const jobs = new Map();
 const JOB_TTL_MS = 5 * 60 * 1000;
 
-function createJob() {
-  const id = `scan_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+function createJob(userId = null) {
+  const id = `scan_${crypto.randomBytes(16).toString('hex')}`;   // unguessable (was Date.now() + Math.random())
   jobs.set(id, {
     id,
+    userId,                // owner: only this user may read the job (see getJobForUser)
     status: 'running',       // running | done | error
     cryptoCompleted: 0,
     cryptoTotal: 0,
@@ -35,4 +37,11 @@ function getJob(id) {
   return jobs.get(id) || null;
 }
 
-module.exports = { createJob, updateJob, getJob };
+/** The job, but only for its owner. Anyone else gets null (same as "not found": no enumeration). */
+function getJobForUser(id, userId) {
+  const job = jobs.get(id);
+  if (!job || job.userId == null || String(job.userId) !== String(userId)) return null;
+  return job;
+}
+
+module.exports = { createJob, updateJob, getJob, getJobForUser };

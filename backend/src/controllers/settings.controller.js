@@ -7,6 +7,7 @@ const archiver = require('archiver');
 const db       = require('../config/db');
 const logger   = require('../utils/logger');
 const { logAuditEvent } = require('../utils/auditLog');
+const { isLocked, recordFailure, lockedResponse } = require('../utils/failLimit');
 const { sendServerError } = require('../utils/httpError');
 const { clearAuthCookie } = require('../utils/authCookie');
 
@@ -458,26 +459,40 @@ async function changePassword(req, res) {
     const userId = req.user.id;
     const { currentPassword, newPassword } = req.body;
 
-    if (!currentPassword || !newPassword)
+    if (!currentPassword || !newPassword || typeof currentPassword !== 'string' || typeof newPassword !== 'string')
       return res.status(400).json({ success: false, error: 'Mots de passe requis' });
 
     if (newPassword.length < 8)
       return res.status(400).json({ success: false, error: 'Min. 8 caractères' });
+
+    if (await isLocked(userId, 'password_change_failed')) return lockedResponse(res);
 
     const { rows } = await db.query('SELECT password FROM users WHERE id = $1', [userId]);
     if (!rows.length)
       return res.status(404).json({ success: false, error: 'Utilisateur introuvable' });
 
     const isMatch = await bcrypt.compare(currentPassword, rows[0].password);
-    if (!isMatch)
+    if (!isMatch) {
+      await recordFailure(userId, 'password_change_failed', req);
       return res.status(401).json({ success: false, error: 'Mot de passe actuel incorrect' });
+    }
 
     const hashed = await bcrypt.hash(newPassword, 10);
     await db.query('UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2', [hashed, userId]);
 
-    await logAuditEvent(userId, 'password_changed', req);
+    // A new password must cut off every OTHER session (a stolen cookie/token must not survive it).
+    // The session making this request stays logged in.
+    const currentHash = req.currentSessionHash || null;
+    const revoked = await db.query(
+      `UPDATE user_sessions SET revoked_at = NOW()
+        WHERE user_id = $1 AND revoked_at IS NULL
+        ${currentHash ? 'AND refresh_hash != $2' : ''}`,
+      currentHash ? [userId, currentHash] : [userId]
+    );
 
-    res.json({ success: true, message: 'Mot de passe mis à jour' });
+    await logAuditEvent(userId, 'password_changed', req, { sessions_revoked: revoked?.rowCount ?? 0 });
+
+    res.json({ success: true, message: 'Mot de passe mis à jour', sessionsRevoked: revoked?.rowCount ?? 0 });
   } catch (err) {
     logger.error(`[settings] changePassword: ${err.message}`);
     sendServerError(res, err);
@@ -569,16 +584,20 @@ async function deleteAccount(req, res) {
     const userId = req.user.id;
     const { password } = req.body;
 
-    if (!password)
+    if (!password || typeof password !== 'string')
       return res.status(400).json({ success: false, error: 'Mot de passe requis pour confirmer' });
+
+    if (await isLocked(userId, 'account_delete_failed')) return lockedResponse(res);
 
     const { rows } = await db.query('SELECT password, email FROM users WHERE id = $1', [userId]);
     if (!rows.length)
       return res.status(404).json({ success: false, error: 'Utilisateur introuvable' });
 
     const isMatch = await bcrypt.compare(password, rows[0].password);
-    if (!isMatch)
+    if (!isMatch) {
+      await recordFailure(userId, 'account_delete_failed', req);
       return res.status(401).json({ success: false, error: 'Mot de passe incorrect' });
+    }
 
     await db.query('DELETE FROM users WHERE id = $1', [userId]);
     logger.info(`[settings] Compte supprimé: ${rows[0].email} (id:${userId})`);
