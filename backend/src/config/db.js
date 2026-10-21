@@ -461,6 +461,13 @@ async function migrate() {
     ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS telegram_chat_id TEXT;
     ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS telegram_enabled BOOLEAN NOT NULL DEFAULT false;
 
+    -- Shared operator flags (kill switch): persistent across restarts, shared by every instance
+    CREATE TABLE IF NOT EXISTS system_flags (
+      key         TEXT PRIMARY KEY,
+      value       JSONB NOT NULL,
+      updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
     -- Audit log
     CREATE TABLE IF NOT EXISTS audit_log (
       id          SERIAL PRIMARY KEY,

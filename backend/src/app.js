@@ -149,6 +149,11 @@ const server = app.listen(env.PORT, async () => {
         // Cron jobs/queries must not start before the schema is ready.
         await db.ready;
 
+        // Kill switch: load the persistent shared state BEFORE any job or socket can place an order.
+        const killSwitch = require('./utils/killSwitch');
+        await killSwitch.init();
+        killSwitch.startSync();
+
         initCronJobs();
         logger.info(' Cron Engine: ✅ Initialized & Active');
 

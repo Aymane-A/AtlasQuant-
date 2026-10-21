@@ -10,7 +10,15 @@ delete process.env.TRADING_KILL_SWITCH;
 const test   = require('node:test');
 const assert = require('node:assert');
 
-const fake = { handler: async () => ({ rows: [{ '?column?': 1 }] }) };
+// the kill switch now lives in system_flags: a tiny in-memory stand-in for that one table
+const flags = new Map();
+const fake = { handler: async (sql, params) => {
+  if (/system_flags/.test(sql)) {
+    if (/^\s*SELECT/i.test(sql)) return { rows: flags.has(params[0]) ? [{ value: flags.get(params[0]) }] : [] };
+    flags.set(params[0], JSON.parse(params[1])); return { rows: [] };
+  }
+  return { rows: [{ '?column?': 1 }] };
+} };
 const dbPath = require.resolve('../src/config/db');
 require.cache[dbPath] = {
   id: dbPath, filename: dbPath, loaded: true,
@@ -96,13 +104,13 @@ test('dashboard socket: no ?token= path any more; a bad ticket closes with 4001'
 // ═════════════════════════════════════════════════════════════
 // 2. Kill-switch
 // ═════════════════════════════════════════════════════════════
-test('kill-switch: off by default, engage/release, reason recorded', () => {
+test('kill-switch: off by default, engage/release, reason recorded', async () => {
   const ks = require('../src/utils/killSwitch');
   assert.equal(ks.isEngaged(), false);
-  const s = ks.set(true, 'exchange incident');
-  assert.equal(s.engaged, true); assert.equal(s.reason, 'exchange incident'); assert.ok(s.since);
+  const s = await ks.set(true, 'exchange incident');
+  assert.equal(s.engaged, true); assert.equal(s.reason, 'exchange incident'); assert.ok(s.since); assert.equal(s.persisted, true);
   assert.equal(ks.isEngaged(), true);
-  const r = ks.set(false);
+  const r = await ks.set(false);
   assert.equal(r.engaged, false); assert.equal(r.reason, null);
 });
 
@@ -112,33 +120,34 @@ test('kill-switch: placeOrder refuses with 503 TRADING_DISABLED and never touche
   require.cache[svcPath] = { id: svcPath, filename: svcPath, loaded: true,
     exports: new Proxy({}, { get: () => async () => { touched = true; return null; } }) };
   let dbTouched = false;
-  const prev = fake.handler; fake.handler = async () => { dbTouched = true; return { rows: [] }; };
+  // the only query allowed is the kill-switch read itself: no order/trade table is touched
+  const prev = fake.handler; fake.handler = async (sql, params) => { if (!/system_flags/.test(sql)) dbTouched = true; return prev(sql, params); };
   const ks = require('../src/utils/killSwitch');
   delete require.cache[require.resolve('../src/controllers/trading.controller')];
   const { placeOrder } = require('../src/controllers/trading.controller');
 
-  ks.set(true, 'test');
+  await ks.set(true, 'test');
   const res = mkRes();
   await placeOrder({ user: { id: 7 }, body: { exchangeId: 'binance', symbol: 'BTC', side: 'buy', quantity: 1 } }, res);
   assert.equal(res.statusCode, 503);
   assert.equal(res.body.code, 'TRADING_DISABLED');
   assert.equal(touched, false); assert.equal(dbTouched, false);
 
-  ks.set(false);
+  await ks.set(false);
   const res2 = mkRes();
   await placeOrder({ user: { id: 7 }, body: { exchangeId: 'binance', symbol: 'BTC', side: 'buy', quantity: -1 } }, res2);
   assert.equal(res2.statusCode, 400, 'with the switch off the normal validation runs again');
   fake.handler = prev;
 });
 
-test('kill-switch: TRADING_KILL_SWITCH=true at boot starts engaged', () => {
+test('kill-switch: TRADING_KILL_SWITCH=true at boot starts engaged', async () => {
   process.env.TRADING_KILL_SWITCH = 'true';
   delete require.cache[require.resolve('../src/utils/killSwitch')];
   const ks = require('../src/utils/killSwitch');
   assert.equal(ks.isEngaged(), true);
   delete process.env.TRADING_KILL_SWITCH;
   delete require.cache[require.resolve('../src/utils/killSwitch')];
-  require('../src/utils/killSwitch').set(false);
+  await require('../src/utils/killSwitch').set(false);
 });
 
 // ═════════════════════════════════════════════════════════════
@@ -161,7 +170,7 @@ async function adminCall(method, path, { key, body } = {}) {
 }
 
 test('admin: no/wrong key => 401, nothing changes; right key toggles the switch', async () => {
-  const ks = require('../src/utils/killSwitch'); ks.set(false);
+  const ks = require('../src/utils/killSwitch'); await ks.set(false);
   assert.equal((await adminCall('POST', '/kill-switch', { body: { enabled: true } })).status, 401);
   assert.equal((await adminCall('POST', '/kill-switch', { key: 'x'.repeat(40), body: { enabled: true } })).status, 401);
   assert.equal(ks.isEngaged(), false);
@@ -192,7 +201,7 @@ test('health: db up + cron running + switch off => ok / 200, and nothing sensiti
   const cronPath = require.resolve('../src/services/cron.service');
   require.cache[cronPath] = { id: cronPath, filename: cronPath, loaded: true, exports: { isCronRunning: () => true } };
   delete require.cache[require.resolve('../src/utils/health')];
-  require('../src/utils/killSwitch').set(false);
+  await require('../src/utils/killSwitch').set(false);
   const { healthHandler } = require('../src/utils/health');
   const res = mkRes(); await healthHandler({}, res);
   assert.equal(res.statusCode, 200);
@@ -213,10 +222,10 @@ test('health: db down => 503 / down; kill-switch engaged or cron stopped => degr
   assert.ok(!JSON.stringify(res.body).includes('secret-internal-detail'), 'no error text leaks');
   fake.handler = prev;
 
-  ks.set(true, 'drill');
+  await ks.set(true, 'drill');
   res = mkRes(); await healthHandler({}, res);
   assert.equal(res.statusCode, 200); assert.equal(res.body.status, 'degraded'); assert.equal(res.body.killSwitch, true);
-  ks.set(false);
+  await ks.set(false);
 
   require.cache[cronPath].exports.isCronRunning = () => false;
   res = mkRes(); await healthHandler({}, res);

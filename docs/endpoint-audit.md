@@ -6,7 +6,7 @@ Rules that apply to every route: cookie sessions need the CSRF token on POST/PUT
 
 | Method | Path | Auth | Ownership / IDOR test | Rate limit | Notes |
 |---|---|---|---|---|---|
-| GET | /api/admin/kill-switch | ADMIN_KEY (timing-safe) | n/a | global (500/15 min/IP) |  |
+| GET | /api/admin/kill-switch | ADMIN_KEY (timing-safe) | n/a | 20/min/IP (router.use) | reads the shared state; `persisted:false, stale:true` if the database is unreadable |
 | GET | /api/alerts | session / API key | idor-pg (list) | 30/min/IP |  |
 | GET | /api/alerts/history | session / API key | idor-pg (list) | 30/min/IP |  |
 | POST | /api/alerts | session / API key | own data (req.user.id), no foreign id | 20/min/IP |  |
@@ -94,7 +94,7 @@ Rules that apply to every route: cookie sessions need the CSRF token on POST/PUT
 
 ## Open items (not fixed by this audit)
 
-1. **Kill switch** lives in process memory (`utils/killSwitch.js`): a restart or a second instance loses the state. Persist it (DB or Redis).
+1. ~~**Kill switch** lives in process memory~~ **DONE**: the state is in the `system_flags` table (key `kill_switch`): it survives a restart and is shared by every instance. Order paths (`placeOrder`, auto-trader) read it from the database on every order and **fail closed** (database unreadable => orders refused); `/api/health` uses a cache refreshed every 3 s. Engaging always works (even if the write fails); a release that cannot be persisted is refused. Engage/release is written to `audit_log` (`kill_switch_engaged` / `kill_switch_released`, `user_id` NULL). `TRADING_KILL_SWITCH=true` re-engages at every boot. Tests: `kill-switch-persist.test.js`, `kill-switch-pg.test.js`.
 2. **In-memory rate limiter / lockouts**: the IP limiter is per instance. Per-account lockouts (login, password change, 2FA disable, account delete) use `audit_log`, so they are already shared across instances.
 3. **`DELETE /api/settings/account`** asks for the password only; add the 2FA code like `disable2FA`.
 4. **Legacy tokens without a `user_sessions` row** cannot be revoked individually by a password change; they die at JWT expiry or on the next refresh (legacy Bearer is exchanged for a cookie session and revoked).
