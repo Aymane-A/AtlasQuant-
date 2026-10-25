@@ -9,6 +9,7 @@ const exchangesSvc  = require('../services/exchanges.service');
 const riskGuard     = require('../services/riskGuard.service');
 const { requireVerifiedEmailForLive } = require('../utils/emailVerified');
 const { sendServerError } = require('../utils/httpError');
+const { newClientOrderId, classifyOrderError, normalizeOrderStatus, OPEN_STATUSES, CLOSED_STATUSES } = require('../utils/orderState');
 const killSwitch    = require('../utils/killSwitch');
 const { withUserOrderLock } = require('../utils/orderLock');
 
@@ -41,6 +42,19 @@ async function getReferencePrice(exchangeId, creds, symbol, orderType, price) {
 // "USDT" appended. For OANDA, `symbol` is already the full instrument
 // (e.g. "EUR_USD") and is used as-is. For Alpaca, `symbol` is the stock
 // ticker (e.g. "AAPL") and is used as-is.
+/** Best effort: if this write fails the row stays "pending" and the reconciler flags/resolves it. */
+async function setOrderState(id, status, note) {
+  try {
+    await db.query(
+      `UPDATE live_orders SET status=$1, status_note=$2, updated_at=NOW(),
+              unknown_since = CASE WHEN $1 = 'unknown' THEN NOW() ELSE unknown_since END
+        WHERE id=$3`,
+      [status, String(note || '').slice(0, 500), id]);
+  } catch (err) {
+    logger.error(`[trading.placeOrder] could not set order #${id} to ${status}: ${err.message}`);
+  }
+}
+
 async function placeOrder(req, res) {
   if (await killSwitch.isEngagedFresh()) {          // shared + persistent state; unreadable => engaged
     const b = killSwitch.blockedResponse();
@@ -172,24 +186,58 @@ async function placeOrder(req, res) {
     const riskInfo = { appliedStopLoss: stopLoss ? null : risk.stopLoss, warnings: risk.warnings };
 
     // ── Live mode ──
-    const result = await exchangesSvc.placeLiveOrder(exchangeId, creds, {
-      symbol: symbol.toUpperCase(),
-      side: sideNorm, type: orderType, quantity: qty, price,
-      stopLoss:   effStopLoss ?? undefined,
-      takeProfit: takeProfit ? parseFloat(takeProfit) : undefined,
-    });
+    // State machine: the order is RECORDED BEFORE it is sent, with the client id that travels to the
+    // exchange. If the reply is lost we are left with a row to look up (reconciler), not an order nobody
+    // knows about. A lost reply is "unknown", never "failed": the exchange may have accepted it.
+    const symU = symbol.toUpperCase();
+    const clientOrderId = newClientOrderId();
+    let rowId;
+    try {
+      const ins = await db.query(
+        `INSERT INTO live_orders
+           (user_id, exchange_id, symbol, side, order_type, quantity, price, stop_loss, take_profit, status, signal_id, client_order_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending',$10,$11) RETURNING id`,
+        [userId, exchangeId, symU, sideNorm, orderType, qty, price || null,
+         effStopLoss || null, takeProfit || null, signalId ? parseInt(signalId, 10) : null, clientOrderId]
+      );
+      rowId = ins.rows[0].id;
+    } catch (dbErr) {
+      logger.error(`[trading.placeOrder] order could not be recorded, NOT sent: ${dbErr.message}`);
+      return res.status(503).json({ success: false, code: 'ORDER_NOT_RECORDED',
+        error: 'The order could not be recorded, so it was NOT sent. Nothing was placed; try again.' });
+    }
 
-    // Audit log
-    await db.query(
-      `INSERT INTO live_orders
-         (user_id, exchange_id, exchange_order_id, symbol, side, order_type, quantity, price, stop_loss, take_profit, status, raw_response, signal_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-      [userId, exchangeId, result.exchangeOrderId, symbol.toUpperCase(),
-       sideNorm, orderType, qty, price || null,
-       effStopLoss || null, takeProfit || null,
-       result.status || 'submitted', JSON.stringify(result.raw),
-       signalId ? parseInt(signalId, 10) : null]
-    );
+    let result;
+    try {
+      result = await exchangesSvc.placeLiveOrder(exchangeId, creds, {
+        symbol: symU,
+        side: sideNorm, type: orderType, quantity: qty, price,
+        stopLoss:   effStopLoss ?? undefined,
+        takeProfit: takeProfit ? parseFloat(takeProfit) : undefined,
+        clientOrderId,
+      });
+    } catch (sendErr) {
+      if (classifyOrderError(sendErr) === 'rejected') {
+        await setOrderState(rowId, 'rejected', sendErr.message);
+        throw sendErr;                                    // a definite refusal: answered exactly as before
+      }
+      await setOrderState(rowId, 'unknown', sendErr.message);
+      logger.error(`[trading.placeOrder] ORDER STATE UNKNOWN (#${rowId}, ${exchangeId} ${clientOrderId}): ${sendErr.message}`);
+      return res.status(502).json({
+        success: false, code: 'ORDER_STATE_UNKNOWN', orderId: rowId, clientOrderId,
+        error: 'The exchange did not confirm this order. It may or may not have been placed. Do NOT send it again: it is being checked automatically and will show as open, filled or rejected.',
+      });
+    }
+
+    // Placed: complete the row. If this write fails the row stays "pending" and the reconciler resolves it by client id.
+    try {
+      await db.query(
+        `UPDATE live_orders SET exchange_order_id=$1, status=$2, raw_response=$3, updated_at=NOW() WHERE id=$4`,
+        [result.exchangeOrderId, normalizeOrderStatus(result.status), JSON.stringify(result.raw), rowId]
+      );
+    } catch (dbErr) {
+      logger.error(`[trading.placeOrder] order #${rowId} PLACED on ${exchangeId} but the row could not be completed (reconciler will fix it): ${dbErr.message}`);
+    }
 
     res.json({
       success: true, mode:'live', order: result, risk: riskInfo,
@@ -226,7 +274,7 @@ async function getOrders(req, res) {
 
     // Live orders from audit log
     if (!mode || mode === 'live') {
-      const statusFilter = status === 'open' ? ['submitted','pending','partially_filled'] : ['filled','cancelled','rejected'];
+      const statusFilter = status === 'open' ? OPEN_STATUSES : CLOSED_STATUSES;   // OPEN includes 'unknown': the user must see it
       const whereEx = exchangeId ? 'AND exchange_id=$3' : '';
       const params  = exchangeId ? [userId, statusFilter, exchangeId] : [userId, statusFilter];
       const { rows } = await db.query(

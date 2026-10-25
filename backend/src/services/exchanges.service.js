@@ -60,6 +60,7 @@ const CCXT_EXCHANGES = new Set([
 // ── Encryption helpers ──────────────────────────────────────────
 // ✅ Audit 3: déplacés dans utils/secretBox.js (partagés avec le 2FA, sans charger ccxt).
 const { encrypt, decrypt } = require('../utils/secretBox');
+const { normalizeOrderStatus } = require('../utils/orderState');
 
 // ── ccxt helpers ──────────────────────────────────────────────
 function getCcxtInstance(exchangeId, creds) {
@@ -520,13 +521,14 @@ async function getBalance(userId, exchangeId) {
 // CEX génériques via ccxt non (implémentation OCO/bracket variant trop
 // par exchange pour un chemin générique fiable) — bracketUnsupported=true
 // signale ce cas à trading.controller.js, qui avertit l'utilisateur.
-async function placeLiveOrder(exchangeId, creds, { symbol, side, type, quantity, price, stopLoss, takeProfit }) {
+async function placeLiveOrder(exchangeId, creds, { symbol, side, type, quantity, price, stopLoss, takeProfit, clientOrderId }) {
   // Global kill-switch, enforced HERE (the last step before the exchange) so no
   // route, script or future caller can bypass it. Set PAPER_TRADING=false to allow real orders.
   if (env.PAPER_TRADING) {
     const err = new Error('Live trading is disabled on this server (PAPER_TRADING=true). No order was sent to the exchange.');
     err.status = 403;
     err.code = 'PAPER_TRADING_ENABLED';
+    err.orderNotSent = true;            // thrown before any request left this server: a definite "nothing placed"
     throw err;
   }
 
@@ -535,6 +537,7 @@ async function placeLiveOrder(exchangeId, creds, { symbol, side, type, quantity,
     const units = side === 'buy' ? String(quantity) : String(-quantity);
     const order = {
       type: type === 'limit' ? 'LIMIT' : 'MARKET',
+      ...(clientOrderId ? { clientExtensions: { id: clientOrderId } } : {}),   // lets the reconciler find the order if the reply is lost
       instrument: toOandaInstrument(symbol),
       units,
       ...(type === 'limit' ? { price: String(price) } : {}),
@@ -557,6 +560,7 @@ async function placeLiveOrder(exchangeId, creds, { symbol, side, type, quantity,
     const body = {
       symbol, side, type, qty: quantity,
       time_in_force: 'gtc',
+      ...(clientOrderId ? { client_order_id: clientOrderId } : {}),
       ...(type === 'limit' ? { limit_price: price } : {}),
     };
     if (stopLoss && takeProfit) {
@@ -575,15 +579,65 @@ async function placeLiveOrder(exchangeId, creds, { symbol, side, type, quantity,
   }
 
   const ex = getCcxtInstance(exchangeId, creds);
-  await ex.loadMarkets();
+  try { await ex.loadMarkets(); }
+  catch (err) { err.orderNotSent = true; throw err; }     // market data call: the order itself was never sent
   const pair = `${symbol.toUpperCase()}/USDT`;
-  const order = await ex.createOrder(pair, type, side, quantity, type === 'limit' ? price : undefined);
+  const order = await ex.createOrder(pair, type, side, quantity, type === 'limit' ? price : undefined,
+    clientOrderId ? { clientOrderId } : {});
   return {
     exchangeOrderId: String(order.id),
     status: order.status || 'open',
     raw: order,
     bracketUnsupported: !!(stopLoss || takeProfit),
   };
+}
+
+// ── Look an order up by the client id we generated (used by the reconciler for "unknown" orders) ─────
+// Returns { found:false } ONLY when the exchange answers "no such order". Any failure to ask (network,
+// auth, unsupported) THROWS, so the caller never mistakes "could not check" for "does not exist".
+async function fetchOrderByClientId(exchangeId, creds, { clientOrderId, symbol }) {
+  if (!clientOrderId) throw new Error('clientOrderId required');
+
+  if (exchangeId === 'oanda') {
+    try {
+      const { data } = await axios.get(
+        `${getOandaBaseUrl(creds.mode)}/v3/accounts/${creds.apiKey}/orders/@${encodeURIComponent(clientOrderId)}`,
+        { headers: { Authorization: `Bearer ${creds.apiSecret}` }, timeout: 8000 });
+      const o = data.order || {};
+      const state = String(o.state || '').toUpperCase();
+      return {
+        found: true,
+        exchangeOrderId: String(o.fillingTransactionID || o.id),
+        status: state === 'FILLED' ? 'filled' : state === 'CANCELLED' ? 'cancelled' : 'submitted',
+        raw: data,
+      };
+    } catch (err) {
+      if (err.response && err.response.status === 404) return { found: false };
+      throw err;
+    }
+  }
+
+  if (exchangeId === 'alpaca') {
+    try {
+      const { data } = await axios.get(`${getAlpacaBaseUrl(creds.mode)}/v2/orders:by_client_order_id`, {
+        headers: alpacaHeaders(creds), params: { client_order_id: clientOrderId }, timeout: 8000 });
+      return { found: true, exchangeOrderId: String(data.id), status: normalizeOrderStatus(data.status, data.filled_qty), raw: data };
+    } catch (err) {
+      if (err.response && err.response.status === 404) return { found: false };
+      throw err;
+    }
+  }
+
+  const ex = getCcxtInstance(exchangeId, creds);
+  await ex.loadMarkets();
+  const pair = `${String(symbol).toUpperCase()}/USDT`;
+  try {
+    const o = await ex.fetchOrder(undefined, pair, { clientOrderId });
+    return { found: true, exchangeOrderId: String(o.id), status: normalizeOrderStatus(o.status, o.filled), raw: o };
+  } catch (err) {
+    if (err instanceof ccxt.OrderNotFound) return { found: false };
+    throw err;                                            // NotSupported / ArgumentsRequired / network => cannot conclude
+  }
 }
 
 // ── DELETE /api/trading/orders/:orderId (mode live) ────────────
@@ -748,5 +802,5 @@ module.exports = {
   getOandaBaseUrl, getOandaPrice, alpacaHeaders, getAlpacaQuote,
   placeLiveOrder, cancelLiveOrder, fetchPortfolio, getAggregatedPortfolio, getBalance,
   openPaperTrade, closePaperTrade, getPaperTrades, getOpenBracketTrades,
-  fetchOrderFill, PAPER_START_CAPITAL,
+  fetchOrderFill, fetchOrderByClientId, PAPER_START_CAPITAL,
 };
