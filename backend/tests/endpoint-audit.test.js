@@ -166,12 +166,50 @@ test('deleteAccount: locked after 5 failures => 429 even with the right password
   assert.equal(sqlOf('DELETE FROM users').length, 0);
 });
 
-test('deleteAccount: right password still deletes', async () => {
+test('deleteAccount: 2FA on + password only => 400 2FA_CODE_REQUIRED, the account is kept', async () => {
+  const res = mkRes();
+  await settings.deleteAccount(mkReq({ body: { password: PW } }), res);
+  assert.equal(res.statusCode, 400); assert.equal(res.body.code, '2FA_CODE_REQUIRED');
+  assert.equal(sqlOf('DELETE FROM users').length, 0);
+  assert.equal(failuresLogged('account_delete_failed').length, 0, 'a missing code is not a failed guess');
+});
+
+test('deleteAccount: 2FA on + right password + wrong code => 401, failure recorded, account kept', async () => {
+  const res = mkRes();
+  await settings.deleteAccount(mkReq({ body: { password: PW, code: '000000' } }), res);
+  assert.equal(res.statusCode, 401);
+  assert.equal(failuresLogged('account_delete_failed').length, 1);
+  assert.equal(sqlOf('DELETE FROM users').length, 0);
+});
+
+test('deleteAccount: 2FA on + password + valid TOTP => deleted', async () => {
+  const res = mkRes();
+  await settings.deleteAccount(mkReq({ body: { password: PW, code: totp() } }), res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(sqlOf('DELETE FROM users').length, 1);
+  assert.equal(res.cleared, true);
+});
+
+test('deleteAccount: 2FA on + password + backup code => deleted', async () => {
+  const res = mkRes();
+  await settings.deleteAccount(mkReq({ body: { password: PW, code: BACKUP } }), res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(sqlOf('DELETE FROM users').length, 1);
+});
+
+test('deleteAccount: a valid code with the WRONG password never deletes', async () => {
+  const res = mkRes();
+  await settings.deleteAccount(mkReq({ body: { password: 'wrong-wrong', code: totp() } }), res);
+  assert.equal(res.statusCode, 401);
+  assert.equal(sqlOf('DELETE FROM users').length, 0);
+});
+
+test('deleteAccount: without 2FA the password is still enough', async () => {
+  setDb({ user: { twofa_enabled: false, twofa_secret: null, twofa_backup_codes: [] } });
   const res = mkRes();
   await settings.deleteAccount(mkReq({ body: { password: PW } }), res);
   assert.equal(res.statusCode, 200);
   assert.equal(sqlOf('DELETE FROM users').length, 1);
-  assert.equal(res.cleared, true);
 });
 
 // ── 4. scan-status ownership ────────────────────────────────
