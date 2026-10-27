@@ -1278,6 +1278,7 @@ function DangerZoneSection({ onToast }) {
   const [exporting, setExporting] = useState(false);
   const [confirmText, setConfirmText] = useState('');
   const [password, setPassword] = useState('');
+  const [code2fa, setCode2fa] = useState('');
   const [deleting, setDeleting] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
 
@@ -1305,7 +1306,7 @@ function DangerZoneSection({ onToast }) {
     if (!password) return onToast('Enter your password to confirm', false);
     setDeleting(true);
     try {
-      await api.delete('/settings/account', { data: { password } });
+      await api.delete('/settings/account', { data: { password, code: code2fa.trim() || undefined } });
       localStorage.clear();
       window.location.href = '/login';
     } catch (err) {
@@ -1360,6 +1361,9 @@ function DangerZoneSection({ onToast }) {
             <Field label="Confirm Your Password">
               <Input value={password} onChange={e => setPassword(e.target.value)} type="password" placeholder="••••••••" />
             </Field>
+            <Field label="2FA code or backup code (required if you enabled 2FA)">
+              <Input value={code2fa} onChange={e => setCode2fa(e.target.value)} type="text" placeholder="123456" />
+            </Field>
             <div style={{ display:'flex', gap:8 }}>
               <button onClick={deleteAccount} disabled={deleting} style={{
                 padding:'10px 24px', borderRadius:9, border:'1px solid rgba(248,113,113,0.4)',
@@ -1368,7 +1372,7 @@ function DangerZoneSection({ onToast }) {
               }}>
                 {deleting ? 'Deleting...' : 'Permanently Delete'}
               </button>
-              <button onClick={() => { setShowDelete(false); setConfirmText(''); setPassword(''); }} style={{
+              <button onClick={() => { setShowDelete(false); setConfirmText(''); setPassword(''); setCode2fa(''); }} style={{
                 padding:'10px 24px', borderRadius:9, border:'1px solid var(--border)',
                 background:'transparent', color:'var(--text-secondary)', fontSize:13,
                 fontFamily:'Syne,sans-serif', cursor:'pointer',

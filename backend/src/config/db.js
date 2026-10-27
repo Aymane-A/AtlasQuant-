@@ -585,6 +585,14 @@ async function migrate() {
     ALTER TABLE live_orders ADD COLUMN IF NOT EXISTS fill_final         BOOLEAN NOT NULL DEFAULT false;
     ALTER TABLE live_orders ADD COLUMN IF NOT EXISTS reconciled_at      TIMESTAMPTZ;
     ALTER TABLE live_orders ADD COLUMN IF NOT EXISTS reconcile_attempts INTEGER NOT NULL DEFAULT 0;
+
+    -- Order state machine: the order is recorded BEFORE it is sent (client_order_id travels to the exchange),
+    -- so a lost reply leaves a row we can look up instead of an order nobody knows about.
+    ALTER TABLE live_orders ADD COLUMN IF NOT EXISTS client_order_id VARCHAR(64);
+    ALTER TABLE live_orders ADD COLUMN IF NOT EXISTS status_note     TEXT;
+    ALTER TABLE live_orders ADD COLUMN IF NOT EXISTS unknown_since   TIMESTAMPTZ;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_live_orders_client_id ON live_orders(user_id, client_order_id) WHERE client_order_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_live_orders_unresolved ON live_orders(status, created_at) WHERE exchange_order_id IS NULL;
     CREATE INDEX IF NOT EXISTS idx_live_orders_pending
       ON live_orders(created_at) WHERE fill_final = false AND exchange_order_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_paper_trades_signal ON paper_trades(signal_id) WHERE signal_id IS NOT NULL;

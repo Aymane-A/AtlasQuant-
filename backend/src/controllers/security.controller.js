@@ -11,6 +11,7 @@ const { logAuditEvent } = require('../utils/auditLog');
 const { sendServerError } = require('../utils/httpError');
 const { encryptTotpSecret, decryptTotpSecret } = require('../utils/secretBox');
 const { isLocked, recordFailure, lockedResponse } = require('../utils/failLimit');
+const { verifySecondFactor } = require('../utils/secondFactor');
 
 // ═══════════════════════════════════════════════════════════
 // 2FA (TOTP)
@@ -111,19 +112,7 @@ async function disable2FA(req, res) {
     if (typeof code !== 'string' || !code.trim()) {
       return res.status(400).json({ success: false, code: '2FA_CODE_REQUIRED', error: 'Code 2FA ou code de secours requis' });
     }
-    const clean = code.replace(/\s/g, '');
-    let second = false;
-    let secret = null;
-    try { secret = user.twofa_secret ? decryptTotpSecret(user.twofa_secret) : null; } catch { secret = null; }
-    if (secret && /^\d{6}$/.test(clean)) {
-      second = speakeasy.totp.verify({ secret, encoding: 'base32', token: clean, window: 1 });
-    }
-    if (!second) {
-      const hash  = crypto.createHash('sha256').update(clean.toLowerCase()).digest('hex');
-      const codes = Array.isArray(user.twofa_backup_codes) ? user.twofa_backup_codes : [];
-      second = codes.includes(hash);
-    }
-    if (!second) {
+    if (!verifySecondFactor(user, code)) {
       await recordFailure(userId, '2fa_disable_failed', req);
       return res.status(401).json({ success: false, error: 'Code 2FA invalide' });
     }

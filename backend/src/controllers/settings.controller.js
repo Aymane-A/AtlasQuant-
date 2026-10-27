@@ -8,6 +8,7 @@ const db       = require('../config/db');
 const logger   = require('../utils/logger');
 const { logAuditEvent } = require('../utils/auditLog');
 const { isLocked, recordFailure, lockedResponse } = require('../utils/failLimit');
+const { verifySecondFactor } = require('../utils/secondFactor');
 const { sendServerError } = require('../utils/httpError');
 const { clearAuthCookie } = require('../utils/authCookie');
 
@@ -589,7 +590,7 @@ async function deleteAccount(req, res) {
 
     if (await isLocked(userId, 'account_delete_failed')) return lockedResponse(res);
 
-    const { rows } = await db.query('SELECT password, email FROM users WHERE id = $1', [userId]);
+    const { rows } = await db.query('SELECT password, email, twofa_enabled, twofa_secret, twofa_backup_codes FROM users WHERE id = $1', [userId]);
     if (!rows.length)
       return res.status(404).json({ success: false, error: 'Utilisateur introuvable' });
 
@@ -597,6 +598,18 @@ async function deleteAccount(req, res) {
     if (!isMatch) {
       await recordFailure(userId, 'account_delete_failed', req);
       return res.status(401).json({ success: false, error: 'Mot de passe incorrect' });
+    }
+
+    // With 2FA on, the password alone is not enough to destroy the account (a stolen session + password must not suffice).
+    if (rows[0].twofa_enabled) {
+      const code = req.body && req.body.code;
+      if (typeof code !== 'string' || !code.trim()) {
+        return res.status(400).json({ success: false, code: '2FA_CODE_REQUIRED', error: 'Code 2FA ou code de secours requis pour supprimer le compte' });
+      }
+      if (!verifySecondFactor(rows[0], code)) {
+        await recordFailure(userId, 'account_delete_failed', req);
+        return res.status(401).json({ success: false, error: 'Code 2FA invalide' });
+      }
     }
 
     await db.query('DELETE FROM users WHERE id = $1', [userId]);

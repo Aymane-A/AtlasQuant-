@@ -42,3 +42,8 @@ ai-service/__pycache__/
 ai-service/data/processed/*.csv
 # TLS material for the edge proxy
 docker/certs/
+
+# Database backups (never commit)
+backups/
+*.dump
+*.dump.sha256

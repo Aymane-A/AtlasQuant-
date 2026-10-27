@@ -5,8 +5,8 @@
   "scripts": {
     "start": "node src/app.js",
     "dev": "node --max-old-space-size=4096 node_modules/nodemon/bin/nodemon.js src/app.js",
-    "test": "node --test --test-force-exit tests/security.test.js tests/auth-cookie.test.js tests/paper-guard.test.js tests/audit-fixes.test.js tests/paper-close.test.js tests/audit-3.test.js tests/audit-4.test.js tests/idempotency.test.js tests/pg-integration.test.js tests/endpoint-audit.test.js tests/idor-pg.test.js tests/kill-switch-persist.test.js tests/kill-switch-pg.test.js",
-    "test:pg": "node --test --test-force-exit tests/pg-integration.test.js tests/idor-pg.test.js tests/kill-switch-pg.test.js"
+    "test": "node --test --test-force-exit tests/security.test.js tests/auth-cookie.test.js tests/paper-guard.test.js tests/audit-fixes.test.js tests/paper-close.test.js tests/audit-3.test.js tests/audit-4.test.js tests/idempotency.test.js tests/pg-integration.test.js tests/endpoint-audit.test.js tests/idor-pg.test.js tests/kill-switch-persist.test.js tests/kill-switch-pg.test.js tests/order-state.test.js tests/order-state-pg.test.js",
+    "test:pg": "node --test --test-force-exit tests/pg-integration.test.js tests/idor-pg.test.js tests/kill-switch-pg.test.js tests/order-state-pg.test.js"
   },
   "dependencies": {
     "archiver": "^8.0.0",
@@ -29,7 +29,7 @@
     "speakeasy": "^2.0.0",
     "winston": "^3.11.0",
     "ws": "^8.21.0",
-    "yahoo-finance2": "^3.15.3"
+    "yahoo-finance2": "3.14.3"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"

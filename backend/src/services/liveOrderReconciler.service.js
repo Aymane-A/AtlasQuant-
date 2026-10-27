@@ -16,7 +16,8 @@
  */
 const db     = require('../config/db');
 const logger = require('../utils/logger');
-const { getDecryptedCredentials, fetchOrderFill } = require('./exchanges.service');
+const exchangesSvc = require('./exchanges.service');
+const { getDecryptedCredentials, fetchOrderFill } = exchangesSvc;
 
 const MAX_ATTEMPTS = 20;
 const BATCH_LIMIT  = 100;
@@ -83,4 +84,86 @@ async function reconcileLiveOrders() {
   }
 }
 
-module.exports = { reconcileLiveOrders };
+// ─────────────────────────────────────────────────────────────
+// Orders that were recorded but never got an exchange id: "pending" (the process died between the INSERT
+// and the answer) or "unknown" (the answer was lost). We ask the exchange for the order by the client id
+// that travelled with it. We NEVER guess:
+//   found                          -> adopt the exchange id and state (the fill reconciler above takes over)
+//   not found, younger than GRACE  -> leave it: a delayed request could still land
+//   not found, older than GRACE    -> rejected ("never reached the exchange")
+//   could not ask (network/auth)   -> leave it, count the error, keep it visible as "unknown"
+// ─────────────────────────────────────────────────────────────
+const PENDING_TO_UNKNOWN_SEC = 60;                                   // a "pending" row this old lost its answer
+const NOT_FOUND_GRACE_MIN    = Number(process.env.ORDER_NOT_FOUND_GRACE_MIN) || 10;
+const ESCALATE_AFTER_MIN     = 60;                                   // still unknown after this long: needs a human
+let resolving = false;
+
+async function resolveUnresolvedOrders() {
+  if (resolving) return { skipped: true, checked: 0, resolved: 0, rejected: 0, errors: 0, stale: 0 };
+  resolving = true;
+  const summary = { checked: 0, resolved: 0, rejected: 0, errors: 0, stale: 0 };
+  try {
+    // 1) a "pending" row with no exchange id after 60 s is not pending any more: it is unknown
+    await db.query(
+      `UPDATE live_orders
+          SET status = 'unknown', unknown_since = COALESCE(unknown_since, NOW()),
+              status_note = COALESCE(status_note, 'no answer recorded (process stopped or reply lost)'), updated_at = NOW()
+        WHERE status = 'pending' AND exchange_order_id IS NULL AND client_order_id IS NOT NULL
+          AND created_at < NOW() - make_interval(secs => $1)`,
+      [PENDING_TO_UNKNOWN_SEC]);
+
+    // 2) ask the exchange about every unknown order
+    const { rows } = await db.query(
+      `SELECT id, user_id, exchange_id, symbol, client_order_id,
+              EXTRACT(EPOCH FROM (NOW() - created_at)) / 60 AS age_min
+         FROM live_orders
+        WHERE status = 'unknown' AND exchange_order_id IS NULL AND client_order_id IS NOT NULL
+        ORDER BY created_at ASC LIMIT $1`, [BATCH_LIMIT]);
+
+    for (const o of rows) {
+      summary.checked++;
+      try {
+        const creds = await getDecryptedCredentials(o.user_id, o.exchange_id);
+        if (!creds) throw new Error('exchange connection no longer available');
+        const r = await exchangesSvc.fetchOrderByClientId(o.exchange_id, creds, { clientOrderId: o.client_order_id, symbol: o.symbol });
+
+        if (r.found) {
+          await db.query(
+            `UPDATE live_orders
+                SET exchange_order_id = $1, status = $2, raw_response = COALESCE($3::jsonb, raw_response),
+                    status_note = 'resolved by reconciler (found on the exchange by client id)', updated_at = NOW()
+              WHERE id = $4`,
+            [r.exchangeOrderId, r.status, r.raw ? JSON.stringify(r.raw) : null, o.id]);
+          summary.resolved++;
+          logger.warn(`[liveReconciler] order #${o.id} was UNKNOWN: it exists on ${o.exchange_id} (${r.exchangeOrderId}, ${r.status})`);
+        } else if (Number(o.age_min) >= NOT_FOUND_GRACE_MIN) {
+          await db.query(
+            `UPDATE live_orders SET status = 'rejected',
+                    status_note = $1, updated_at = NOW()
+              WHERE id = $2 AND status = 'unknown'`,
+            [`not found on the exchange ${NOT_FOUND_GRACE_MIN}+ min after sending: it never reached it`, o.id]);
+          summary.rejected++;
+          logger.warn(`[liveReconciler] order #${o.id} was UNKNOWN: not on ${o.exchange_id} after ${Math.round(o.age_min)} min => rejected`);
+        }
+      } catch (err) {
+        summary.errors++;
+        logger.error(`[liveReconciler] cannot resolve order #${o.id} (${o.exchange_id}): ${err.message}`);
+      }
+      await sleep(150);
+    }
+
+    // 3) anything that stays unknown for too long needs a human: shout
+    const { rows: stale } = await db.query(
+      `SELECT COUNT(*)::int AS n FROM live_orders
+        WHERE status = 'unknown' AND unknown_since < NOW() - make_interval(mins => $1)`, [ESCALATE_AFTER_MIN]);
+    summary.stale = stale[0] ? stale[0].n : 0;
+    if (summary.stale > 0) {
+      logger.error(`[liveReconciler] ${summary.stale} live order(s) UNKNOWN for more than ${ESCALATE_AFTER_MIN} min: check the exchange manually`);
+    }
+  } finally {
+    resolving = false;
+  }
+  return summary;
+}
+
+module.exports = { reconcileLiveOrders, resolveUnresolvedOrders };

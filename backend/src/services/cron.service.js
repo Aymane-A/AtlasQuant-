@@ -7,7 +7,7 @@ const { takePortfolioSnapshot }     = require('./portfolioSnapshot.service');
 const paperTradeMonitor             = require('./paperTradeMonitor.service');
 const autoTrader                    = require('./autoTrader.service');
 const { resolveOpenSignals }        = require('./outcomeResolver.service');
-const { reconcileLiveOrders }       = require('./liveOrderReconciler.service');
+const { reconcileLiveOrders, resolveUnresolvedOrders } = require('./liveOrderReconciler.service');
 const db                            = require('../config/db');
 const logger                        = require('../utils/logger');
 const { healthCheckAllConnections } = require('./exchanges.service');
@@ -161,6 +161,18 @@ const initCronJobs = () => {
   // ── Réconciliation des ordres LIVE (lecture seule) ─────
   // Récupère auprès de l'exchange la quantité exécutée / prix moyen / frais,
   // pour que "Mon P&L" puisse calculer un P&L live réel. Aucun ordre créé.
+  // Orders whose answer was lost (status "unknown"): look them up by client id, every minute
+  cron.schedule('* * * * *', async () => {
+    try {
+      const r = await resolveUnresolvedOrders();
+      if (r.resolved || r.rejected || r.errors) {
+        logger.info(`[cron] Unknown orders: ${r.resolved} retrouvé(s), ${r.rejected} rejeté(s), ${r.errors} erreur(s) sur ${r.checked}`);
+      }
+    } catch (err) {
+      logger.error(`[cron] Unknown orders error: ${err.message}`);
+    }
+  });
+
   cron.schedule('*/15 * * * *', async () => {
     try {
       const r = await reconcileLiveOrders();
