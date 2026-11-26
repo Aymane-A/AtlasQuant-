@@ -1,0 +1,70 @@
+name: anomaly-shadow
+
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: anomaly-shadow
+  cancel-in-progress: false
+
+jobs:
+  shadow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      OPENBLAS_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: ai-service/anomaly_ops/requirements.txt
+
+      - run: pip install -r ai-service/anomaly_ops/requirements.txt
+
+      - name: Score the latest closed candle
+        working-directory: ai-service
+        run: |
+          python -B anomaly_ops/fetch_candles.py "$RUNNER_TEMP/candles.csv"
+          python -B -m src.anomaly_detection shadow --detector anomaly_ops/detector --data "$RUNNER_TEMP/candles.csv" --run shadow_actions_v1
+
+      - name: Publish the report to the log branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          branch=anomaly-shadow-log
+          report=$(ls ai-service/anomaly_detection_artifacts/shadow_actions_v1/reports/*.json)
+          name=$(basename "$report")
+          log="$RUNNER_TEMP/log"
+          url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          found=0
+          git ls-remote --exit-code --heads "$url" "$branch" >/dev/null || found=$?
+          if [ "$found" -eq 0 ]; then
+            git clone -q --depth 1 --branch "$branch" "$url" "$log"
+          elif [ "$found" -eq 2 ]; then
+            git init -q "$log"
+            git -C "$log" checkout -q --orphan "$branch"
+            git -C "$log" remote add origin "$url"
+          else
+            echo "Cannot read the remote repository"
+            exit 1
+          fi
+          mkdir -p "$log/reports"
+          if [ -e "$log/reports/$name" ]; then
+            echo "Already recorded: $name"
+            exit 0
+          fi
+          cp "$report" "$log/reports/$name"
+          cat "$report"
+          git -C "$log" add "reports/$name"
+          git -C "$log" -c user.name=anomaly-shadow-bot -c user.email=anomaly-shadow-bot@users.noreply.github.com commit -q -m "anomaly shadow $name"
+          git -C "$log" push -q origin "$branch"
