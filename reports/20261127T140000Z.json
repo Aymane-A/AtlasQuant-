@@ -1,0 +1,24 @@
+{
+  "timestamp": "2026-11-27T14:00:00+00:00",
+  "severity": "Elevated",
+  "status": "ok",
+  "robust_score": 11.248622464933279,
+  "robust_severity": "Elevated",
+  "iforest_score": 0.7151438358023811,
+  "iforest_severity": "Elevated",
+  "top_features": [
+    {
+      "feature": "ret",
+      "robust_z": -11.248622464933279
+    },
+    {
+      "feature": "range",
+      "robust_z": 9.09633678723526
+    }
+  ],
+  "interpretation": "Anomaly score relative to recent history; not a crash probability, forecast, or trading signal",
+  "recorded_at": "2026-11-27T15:24:03.922096+00:00",
+  "lag_hours": 0.4010894711111111,
+  "trained_through": "2026-09-30 23:00:00+00:00",
+  "in_sample": false
+}
