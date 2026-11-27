@@ -64,7 +64,7 @@ matplotlib-inline==0.2.2
 mistune==3.3.4
 narwhals==2.27.1
 nbclient==0.11.0
-nbconvert==7.17.1
+nbconvert==7.17.2
 nbformat==5.11.1
 nest-asyncio2==1.7.4
 notebook==7.6.3
@@ -109,7 +109,7 @@ starlette==1.7.0
 terminado==0.18.1
 threadpoolctl==3.7.0
 tinycss2==1.5.1
-tornado==6.5.10
+tornado==6.6
 traitlets==5.16.1
 typing-inspection==0.4.4
 typing_extensions==4.16.0
