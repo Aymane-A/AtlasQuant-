@@ -1,0 +1,24 @@
+{
+  "timestamp": "2026-11-28T08:00:00+00:00",
+  "severity": "Normal",
+  "status": "ok",
+  "robust_score": 1.24064284870362,
+  "robust_severity": "Normal",
+  "iforest_score": 0.49557183193192594,
+  "iforest_severity": "Normal",
+  "top_features": [
+    {
+      "feature": "ret",
+      "robust_z": -1.24064284870362
+    },
+    {
+      "feature": "rv",
+      "robust_z": 1.2262396387221342
+    }
+  ],
+  "interpretation": "Anomaly score relative to recent history; not a crash probability, forecast, or trading signal",
+  "recorded_at": "2026-11-28T09:24:06.517260+00:00",
+  "lag_hours": 0.40181035,
+  "trained_through": "2026-09-30 23:00:00+00:00",
+  "in_sample": false
+}
